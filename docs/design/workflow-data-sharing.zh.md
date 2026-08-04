@@ -1,6 +1,7 @@
 # Workflow Data Sharing
 
-本文描述 v0.x 的目标设计，当前尚未实现。
+本文描述 v0.x 设计。API prerequisite 已部分实现；binding、workspace admission 和
+Workflow composition 仍是独立的 implementation slices。
 
 RuntimePodLocal binding fencing 修订：**Proposed，等待 review**
 
@@ -26,7 +27,7 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 
 - job 之间的 first-class artifact inputs；
 - `RuntimePodLocal` workspace binding、UID fencing 或 workspace lifecycle operations；
-- scheduler 对 Run affinity/anti-affinity 的 enforcement；
+- scheduler 对 referenced Run 到其 bound workspace Pod 的 workspace-aware fencing；
 - runtimed 对 referenced workspaces 的 preparation 和 cleanup；
 - 将 child Run artifact references 显式提升到 Workflow status；
 - shared job-local workspace 的 cleanup 和权限边界。
@@ -339,8 +340,13 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    Runs Pending。
 7. review bound-Pod UID fencing 修订后，增加 `status.boundPodUID`，再将 `RuntimePodLocal`
    PersistentWorkspaces 绑定到 ready Runtime Pods，并记录 lifecycle status，不修改 runtime filesystems。
-8. 更新 runtimed workspace preparation 和 cleanup，使其支持 referenced workspaces。
-9. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
-10. 将 child Run artifact refs 提升到 Workflow status。
-11. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
+8. 增加通用 `Workspace` scheduler Filter plugin。它解析 referenced workspace、拒绝 Runtime
+   不匹配的 candidates；对于 Bound RuntimePodLocal workspace，只允许 fenced
+   `status.boundPod` 和 `status.boundPodUID`。Pending 或 Lost workspace 没有 eligible
+   candidates，因此对应 Run 保持 Pending 并显示清晰的 scheduling message。
+9. 更新 runtimed workspace preparation 和 cleanup，使其支持 referenced workspaces。
+10. 在 Workflow controller 中组合 job-local workspaces。
+11. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
+12. 将 child Run artifact refs 提升到 Workflow status。
+13. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。

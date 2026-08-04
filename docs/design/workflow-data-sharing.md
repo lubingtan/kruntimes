@@ -1,6 +1,8 @@
 # Workflow Data Sharing
 
-This document describes a target v0.x design. It is not implemented yet.
+This document describes the v0.x design. Its API prerequisites are partially
+implemented; binding, workspace admission, and Workflow composition remain
+separate implementation slices.
 
 RuntimePodLocal binding fencing amendment: **Proposed for review**
 
@@ -30,7 +32,7 @@ It does not yet provide:
 - first-class artifact inputs between jobs;
 - `RuntimePodLocal` workspace binding, UID fencing, or workspace lifecycle
   operations;
-- scheduler enforcement of Run affinity/anti-affinity;
+- workspace-aware scheduling that fences a Run to its bound workspace Pod;
 - runtimed preparation and cleanup of referenced workspaces;
 - explicit promotion of child Run artifact references into Workflow status;
 - cleanup and permission boundaries for shared job-local workspaces.
@@ -372,10 +374,16 @@ Required safeguards:
    `status.boundPodUID`, then bind `RuntimePodLocal` PersistentWorkspaces to
    ready Runtime Pods and record their lifecycle status without touching runtime
    filesystems.
-8. Update runtimed workspace preparation and cleanup for referenced
+8. Add a generic `Workspace` scheduler Filter plugin. It resolves a referenced
+   workspace, rejects candidates whose Runtime does not match, and for a Bound
+   RuntimePodLocal workspace admits only the fenced `status.boundPod` and
+   `status.boundPodUID`. A Pending or Lost workspace has no eligible candidates,
+   so its Run remains Pending with a clear scheduling message.
+9. Update runtimed workspace preparation and cleanup for referenced
    workspaces.
-9. Add Workflow step artifact input fields and job-scoped artifact status.
-10. Promote child Run artifact refs into Workflow status.
-11. Add E2E coverage for Runtime workspace volume sources, job-local workspace
-   sharing, job-to-job artifact
-   passing, Runtime Pod loss, cleanup, and permission boundaries.
+10. Compose job-local workspaces in the Workflow controller.
+11. Add Workflow step artifact input fields and job-scoped artifact status.
+12. Promote child Run artifact refs into Workflow status.
+13. Add E2E coverage for Runtime workspace volume sources, job-local workspace
+   sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
+   permission boundaries.

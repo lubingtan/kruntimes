@@ -227,11 +227,25 @@ controller wiring 累积不必要的冲突。
     ready-Pod selection、planned path ownership，以及 bound-Pod deletion 后 sticky `Lost` status：
     - [ ] review `status.boundPodUID` fencing 修订，避免同名 Pod 重建时静默替换
       RuntimePodLocal workspace；
-    - [ ] 增加该 status field、重新生成 CRD，然后实现 metadata-only binding 与 Lost-state handling；
-  - 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent workspace，
-    但不感知 Workflow 语义；
-  - 将 child Run artifact refs 提升到 Workflow status，并增加显式 step artifact inputs；
-  - 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
+    - [ ] 增加该 status field 并重新生成 CRD；
+    - [ ] 实现 metadata-only binding：选择按名称排序后第一个 ready Runtime Pod，并增加
+      Runtime 和 Pod watches；
+    - [ ] Pod 仅暂时 unavailable 时保留原 binding；当 Pod 名称消失或 UID 改变时，永久转为
+      `Lost`；
+    - [ ] 增加 focused controller 和 API validation coverage。
+  - [ ] 在不引入 Workflow 概念的前提下增加通用 `Workspace` scheduler Filter plugin：要求
+    `Run.spec.workspace` 匹配其 Runtime 和 Bound RuntimePodLocal workspace，并仅保留其
+    fenced bound Pod 作为 candidate；unresolved 或 Lost workspace 保持 Pending 并给出清晰信息。
+  - [ ] 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent
+    workspace 但不感知 Workflow 语义：只创建 bound workspace directory、保留其内容，并只
+    清理 Run-local temporary state。
+  - [ ] 在 Workflow controller 中组合这些 generic primitives：创建并 owner job-local
+    PersistentWorkspace、为每个 child Run 添加 workspace reference 和 bound-Pod placement，并在
+    不向 Workflow API 暴露 workspace controls 的情况下呈现 workspace loss。
+  - [ ] 增加显式 step artifact inputs 和 job-scoped artifact references：将
+    `jobs.<job>.artifacts.<name>` stage 到 downstream child Runs，并把 compact child Run
+    artifact refs 提升到 Workflow status。
+  - [ ] 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
     job-to-job artifact passing、Runtime Pod loss、cleanup 和权限边界。
 - [x] Workflow reuse model：在 Workflow API 稳定前拆分执行实例和可复用定义。目标模型：
   - 将当前表示 execution instance 的 `Workflow` API 替换为 `WorkflowRun`；

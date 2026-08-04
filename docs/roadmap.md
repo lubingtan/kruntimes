@@ -266,15 +266,32 @@ wiring from accumulating avoidable conflicts.
     and sticky `Lost` status after bound-Pod deletion:
     - [ ] review the `status.boundPodUID` fencing amendment so same-name Pod
       recreation cannot silently replace a RuntimePodLocal workspace;
-    - [ ] add the status field, regenerate CRDs, then implement metadata-only
-      binding and Lost-state handling;
-  - update runtimed workspace preparation and cleanup to support referenced
-    persistent workspaces without knowing Workflow semantics;
-  - promote child Run artifact refs into Workflow status and add explicit step
-    artifact inputs;
-  - add E2E coverage for Runtime workspace volume sources, job-local workspace
-    sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
-    permission boundaries.
+    - [ ] add the status field and regenerate CRDs;
+    - [ ] implement metadata-only binding to the lexicographically first ready
+      Runtime Pod, with Runtime and Pod watches;
+    - [ ] retain the original binding while the Pod is merely unavailable, and
+      transition permanently to `Lost` when the name disappears or its UID
+      changes;
+    - [ ] add focused controller and API validation coverage.
+  - [ ] add a generic `Workspace` scheduler Filter plugin without introducing
+    Workflow concepts: require `Run.spec.workspace` to match its Runtime and a
+    Bound RuntimePodLocal workspace, and filter candidates to its fenced bound
+    Pod while keeping unresolved or Lost workspaces Pending with a clear
+    message.
+  - [ ] update runtimed workspace preparation and cleanup to support referenced
+    persistent workspaces without knowing Workflow semantics; create only the
+    bound workspace directory, preserve its contents, and clean only Run-local
+    temporary state.
+  - [ ] compose the generic primitives in the Workflow controller: create and
+    own a job-local PersistentWorkspace, add the workspace reference and
+    bound-Pod placement to each child Run, and surface workspace loss without
+    exposing workspace controls in Workflow APIs.
+  - [ ] add explicit step artifact inputs and job-scoped artifact references;
+    stage `jobs.<job>.artifacts.<name>` into downstream child Runs and promote
+    compact child Run artifact refs into Workflow status.
+  - [ ] add E2E coverage for Runtime workspace volume sources, job-local
+    workspace sharing, job-to-job artifact passing, Runtime Pod loss, cleanup,
+    and permission boundaries.
 - [x] Workflow reuse model: split execution instances from reusable
   definitions before Workflow APIs stabilize. Target model:
   - replace the current execution-instance `Workflow` API with `WorkflowRun`;
