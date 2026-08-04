@@ -3,7 +3,7 @@
 本文描述 v0.x 设计。API prerequisite 已部分实现；binding、workspace admission 和
 Workflow composition 仍是独立的 implementation slices。
 
-RuntimePodLocal binding fencing 修订：**Proposed，等待 review**
+RuntimePodLocal binding fencing 修订：**metadata-only binding 已实现**
 
 目标是定义 Workflow jobs 和 Runs 如何共享数据，同时不让 scheduler 或 runtimed 理解
 Workflow-specific 语义。这个设计由 v0.x workflow demo 目标驱动：job-to-job 数据应通过
@@ -139,8 +139,9 @@ binding controller 在 v0.x 中应遵循以下规则：
 
 1. 未绑定 workspace 在其引用的 Runtime 没有 ready Runtime Pods 时保持等待。无论等待或已经绑定，
    它都不会消耗或预留 Run capacity。
-2. 有候选 Pod 时，controller 先按 `metadata.name` 对 ready Runtime Pod 排序，再选择名称字典序最小的
-   Pod。在稳定 Pod 集合下该选择是 deterministic 的；后续调度工作使用 `status.boundPod` 和
+2. 有候选 Pod 时，controller 先按 `metadata.name` 对 ready Runtime Pod 排序，再根据
+   PersistentWorkspace UID 的稳定哈希选择一个 Pod。这样可将首次绑定分散到多个 ready Pod，且在
+   候选集合不变时保持 deterministic；后续调度工作使用 `status.boundPod` 和
    `status.boundPodUID`，而不是试图重复这个选择。
 3. controller 记录 `status.phase: Bound`、`status.runtime`、`status.boundPod`，以及计划使用的本地
    immutable 的 `status.boundPodUID`，以及计划使用的本地

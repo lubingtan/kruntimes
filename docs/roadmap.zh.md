@@ -223,16 +223,16 @@ controller wiring 累积不必要的冲突。
   - [x] 为 Run 增加 workspace reference 和 Kubernetes-style Run affinity 字段；
   - [x] 通过经过 review 的 [scheduler framework](design/scheduler-framework.md) 实现
     required/preferred Run affinity，同时在无 capacity 时继续保持 Run Pending；
-  - [ ] review 并定义 `RuntimePodLocal` binding semantics：不预留 capacity 的 deterministic
+  - [x] review 并定义 `RuntimePodLocal` binding semantics：不预留 capacity 的 deterministic
     ready-Pod selection、planned path ownership，以及 bound-Pod deletion 后 sticky `Lost` status：
-    - [ ] review `status.boundPodUID` fencing 修订，避免同名 Pod 重建时静默替换
+    - [x] review `status.boundPodUID` fencing 修订，避免同名 Pod 重建时静默替换
       RuntimePodLocal workspace；
-    - [ ] 增加该 status field 并重新生成 CRD；
-    - [ ] 实现 metadata-only binding：选择按名称排序后第一个 ready Runtime Pod，并增加
+    - [x] 增加该 status field 并重新生成 CRD；
+    - [x] 实现 metadata-only binding：通过稳定 UID 哈希将绑定分散到 ready Runtime Pods，并增加
       Runtime 和 Pod watches；
-    - [ ] Pod 仅暂时 unavailable 时保留原 binding；当 Pod 名称消失或 UID 改变时，永久转为
+    - [x] Pod 仅暂时 unavailable 时保留原 binding；当 Pod 名称消失或 UID 改变时，永久转为
       `Lost`；
-    - [ ] 增加 focused controller 和 API validation coverage。
+    - [x] 增加 focused controller 和 API validation coverage。
   - [ ] 在不引入 Workflow 概念的前提下增加通用 `Workspace` scheduler Filter plugin：要求
     `Run.spec.workspace` 匹配其 Runtime 和 Bound RuntimePodLocal workspace，并仅保留其
     fenced bound Pod 作为 candidate；unresolved 或 Lost workspace 保持 Pending 并给出清晰信息。

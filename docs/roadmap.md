@@ -261,18 +261,18 @@ wiring from accumulating avoidable conflicts.
   - [x] implement required/preferred Run affinity through the reviewed
     [scheduler framework](design/scheduler-framework.md), while keeping
     no-capacity Runs Pending;
-  - [ ] review and define `RuntimePodLocal` binding semantics: deterministic
+  - [x] review and define `RuntimePodLocal` binding semantics: deterministic
     ready-Pod selection without capacity reservation, planned path ownership,
     and sticky `Lost` status after bound-Pod deletion:
-    - [ ] review the `status.boundPodUID` fencing amendment so same-name Pod
+    - [x] review the `status.boundPodUID` fencing amendment so same-name Pod
       recreation cannot silently replace a RuntimePodLocal workspace;
-    - [ ] add the status field and regenerate CRDs;
-    - [ ] implement metadata-only binding to the lexicographically first ready
-      Runtime Pod, with Runtime and Pod watches;
-    - [ ] retain the original binding while the Pod is merely unavailable, and
+    - [x] add the status field and regenerate CRDs;
+    - [x] implement metadata-only binding with stable UID-hash distribution
+      across ready Runtime Pods, with Runtime and Pod watches;
+    - [x] retain the original binding while the Pod is merely unavailable, and
       transition permanently to `Lost` when the name disappears or its UID
       changes;
-    - [ ] add focused controller and API validation coverage.
+    - [x] add focused controller and API validation coverage.
   - [ ] add a generic `Workspace` scheduler Filter plugin without introducing
     Workflow concepts: require `Run.spec.workspace` to match its Runtime and a
     Bound RuntimePodLocal workspace, and filter candidates to its fenced bound

@@ -73,12 +73,16 @@ type PersistentWorkspaceStatus struct {
 	Runtime string `json:"runtime,omitempty"`
 
 	// BoundPod is the Runtime Pod currently backing this workspace.
-	// It remains empty until workspace binding is implemented.
 	// +optional
 	BoundPod string `json:"boundPod,omitempty"`
 
+	// BoundPodUID fences BoundPod so a Pod recreated with the same name cannot
+	// silently replace a RuntimePodLocal workspace.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	BoundPodUID string `json:"boundPodUID,omitempty"`
+
 	// Path is the runtime-local workspace path.
-	// It remains empty until workspace binding is implemented.
 	// +optional
 	Path string `json:"path,omitempty"`
 

@@ -91,9 +91,13 @@ spec:
             description: PersistentWorkspaceStatus defines the observed state of PersistentWorkspace.
             properties:
               boundPod:
+                description: BoundPod is the Runtime Pod currently backing this workspace.
+                type: string
+              boundPodUID:
                 description: |-
-                  BoundPod is the Runtime Pod currently backing this workspace.
-                  It remains empty until workspace binding is implemented.
+                  BoundPodUID fences BoundPod so a Pod recreated with the same name cannot
+                  silently replace a RuntimePodLocal workspace.
+                maxLength: 253
                 type: string
               conditions:
                 description: Conditions represent the current state of the workspace
@@ -162,9 +166,7 @@ spec:
                 format: date-time
                 type: string
               path:
-                description: |-
-                  Path is the runtime-local workspace path.
-                  It remains empty until workspace binding is implemented.
+                description: Path is the runtime-local workspace path.
                 type: string
               phase:
                 default: Pending

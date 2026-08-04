@@ -4,7 +4,7 @@ This document describes the v0.x design. Its API prerequisites are partially
 implemented; binding, workspace admission, and Workflow composition remain
 separate implementation slices.
 
-RuntimePodLocal binding fencing amendment: **Proposed for review**
+RuntimePodLocal binding fencing amendment: **Implemented for metadata-only binding**
 
 The goal is to define how Workflow jobs and Runs share data without making
 scheduler or runtimed understand Workflow-specific semantics. The design is
@@ -156,8 +156,9 @@ The binding controller should use the following v0.x rules:
    Pods. It does not consume or reserve Run capacity while waiting or after it
    is bound.
 2. When candidates exist, the controller sorts ready Runtime Pods by
-   `metadata.name` and selects the lexicographically first Pod. The choice is
-   deterministic for a stable Pod set; later scheduling work uses
+   `metadata.name` and selects one using a stable hash of the
+   PersistentWorkspace UID. This spreads first bindings across ready Pods while
+   keeping retries stable for the same candidate set; later scheduling work uses
    `status.boundPod` and `status.boundPodUID` rather than trying to repeat this
    selection.
 3. The controller records `status.phase: Bound`, `status.runtime`,

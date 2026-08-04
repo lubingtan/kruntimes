@@ -1786,6 +1786,54 @@ func TestSchedulerKeepsRunPendingWithoutRuntimePod(t *testing.T) {
 	}
 }
 
+func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
+	nameSuffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runtimeName := "workspace-binding-" + nameSuffix
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-" + nameSuffix, Namespace: testNamespace},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: runtimeName},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workspace) })
+
+	waitForPersistentWorkspacePhase(t, workspace, 45*time.Second, v1alpha1.PersistentWorkspaceBound)
+	if workspace.Status.BoundPod == "" || workspace.Status.BoundPodUID == "" || workspace.Status.Path == "" {
+		t.Fatalf("bound workspace status = %#v, want fenced Pod and path", workspace.Status)
+	}
+	boundPod := workspace.Status.BoundPod
+	if err := coreClientset.CoreV1().Pods(testNamespace).Delete(context.Background(), boundPod, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete bound Runtime Pod %s: %v", boundPod, err)
+	}
+
+	waitForPersistentWorkspacePhase(t, workspace, 60*time.Second, v1alpha1.PersistentWorkspaceLost)
+	if workspace.Status.BoundPod != boundPod {
+		t.Fatalf("lost workspace boundPod = %q, want original %q", workspace.Status.BoundPod, boundPod)
+	}
+}
+
+func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration, phase v1alpha1.PersistentWorkspacePhase) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), workspace); err != nil {
+			t.Fatalf("get PersistentWorkspace while waiting for %s: %v", phase, err)
+		}
+		if workspace.Status.Phase == phase {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("PersistentWorkspace = %#v, want phase %s", workspace.Status, phase)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 func TestSchedulerReactivatesPendingRunWhenRuntimePodBecomesReady(t *testing.T) {
 	runtimeName := fmt.Sprintf("scheduler-wakeup-%d", time.Now().UnixNano())
 	run := &v1alpha1.Run{

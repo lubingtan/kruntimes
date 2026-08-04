@@ -1443,6 +1443,37 @@ func TestCRDValidationRejectsUnsupportedFunctionEndpointProtocol(t *testing.T) {
 	}
 }
 
+func TestCRDValidationAllowsPersistentWorkspaceBindingStatus(t *testing.T) {
+	ctx := context.Background()
+	ns := testNamespace(t, "test-persistent-workspace-binding-status-")
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "bound-workspace", Namespace: ns.Name},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(ctx, workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	workspace.Status = v1alpha1.PersistentWorkspaceStatus{
+		Phase:       v1alpha1.PersistentWorkspaceBound,
+		Runtime:     "bash",
+		BoundPod:    "runtime-bash-abcde",
+		BoundPodUID: "2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6",
+		Path:        "/workspace/persistent/bound-workspace",
+	}
+	if err := k8sClient.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("update PersistentWorkspace status: %v", err)
+	}
+
+	var got v1alpha1.PersistentWorkspace
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(workspace), &got); err != nil {
+		t.Fatalf("get PersistentWorkspace: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.PersistentWorkspaceBound || got.Status.BoundPodUID != workspace.Status.BoundPodUID {
+		t.Fatalf("PersistentWorkspace status = %#v, want Bound status with fenced Pod UID", got.Status)
+	}
+}
+
 func TestCRDValidationRejectsInvalidPersistentWorkspaceMode(t *testing.T) {
 	ctx := context.Background()
 	ns := testNamespace(t, "test-persistent-workspace-mode-validation-")
