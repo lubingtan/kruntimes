@@ -1,9 +1,9 @@
 # Workflow Data Sharing
 
-本文描述 v0.x 设计。API prerequisite 已部分实现；binding、workspace admission 和
-Workflow composition 仍是独立的 implementation slices。
+本文描述 v0.x 设计。API prerequisite、RuntimePodLocal binding 和 scheduler admission 已实现；
+runtimed preparation 与 Workflow composition 仍是独立的 implementation slices。
 
-RuntimePodLocal binding fencing 修订：**metadata-only binding 已实现**
+RuntimePodLocal binding 和 scheduler fencing：**已实现**
 
 目标是定义 Workflow jobs 和 Runs 如何共享数据，同时不让 scheduler 或 runtimed 理解
 Workflow-specific 语义。这个设计由 v0.x workflow demo 目标驱动：job-to-job 数据应通过
@@ -20,14 +20,13 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 - 来自 `KRUNTIME_OUTPUTS` 的有界 step outputs；
 - 用于小字符串 outputs 的 cross-step 和 cross-job expression references。
 - 使用 inline Kubernetes `VolumeSource` 和 `emptyDir` 默认值的 `Runtime.spec.workspace`；
-- `PersistentWorkspace` API types、CRD validation、status 和 controller skeleton；
+- `PersistentWorkspace` API types、CRD validation、status，以及带 UID fencing 的 binding lifecycle；
 - 通用 Run workspace references 和 Kubernetes-style Run affinity fields。
+- workspace-aware scheduler filtering，以及 workspace 变更触发的 Pending Run wakeup。
 
 当前尚不支持：
 
 - job 之间的 first-class artifact inputs；
-- `RuntimePodLocal` workspace binding、UID fencing 或 workspace lifecycle operations；
-- scheduler 对 referenced Run 到其 bound workspace Pod 的 workspace-aware fencing；
 - runtimed 对 referenced workspaces 的 preparation 和 cleanup；
 - 将 child Run artifact references 显式提升到 Workflow status；
 - shared job-local workspace 的 cleanup 和权限边界。
@@ -298,7 +297,7 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 | --- | --- |
 | Workflow controller | 解释 job/step 语义，基于 controller defaults 创建 job-local workspaces，创建 child Runs，连接 artifact inputs，并把 outputs/artifact refs 提升到 Workflow status。 |
 | PersistentWorkspace controller | 拥有 workspace lifecycle、绑定到 Runtime workspace volumes、status、TTL 和 cleanup。 |
-| Scheduler | 应用通用 Runtime capacity 和 Run affinity/anti-affinity。不理解 Workflows。 |
+| Scheduler | Snapshot 通用 Run、Runtime Pod 和 referenced workspace state；应用 workspace fencing、Runtime capacity 和 Run affinity/anti-affinity。不理解 Workflows。 |
 | runtimed | 准备被引用的 workspace paths，stage artifact inputs，collect artifact outputs，并清理 per-Run temporary state。不理解 Workflows。 |
 | ArtifactStore | 将 durable artifacts 存储在 etcd 之外。 |
 
@@ -306,8 +305,9 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 
 - 如果 Runtime Pod 消失，由该 Pod workspace volume 支撑的 `RuntimePodLocal` workspaces 变为
   `Lost`；它们不会自动 rebind 到另一个 Pod。
-- 需要不可用 workspace 的 Runs 应保持 Pending，或根据 retry policy/controller decision 以清晰
-  workspace condition 失败。
+- 引用 missing、Pending、Lost、Runtime-incompatible 或 UID-mismatched workspace Pod 的 Runs 必须保持
+  Pending 并显示明确 message。workspace changes 会重新入队匹配的 Pending Runs；上述状态都不是 scheduler
+  terminal failure。
 - Workflow controller 应通过 Workflow conditions 或 messages 暴露 workspace-related
   failures，但不在 Workflow spec 中暴露 workspace controls。
 - Workspace cleanup 不应依赖 Runtime Pod 仍然存在。
@@ -341,10 +341,11 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    Runs Pending。
 7. review bound-Pod UID fencing 修订后，增加 `status.boundPodUID`，再将 `RuntimePodLocal`
    PersistentWorkspaces 绑定到 ready Runtime Pods，并记录 lifecycle status，不修改 runtime filesystems。
-8. 增加通用 `Workspace` scheduler Filter plugin。它解析 referenced workspace、拒绝 Runtime
-   不匹配的 candidates；对于 Bound RuntimePodLocal workspace，只允许 fenced
-   `status.boundPod` 和 `status.boundPodUID`。Pending 或 Lost workspace 没有 eligible
-   candidates，因此对应 Run 保持 Pending 并显示清晰的 scheduling message。
+8. 增加通用 `Workspace` scheduler Filter plugin。**已实现：** scheduling snapshot 只解析一次
+   referenced workspace；filter 拒绝 Runtime 不匹配的 candidates；对于 Bound RuntimePodLocal workspace，
+   只允许 fenced `status.boundPod` 和 `status.boundPodUID`。Pending 或 Lost workspace 没有 eligible
+   candidates，因此对应 Run 保持 Pending 并显示清晰的 scheduling message；workspace changes 会重新入队
+   对应的 Pending Run。
 9. 更新 runtimed workspace preparation 和 cleanup，使其支持 referenced workspaces。
 10. 在 Workflow controller 中组合 job-local workspaces。
 11. 增加 Workflow step artifact input fields 和 job-scoped artifact status。

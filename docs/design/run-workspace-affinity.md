@@ -204,8 +204,9 @@ queue with separate PreFilter, Filter, Score, Reserve/Assume, and Bind stages
 rather than independently deciding placement in each Run reconcile.
 
 The scheduler remains Workflow-agnostic. It neither creates workspaces nor
-interprets job or step labels. It evaluates generic Run labels and the declared
-affinity terms only.
+interprets job or step labels. It snapshots generic Run, Runtime Pod, and
+referenced workspace state, then evaluates workspace fencing and the declared
+affinity terms.
 
 ## Interaction with PersistentWorkspace
 
@@ -217,9 +218,12 @@ affinity target Run. The public affinity API remains useful for direct users and
 for later steps that must follow another active Run.
 
 A missing, pending, lost, or incompatible workspace is not a terminal Run
-failure at scheduling time. The later workspace-aware reconciliation design must
-provide a clear condition and requeue behavior. Its exact failure/retry policy
-is intentionally outside this API PR.
+failure at scheduling time. The Workspace Filter rejects all candidates and
+records a clear Pending message. Scheduler watches on PersistentWorkspace
+objects requeue matching Pending Runs when the workspace changes. A Bound
+workspace also requires the candidate Pod name and UID to match
+`status.boundPod` and `status.boundPodUID`; a same-name Pod replacement remains
+Pending rather than silently using a different local filesystem.
 
 ## Implementation Sequence
 

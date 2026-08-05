@@ -1,10 +1,10 @@
 # Workflow Data Sharing
 
-This document describes the v0.x design. Its API prerequisites are partially
-implemented; binding, workspace admission, and Workflow composition remain
-separate implementation slices.
+This document describes the v0.x design. Its API prerequisites, RuntimePodLocal
+binding, and scheduler admission are implemented; runtimed preparation and
+Workflow composition remain separate implementation slices.
 
-RuntimePodLocal binding fencing amendment: **Implemented for metadata-only binding**
+RuntimePodLocal binding and scheduler fencing: **Implemented**
 
 The goal is to define how Workflow jobs and Runs share data without making
 scheduler or runtimed understand Workflow-specific semantics. The design is
@@ -24,15 +24,14 @@ The current experimental Workflow API supports:
 - `Runtime.spec.workspace` with an inline Kubernetes `VolumeSource` and an
   `emptyDir` default;
 - `PersistentWorkspace` API types, CRD validation, status, and controller
-  skeleton;
+  binding lifecycle with UID fencing;
 - generic Run workspace references and Kubernetes-style Run affinity fields.
+- workspace-aware scheduler filtering and Pending Run wakeups on workspace
+  changes.
 
 It does not yet provide:
 
 - first-class artifact inputs between jobs;
-- `RuntimePodLocal` workspace binding, UID fencing, or workspace lifecycle
-  operations;
-- workspace-aware scheduling that fences a Run to its bound workspace Pod;
 - runtimed preparation and cleanup of referenced workspaces;
 - explicit promotion of child Run artifact references into Workflow status;
 - cleanup and permission boundaries for shared job-local workspaces.
@@ -328,7 +327,7 @@ workspace capacity or failing because its controller-owned workspace was lost.
 | --- | --- |
 | Workflow controller | Interprets job/step semantics, creates job-local workspaces from controller defaults, creates child Runs, wires artifact inputs, promotes outputs/artifact refs into Workflow status. |
 | PersistentWorkspace controller | Owns workspace lifecycle, binding to Runtime workspace volumes, status, TTL, and cleanup. |
-| Scheduler | Applies generic Runtime capacity and Run affinity/anti-affinity. It does not know about Workflows. |
+| Scheduler | Snapshots generic Run, Runtime Pod, and referenced workspace state; applies workspace fencing, Runtime capacity, and Run affinity/anti-affinity. It does not know about Workflows. |
 | runtimed | Prepares referenced workspace paths, stages artifact inputs, collects artifact outputs, and cleans per-Run temporary state. It does not know about Workflows. |
 | ArtifactStore | Stores durable artifacts outside etcd. |
 
@@ -337,8 +336,10 @@ workspace capacity or failing because its controller-owned workspace was lost.
 - If a Runtime Pod disappears, `RuntimePodLocal` workspaces backed by that Pod's
   workspace volume become `Lost`; they are not automatically rebound to another
   Pod.
-- Runs that require an unavailable workspace should stay Pending or fail with a
-  clear workspace condition, depending on retry policy and controller decision.
+- Runs that reference a missing, Pending, Lost, Runtime-incompatible, or
+  UID-mismatched workspace Pod stay Pending with a clear message. Workspace
+  changes requeue matching Pending Runs; none of these states is a scheduler
+  terminal failure.
 - The Workflow controller should surface workspace-related failures in Workflow
   conditions or messages without exposing workspace controls in Workflow spec.
 - Workspace cleanup must not depend on the Runtime Pod still existing.
@@ -375,11 +376,13 @@ Required safeguards:
    `status.boundPodUID`, then bind `RuntimePodLocal` PersistentWorkspaces to
    ready Runtime Pods and record their lifecycle status without touching runtime
    filesystems.
-8. Add a generic `Workspace` scheduler Filter plugin. It resolves a referenced
-   workspace, rejects candidates whose Runtime does not match, and for a Bound
-   RuntimePodLocal workspace admits only the fenced `status.boundPod` and
+8. Add a generic `Workspace` scheduler Filter plugin. **Implemented:** the
+   scheduling snapshot resolves a referenced workspace once; the filter rejects
+   candidates whose Runtime does not match, and for a Bound RuntimePodLocal
+   workspace admits only the fenced `status.boundPod` and
    `status.boundPodUID`. A Pending or Lost workspace has no eligible candidates,
-   so its Run remains Pending with a clear scheduling message.
+   so its Run remains Pending with a clear scheduling message and is requeued
+   when the workspace changes.
 9. Update runtimed workspace preparation and cleanup for referenced
    workspaces.
 10. Compose job-local workspaces in the Workflow controller.

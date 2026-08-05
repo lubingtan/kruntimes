@@ -181,8 +181,8 @@ API skeleton 只声明和 validation fields。调度执行语义由建议的
 queue，并将 PreFilter、Filter、Score、Reserve/Assume 和 Bind 作为独立阶段，而不是让每个 Run reconcile
 独立决定 placement。
 
-scheduler 仍保持 Workflow-agnostic。它不创建 workspace，也不理解 job 或 step labels；它只评估
-通用 Run labels 与声明的 affinity terms。
+scheduler 仍保持 Workflow-agnostic。它不创建 workspace，也不理解 job 或 step labels；它 snapshot 通用
+Run、Runtime Pod 和 referenced workspace state，再评估 workspace fencing 与声明的 affinity terms。
 
 ## 与 PersistentWorkspace 的交互
 
@@ -191,9 +191,11 @@ Run 使用 workspace 前，`PersistentWorkspace.spec.runtime` 必须等于 `Run.
 内部约束，而不要求 controller 伪造一条 affinity target Run。public affinity API 对直接用户以及
 需要跟随另一条 active Run 的后续 steps 仍有价值。
 
-missing、pending、lost 或 incompatible workspace 在调度时不是 terminal Run failure。后续
-workspace-aware reconciliation design 必须提供明确 condition 和 requeue behavior；精确的
-failure/retry policy 不属于本 API PR。
+missing、pending、lost 或 incompatible workspace 在调度时不是 terminal Run failure。Workspace Filter 会拒绝
+全部 candidates 并记录清晰的 Pending message。scheduler 对 PersistentWorkspace 的 watch 会在 workspace
+发生变化时重新入队匹配的 Pending Runs。Bound workspace 还要求 candidate Pod 的名称和 UID 分别匹配
+`status.boundPod` 与 `status.boundPodUID`；同名 Pod replacement 会保持 Pending，不会静默使用不同的本地
+filesystem。
 
 ## 实现顺序
 

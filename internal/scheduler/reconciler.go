@@ -29,6 +29,7 @@ import (
 const defaultRuntimedHeartbeatStaleAfter = 15 * time.Second
 
 const runRuntimeIndexField = "spec.runtime"
+const runWorkspaceIndexField = "spec.workspace.name"
 
 // RunReconciler watches Pending Tasks and assigns them to Runtime Pods.
 type RunReconciler struct {
@@ -44,6 +45,7 @@ type RunReconciler struct {
 
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runs/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -266,6 +268,9 @@ func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Run{}, runRuntimeIndexField, runRuntimeIndexValues); err != nil {
 		return fmt.Errorf("index Runs by runtime: %w", err)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Run{}, runWorkspaceIndexField, runWorkspaceIndexValues); err != nil {
+		return fmt.Errorf("index Runs by workspace: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.Run{}, builder.WithPredicates(pendingRunPredicate())).
 		Watches(
@@ -278,7 +283,33 @@ func (r *RunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.pendingRunsForRuntimePod),
 			builder.WithPredicates(runtimePodSchedulingPredicate()),
 		).
+		Watches(
+			&v1alpha1.PersistentWorkspace{},
+			handler.EnqueueRequestsFromMapFunc(r.pendingRunsForWorkspace),
+		).
 		Complete(r)
+}
+
+func (r *RunReconciler) pendingRunsForWorkspace(ctx context.Context, object client.Object) []reconcile.Request {
+	workspace, ok := object.(*v1alpha1.PersistentWorkspace)
+	if !ok {
+		return nil
+	}
+	var runs v1alpha1.RunList
+	if err := r.List(ctx, &runs, client.InNamespace(workspace.Namespace), client.MatchingFields{runWorkspaceIndexField: workspace.Name}); err != nil {
+		r.Log.Error(err, "unable to list pending runs for workspace", "namespace", workspace.Namespace, "workspace", workspace.Name)
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(runs.Items))
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if run.Status.Phase != "" && run.Status.Phase != v1alpha1.RunPending {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+	}
+	r.metricsRecorder().observePendingRunWakeups(pendingRunWakeupSourceWorkspace, len(requests))
+	return requests
 }
 
 func (r *RunReconciler) pendingRunsForReleasedCapacity(ctx context.Context, object client.Object) []reconcile.Request {
@@ -326,6 +357,14 @@ func runRuntimeIndexValues(object client.Object) []string {
 		return nil
 	}
 	return []string{run.Spec.Runtime}
+}
+
+func runWorkspaceIndexValues(object client.Object) []string {
+	run, ok := object.(*v1alpha1.Run)
+	if !ok || run.Spec.Workspace == nil || run.Spec.Workspace.Name == "" {
+		return nil
+	}
+	return []string{run.Spec.Workspace.Name}
 }
 
 func runtimePodSchedulingPredicate() predicate.Predicate {

@@ -1805,6 +1805,21 @@ func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
 		t.Fatalf("bound workspace status = %#v, want fenced Pod and path", workspace.Status)
 	}
 	boundPod := workspace.Status.BoundPod
+	boundRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-bound-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo workspace-bound"),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), boundRun); err != nil {
+		t.Fatalf("create bound workspace run: %v", err)
+	}
+	waitForRun(t, boundRun, 30*time.Second)
+	if boundRun.Status.AssignedPod != boundPod {
+		t.Fatalf("workspace run assignedPod = %q, want bound Pod %q", boundRun.Status.AssignedPod, boundPod)
+	}
 	if err := coreClientset.CoreV1().Pods(testNamespace).Delete(context.Background(), boundPod, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete bound Runtime Pod %s: %v", boundPod, err)
 	}
@@ -1813,6 +1828,18 @@ func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
 	if workspace.Status.BoundPod != boundPod {
 		t.Fatalf("lost workspace boundPod = %q, want original %q", workspace.Status.BoundPod, boundPod)
 	}
+	lostRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-lost-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo workspace-lost"),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), lostRun); err != nil {
+		t.Fatalf("create lost workspace run: %v", err)
+	}
+	waitForPendingRunMessage(t, lostRun, 30*time.Second, "was lost")
 }
 
 func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration, phase v1alpha1.PersistentWorkspacePhase) {
@@ -1829,6 +1856,25 @@ func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.Persisten
 		select {
 		case <-ctx.Done():
 			t.Fatalf("PersistentWorkspace = %#v, want phase %s", workspace.Status, phase)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func waitForPendingRunMessage(t *testing.T, run *v1alpha1.Run, timeout time.Duration, message string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), run); err != nil {
+			t.Fatalf("get run while waiting for Pending: %v", err)
+		}
+		if run.Status.Phase == v1alpha1.RunPending && run.Status.AssignedPod == "" && strings.Contains(run.Status.Message, message) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("Run status = %#v, want unassigned Pending Run with message containing %q", run.Status, message)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

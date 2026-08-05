@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -80,6 +81,67 @@ func TestReconcileKeepsRunPendingWhenNoRuntimePodAvailable(t *testing.T) {
 	}
 	if !strings.Contains(updated.Status.Message, "waiting for available runtime pods") {
 		t.Fatalf("message = %q, want waiting message", updated.Status.Message)
+	}
+}
+
+func TestReconcileKeepsRunPendingWhenWorkspaceIsUnbound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add kruntimes scheme: %v", err)
+	}
+	now := metav1.Now()
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-workspace", Namespace: "default"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"},
+		},
+	}
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: "default"},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+		Status:     v1alpha1.PersistentWorkspaceStatus{Phase: v1alpha1.PersistentWorkspacePending},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-bash",
+			Namespace: "default",
+			Labels:    map[string]string{"runtime": "bash"},
+			Annotations: map[string]string{
+				runtimepod.CapacityAnnotation(v1alpha1.RuntimeResourceRuns): "1",
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: v1alpha1.RuntimePodRuntimedReadyCondition, Status: corev1.ConditionTrue, LastProbeTime: now},
+		}},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		WithObjects(run, workspace, pod).
+		Build()
+	reconciler := &RunReconciler{Client: k8sClient, Log: logr.Discard()}
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: run.Name, Namespace: run.Namespace}})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("RequeueAfter = %s, want 30s", result.RequeueAfter)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunPending || updated.Status.AssignedPod != "" {
+		t.Fatalf("status = %#v, want unassigned Pending Run", updated.Status)
+	}
+	if got, want := updated.Status.Message, `waiting for referenced PersistentWorkspace "build" to bind`; got != want {
+		t.Fatalf("message = %q, want %q", got, want)
 	}
 }
 
@@ -530,6 +592,56 @@ func TestPendingRunsForRuntimePod(t *testing.T) {
 		t.Fatalf("requests without runtime label = %v, want none", requests)
 	}
 	assertPendingRunWakeupMetric(t, registry, pendingRunWakeupSourceRuntimePod, 1)
+}
+
+func TestPendingRunsForWorkspace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add kruntimes scheme: %v", err)
+	}
+	matching := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "matching", Namespace: "default"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPending},
+	}
+	matchingEmptyPhase := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "matching-empty", Namespace: "default"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"}},
+	}
+	otherWorkspace := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-workspace", Namespace: "default"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Workspace: &v1alpha1.RunWorkspaceReference{Name: "other"}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPending},
+	}
+	scheduled := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "scheduled", Namespace: "default"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunScheduled},
+	}
+	otherNamespace := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-namespace", Namespace: "other"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunPending},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&v1alpha1.Run{}, runWorkspaceIndexField, runWorkspaceIndexValues).
+		WithObjects(matching, matchingEmptyPhase, otherWorkspace, scheduled, otherNamespace).
+		Build()
+	registry := prometheus.NewPedanticRegistry()
+	reconciler := &RunReconciler{Client: k8sClient, Log: logr.Discard(), metrics: newSchedulerMetrics(registry)}
+
+	requests := reconciler.pendingRunsForWorkspace(context.Background(), &v1alpha1.PersistentWorkspace{ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: "default"}})
+	got := make([]string, 0, len(requests))
+	for _, request := range requests {
+		got = append(got, request.NamespacedName.String())
+	}
+	sort.Strings(got)
+	want := []string{"default/matching", "default/matching-empty"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("requests = %v, want %v", got, want)
+	}
+	assertPendingRunWakeupMetric(t, registry, pendingRunWakeupSourceWorkspace, 2)
 }
 
 func TestRuntimePodSchedulingPredicate(t *testing.T) {

@@ -172,6 +172,56 @@ func TestSchedulerReconcile(t *testing.T) {
 	t.Errorf("expected Scheduled, got phase=%s assignedPod=%s", updated.Status.Phase, updated.Status.AssignedPod)
 }
 
+func TestSchedulerWakesPendingRunWhenWorkspaceBinds(t *testing.T) {
+	ctx := context.Background()
+	ns := testNamespace(t, "test-scheduler-workspace-")
+	pod := createReadyRuntimePod(t, ctx, ns.Name, "runtime-workspace", 1)
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: ns.Name},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+		Status:     v1alpha1.PersistentWorkspaceStatus{Phase: v1alpha1.PersistentWorkspacePending},
+	}
+	if err := k8sClient.Create(ctx, workspace); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-run", Namespace: ns.Name},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, run); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	var pending v1alpha1.Run
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &pending); err != nil {
+		t.Fatalf("get pending run: %v", err)
+	}
+	if pending.Status.AssignedPod != "" {
+		t.Fatalf("pending workspace run assigned to %q, want no assignment", pending.Status.AssignedPod)
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+			return err
+		}
+		workspace.Status.Phase = v1alpha1.PersistentWorkspaceBound
+		workspace.Status.BoundPod = pod.Name
+		workspace.Status.BoundPodUID = string(pod.UID)
+		return k8sClient.Status().Update(ctx, workspace)
+	}); err != nil {
+		t.Fatalf("bind workspace: %v", err)
+	}
+
+	assigned := waitForRunAssignment(t, ctx, run)
+	if assigned.Status.AssignedPod != pod.Name {
+		t.Fatalf("assigned pod = %q, want workspace Pod %q", assigned.Status.AssignedPod, pod.Name)
+	}
+}
+
 func TestSchedulerAggregatesAffinityAndCapacityScores(t *testing.T) {
 	ctx := context.Background()
 	ns := testNamespace(t, "test-scheduler-score-")

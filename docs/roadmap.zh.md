@@ -233,9 +233,10 @@ controller wiring 累积不必要的冲突。
     - [x] Pod 仅暂时 unavailable 时保留原 binding；当 Pod 名称消失或 UID 改变时，永久转为
       `Lost`；
     - [x] 增加 focused controller 和 API validation coverage。
-  - [ ] 在不引入 Workflow 概念的前提下增加通用 `Workspace` scheduler Filter plugin：要求
+  - [x] 在不引入 Workflow 概念的前提下增加通用 `Workspace` scheduler Filter plugin：要求
     `Run.spec.workspace` 匹配其 Runtime 和 Bound RuntimePodLocal workspace，并仅保留其
-    fenced bound Pod 作为 candidate；unresolved 或 Lost workspace 保持 Pending 并给出清晰信息。
+    fenced bound Pod 作为 candidate；unresolved 或 Lost workspace 保持 Pending 并给出清晰信息，
+    并在 referenced workspace 变更时唤醒匹配的 Pending Runs。
   - [ ] 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent
     workspace 但不感知 Workflow 语义：只创建 bound workspace directory、保留其内容，并只
     清理 Run-local temporary state。

@@ -17,6 +17,7 @@ type pendingRunWakeupSource string
 const (
 	pendingRunWakeupSourceRuntimePod       pendingRunWakeupSource = "runtime_pod"
 	pendingRunWakeupSourceCapacityReleased pendingRunWakeupSource = "capacity_released"
+	pendingRunWakeupSourceWorkspace        pendingRunWakeupSource = "workspace"
 )
 
 type schedulerMetrics struct {

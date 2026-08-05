@@ -16,6 +16,14 @@ rules:
   - apiGroups:
       - kruntimes.io
     resources:
+      - persistentworkspaces
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kruntimes.io
+    resources:
       - runs/status
     verbs:
       - get

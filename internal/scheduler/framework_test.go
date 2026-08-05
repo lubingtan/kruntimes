@@ -139,11 +139,11 @@ func TestRegisteredFilterPlugins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registeredFilterPlugins: %v", err)
 	}
-	if len(plugins) != 2 {
-		t.Fatalf("registered plugins = %d, want 2", len(plugins))
+	if len(plugins) != 3 {
+		t.Fatalf("registered plugins = %d, want 3", len(plugins))
 	}
-	if plugins[0].Name() != "RuntimePodAvailability" || plugins[1].Name() != "RunAffinity" {
-		t.Fatalf("registered plugin order = %q, %q", plugins[0].Name(), plugins[1].Name())
+	if plugins[0].Name() != "Workspace" || plugins[1].Name() != "RuntimePodAvailability" || plugins[2].Name() != "RunAffinity" {
+		t.Fatalf("registered plugin order = %q, %q, %q", plugins[0].Name(), plugins[1].Name(), plugins[2].Name())
 	}
 }
 

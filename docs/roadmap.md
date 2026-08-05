@@ -273,11 +273,11 @@ wiring from accumulating avoidable conflicts.
       transition permanently to `Lost` when the name disappears or its UID
       changes;
     - [x] add focused controller and API validation coverage.
-  - [ ] add a generic `Workspace` scheduler Filter plugin without introducing
+  - [x] add a generic `Workspace` scheduler Filter plugin without introducing
     Workflow concepts: require `Run.spec.workspace` to match its Runtime and a
     Bound RuntimePodLocal workspace, and filter candidates to its fenced bound
     Pod while keeping unresolved or Lost workspaces Pending with a clear
-    message.
+    message; wake matching Pending Runs when the referenced workspace changes.
   - [ ] update runtimed workspace preparation and cleanup to support referenced
     persistent workspaces without knowing Workflow semantics; create only the
     bound workspace directory, preserve its contents, and clean only Run-local
