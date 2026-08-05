@@ -1,9 +1,9 @@
 # Workflow Data Sharing
 
-本文描述 v0.x 设计。API prerequisite、RuntimePodLocal binding 和 scheduler admission 已实现；
-runtimed preparation 与 Workflow composition 仍是独立的 implementation slices。
+本文描述 v0.x 设计。API prerequisite、RuntimePodLocal binding、scheduler admission 和
+runtimed workspace preparation 已实现；Workflow composition 仍是独立的 implementation slice。
 
-RuntimePodLocal binding 和 scheduler fencing：**已实现**
+RuntimePodLocal binding、scheduler fencing 和 runtimed preparation：**已实现**
 
 目标是定义 Workflow jobs 和 Runs 如何共享数据，同时不让 scheduler 或 runtimed 理解
 Workflow-specific 语义。这个设计由 v0.x workflow demo 目标驱动：job-to-job 数据应通过
@@ -27,7 +27,6 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 当前尚不支持：
 
 - job 之间的 first-class artifact inputs；
-- runtimed 对 referenced workspaces 的 preparation 和 cleanup；
 - 将 child Run artifact references 显式提升到 Workflow status；
 - shared job-local workspace 的 cleanup 和权限边界。
 
@@ -180,8 +179,14 @@ spec:
 `kind` 和 `apiGroup` 是 optional。省略时默认是 `PersistentWorkspace` 和
 `kruntimes.io/v1alpha1`。
 
-runtimed 在执行前准备被引用的 workspace path，并在 Run 完成后只清理 per-Run temporary
-state。workspace lifecycle 由 `PersistentWorkspace` controller 拥有。
+runtimed 在执行前准备被引用的 workspace path。workspace lifecycle 由
+`PersistentWorkspace` controller 拥有。对于 task-mode Run，
+runtimed 将 inline 和 Git source stage 到 workspace 保留的
+`.kruntimes/runs/<run-uid>` 目录，以 workspace 作为 current directory 执行。outputs 和
+artifact staging 也使用这个 Run-local directory。runtimed 不会删除 referenced workspace
+中的任何路径；PersistentWorkspace controller 根据其 lifecycle 与 cleanup policy 回收。
+这样所有 runtimed-managed 文件都不会覆盖其他 Run 有意共享的文件。Function-mode source 保持在
+workspace root，以便 handler module resolution 仍然相对于 working directory。
 
 ## Run Affinity
 
@@ -346,7 +351,10 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    只允许 fenced `status.boundPod` 和 `status.boundPodUID`。Pending 或 Lost workspace 没有 eligible
    candidates，因此对应 Run 保持 Pending 并显示清晰的 scheduling message；workspace changes 会重新入队
    对应的 Pending Run。
-9. 更新 runtimed workspace preparation 和 cleanup，使其支持 referenced workspaces。
+9. 更新 runtimed workspace preparation，使其支持 referenced workspaces。**已实现：**
+   referenced Run 在 persistent workspace 中执行；outputs 和 artifact staging 仍然是
+   Run-local；task source 被 stage 到保留的 per-Run directory。PersistentWorkspace lifecycle
+   负责 workspace 内的 cleanup。
 10. 在 Workflow controller 中组合 job-local workspaces。
 11. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
 12. 将 child Run artifact refs 提升到 Workflow status。

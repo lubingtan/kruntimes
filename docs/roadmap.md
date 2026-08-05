@@ -278,7 +278,7 @@ wiring from accumulating avoidable conflicts.
     Bound RuntimePodLocal workspace, and filter candidates to its fenced bound
     Pod while keeping unresolved or Lost workspaces Pending with a clear
     message; wake matching Pending Runs when the referenced workspace changes.
-  - [ ] update runtimed workspace preparation and cleanup to support referenced
+  - [x] update runtimed workspace preparation and cleanup to support referenced
     persistent workspaces without knowing Workflow semantics; create only the
     bound workspace directory, preserve its contents, and clean only Run-local
     temporary state.

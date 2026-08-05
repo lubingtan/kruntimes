@@ -1805,20 +1805,35 @@ func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
 		t.Fatalf("bound workspace status = %#v, want fenced Pod and path", workspace.Status)
 	}
 	boundPod := workspace.Status.BoundPod
-	boundRun := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-bound-", Namespace: testNamespace},
+	writerRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-write-", Namespace: testNamespace},
 		Spec: v1alpha1.RunSpec{
 			Runtime:   runtimeName,
-			Mode:      taskMode("echo workspace-bound"),
+			Mode:      taskMode("echo workspace-data > shared.txt"),
 			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
 		},
 	}
-	if err := k8sClient.Create(context.Background(), boundRun); err != nil {
-		t.Fatalf("create bound workspace run: %v", err)
+	if err := k8sClient.Create(context.Background(), writerRun); err != nil {
+		t.Fatalf("create workspace writer Run: %v", err)
 	}
-	waitForRun(t, boundRun, 30*time.Second)
-	if boundRun.Status.AssignedPod != boundPod {
-		t.Fatalf("workspace run assignedPod = %q, want bound Pod %q", boundRun.Status.AssignedPod, boundPod)
+	waitForRun(t, writerRun, 30*time.Second)
+	if writerRun.Status.AssignedPod != boundPod {
+		t.Fatalf("workspace writer assignedPod = %q, want bound Pod %q", writerRun.Status.AssignedPod, boundPod)
+	}
+	readerRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-read-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode(`test "$(cat shared.txt)" = workspace-data`),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), readerRun); err != nil {
+		t.Fatalf("create workspace reader Run: %v", err)
+	}
+	waitForRun(t, readerRun, 30*time.Second)
+	if readerRun.Status.AssignedPod != boundPod {
+		t.Fatalf("workspace reader assignedPod = %q, want bound Pod %q", readerRun.Status.AssignedPod, boundPod)
 	}
 	if err := coreClientset.CoreV1().Pods(testNamespace).Delete(context.Background(), boundPod, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete bound Runtime Pod %s: %v", boundPod, err)

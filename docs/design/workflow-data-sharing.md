@@ -1,10 +1,11 @@
 # Workflow Data Sharing
 
 This document describes the v0.x design. Its API prerequisites, RuntimePodLocal
-binding, and scheduler admission are implemented; runtimed preparation and
-Workflow composition remain separate implementation slices.
+binding, scheduler admission, and runtimed workspace preparation are
+implemented; Workflow composition remains a separate implementation slice.
 
-RuntimePodLocal binding and scheduler fencing: **Implemented**
+RuntimePodLocal binding, scheduler fencing, and runtimed preparation:
+**Implemented**
 
 The goal is to define how Workflow jobs and Runs share data without making
 scheduler or runtimed understand Workflow-specific semantics. The design is
@@ -32,7 +33,6 @@ The current experimental Workflow API supports:
 It does not yet provide:
 
 - first-class artifact inputs between jobs;
-- runtimed preparation and cleanup of referenced workspaces;
 - explicit promotion of child Run artifact references into Workflow status;
 - cleanup and permission boundaries for shared job-local workspaces.
 
@@ -203,9 +203,16 @@ spec:
 `kind` and `apiGroup` are optional. When omitted, they default to
 `PersistentWorkspace` and `kruntimes.io/v1alpha1`.
 
-runtimed prepares the referenced workspace path before execution and cleans only
-per-Run temporary state after the Run finishes. The workspace lifecycle is owned
-by the `PersistentWorkspace` controller.
+runtimed prepares the referenced workspace path before execution. The workspace
+lifecycle is owned by the `PersistentWorkspace` controller. For task-mode Runs, runtimed stages
+inline and Git sources under the workspace-reserved
+`.kruntimes/runs/<run-uid>` directory, executes them with the workspace as the
+current directory, and uses that same Run-local directory for outputs and
+artifact staging. Runtimed does not delete any path in a referenced workspace;
+the PersistentWorkspace controller applies its lifecycle and cleanup policy.
+This keeps all runtimed-managed files from overwriting files that other Runs
+intentionally share. Function-mode source remains at the workspace root so
+handler module resolution stays relative to its working directory.
 
 ## Run Affinity
 
@@ -383,8 +390,11 @@ Required safeguards:
    `status.boundPodUID`. A Pending or Lost workspace has no eligible candidates,
    so its Run remains Pending with a clear scheduling message and is requeued
    when the workspace changes.
-9. Update runtimed workspace preparation and cleanup for referenced
-   workspaces.
+9. Update runtimed workspace preparation for referenced workspaces.
+   **Implemented:** referenced Runs execute in the persistent workspace;
+   outputs and artifact staging remain Run-local; task source is staged under
+   the reserved per-Run directory. PersistentWorkspace lifecycle owns cleanup
+   within the workspace.
 10. Compose job-local workspaces in the Workflow controller.
 11. Add Workflow step artifact input fields and job-scoped artifact status.
 12. Promote child Run artifact refs into Workflow status.

@@ -14,11 +14,14 @@ import (
 	"github.com/kruntimes/kruntimes/internal/artifact"
 )
 
-func (c *Controller) prepareArtifactStaging(run *v1alpha1.Run) (string, error) {
+func (c *Controller) prepareArtifactStaging(ar *activeRun) (string, error) {
 	if c.ArtifactStore == nil {
 		return "", nil
 	}
-	path := artifactStagingDir(run)
+	if ar == nil {
+		return "", fmt.Errorf("active Run is required")
+	}
+	path := ar.artifactDir
 	if err := os.RemoveAll(path); err != nil {
 		return "", fmt.Errorf("clear artifact staging directory: %w", err)
 	}
@@ -28,11 +31,15 @@ func (c *Controller) prepareArtifactStaging(run *v1alpha1.Run) (string, error) {
 	return path, nil
 }
 
-func (c *Controller) collectArtifacts(ctx context.Context, run *v1alpha1.Run) (refs []v1alpha1.ArtifactRef, resultErr error) {
+func (c *Controller) collectArtifacts(ctx context.Context, ar *activeRun) (refs []v1alpha1.ArtifactRef, resultErr error) {
 	if c.ArtifactStore == nil {
 		return nil, nil
 	}
-	stagingDir := artifactStagingDir(run)
+	if ar == nil || ar.run == nil {
+		return nil, fmt.Errorf("active Run is required")
+	}
+	run := ar.run
+	stagingDir := ar.artifactDir
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -213,8 +220,4 @@ func isArtifactInvalid(err error) bool {
 	}
 	var storeError interface{ ArtifactInvalid() bool }
 	return errors.As(err, &storeError) && storeError.ArtifactInvalid()
-}
-
-func artifactStagingDir(run *v1alpha1.Run) string {
-	return filepath.Join(workspacePath, string(run.UID), "artifacts")
 }

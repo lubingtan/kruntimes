@@ -237,7 +237,7 @@ controller wiring 累积不必要的冲突。
     `Run.spec.workspace` 匹配其 Runtime 和 Bound RuntimePodLocal workspace，并仅保留其
     fenced bound Pod 作为 candidate；unresolved 或 Lost workspace 保持 Pending 并给出清晰信息，
     并在 referenced workspace 变更时唤醒匹配的 Pending Runs。
-  - [ ] 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent
+  - [x] 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent
     workspace 但不感知 Workflow 语义：只创建 bound workspace directory、保留其内容，并只
     清理 Run-local temporary state。
   - [ ] 在 Workflow controller 中组合这些 generic primitives：创建并 owner job-local

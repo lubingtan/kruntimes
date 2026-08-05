@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -26,7 +27,8 @@ func TestPrepareArtifactStagingClearsPreviousAttempt(t *testing.T) {
 	store := &fakeArtifactStore{}
 	c := &Controller{ArtifactStore: store}
 	run := artifactTestRun()
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +36,7 @@ func TestPrepareArtifactStagingClearsPreviousAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := c.prepareArtifactStaging(run)
+	got, err := c.prepareArtifactStaging(ar)
 	if err != nil {
 		t.Fatalf("prepareArtifactStaging: %v", err)
 	}
@@ -55,7 +57,8 @@ func TestCollectArtifactsStoresSortedTopLevelEntries(t *testing.T) {
 	store := &fakeArtifactStore{}
 	c := &Controller{ArtifactStore: store}
 	run := artifactTestRun()
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(filepath.Join(staging, "bundle"), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +69,7 @@ func TestCollectArtifactsStoresSortedTopLevelEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	refs, err := c.collectArtifacts(t.Context(), run)
+	refs, err := c.collectArtifacts(t.Context(), ar)
 	if err != nil {
 		t.Fatalf("collectArtifacts: %v", err)
 	}
@@ -94,7 +97,8 @@ func TestApplySuccessWritesArtifactRefsOnlyAfterAllUploadsSucceed(t *testing.T) 
 	}
 	run := artifactTestRun()
 	run.Status.Phase = v1alpha1.RunRunning
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +114,6 @@ func TestApplySuccessWritesArtifactRefsOnlyAfterAllUploadsSucceed(t *testing.T) 
 		Build()
 	store := &fakeArtifactStore{failAt: 2}
 	c := &Controller{Client: k8sClient, ArtifactStore: store, ArtifactStoreSpec: artifactTestStoreSpec()}
-	ar := &activeRun{run: run, workDir: filepath.Join(workspacePath, string(run.UID))}
-
 	result, err := c.applySuccess(t.Context(), ar, &pb.StatusResponse{Stdout: "stdout"})
 	if err != nil {
 		t.Fatalf("applySuccess transient failure: %v", err)
@@ -155,7 +157,8 @@ func TestCollectArtifactsRejectsSymlinkBeforeStore(t *testing.T) {
 	store := &fakeArtifactStore{}
 	c := &Controller{ArtifactStore: store}
 	run := artifactTestRun()
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +170,7 @@ func TestCollectArtifactsRejectsSymlinkBeforeStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := c.collectArtifacts(t.Context(), run); err == nil {
+	if _, err := c.collectArtifacts(t.Context(), ar); err == nil {
 		t.Fatal("collectArtifacts accepted symlink")
 	}
 	if len(store.puts) != 0 {
@@ -181,7 +184,8 @@ func TestCollectArtifactsReportsRollbackFailure(t *testing.T) {
 	store := &fakeArtifactStore{failAt: 2, deleteErr: wantRollbackErr}
 	c := &Controller{ArtifactStore: store}
 	run := artifactTestRun()
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +195,7 @@ func TestCollectArtifactsReportsRollbackFailure(t *testing.T) {
 		}
 	}
 
-	_, err := c.collectArtifacts(t.Context(), run)
+	_, err := c.collectArtifacts(t.Context(), ar)
 	if !errors.Is(err, wantRollbackErr) {
 		t.Fatalf("collectArtifacts error = %v, want rollback error", err)
 	}
@@ -205,7 +209,8 @@ func TestCollectArtifactsClassifiesStoreSizeLimitAsInvalid(t *testing.T) {
 	store := &fakeArtifactStore{failAt: 1, putErr: artifact.ErrSizeLimitExceeded}
 	c := &Controller{ArtifactStore: store}
 	run := artifactTestRun()
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +218,7 @@ func TestCollectArtifactsClassifiesStoreSizeLimitAsInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := c.collectArtifacts(t.Context(), run)
+	_, err := c.collectArtifacts(t.Context(), ar)
 	if !isArtifactInvalid(err) {
 		t.Fatalf("collectArtifacts error = %v, want ArtifactInvalid", err)
 	}
@@ -252,7 +257,8 @@ func TestCollectArtifactsEnforcesSingleAndTotalLimits(t *testing.T) {
 				MaxArtifactsBytes: tt.maxTotal,
 			}
 			run := artifactTestRun()
-			staging := artifactStagingDir(run)
+			ar := newActiveRun(run, time.Time{})
+			staging := ar.artifactDir
 			if err := os.MkdirAll(staging, 0o750); err != nil {
 				t.Fatal(err)
 			}
@@ -261,7 +267,7 @@ func TestCollectArtifactsEnforcesSingleAndTotalLimits(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err := c.collectArtifacts(t.Context(), run)
+			_, err := c.collectArtifacts(t.Context(), ar)
 			if err == nil || !isArtifactInvalid(err) {
 				t.Fatalf("error = %v, want ArtifactInvalid", err)
 			}
@@ -285,7 +291,8 @@ func TestApplySuccessTransientStoreFailureRequeuesWithoutChangingRun(t *testing.
 	}
 	run := artifactTestRun()
 	run.Status.Phase = v1alpha1.RunRunning
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -302,8 +309,6 @@ func TestApplySuccessTransientStoreFailureRequeuesWithoutChangingRun(t *testing.
 		ArtifactStore:     &fakeArtifactStore{failAt: 1},
 		ArtifactStoreSpec: artifactTestStoreSpec(),
 	}
-	ar := &activeRun{run: run, workDir: filepath.Join(workspacePath, string(run.UID))}
-
 	result, err := c.applySuccess(t.Context(), ar, &pb.StatusResponse{Stdout: "stdout"})
 	if err != nil {
 		t.Fatalf("applySuccess: %v", err)
@@ -328,7 +333,8 @@ func TestApplySuccessInvalidArtifactTerminatesWithoutRetry(t *testing.T) {
 	}
 	run := artifactTestRun()
 	run.Status.Phase = v1alpha1.RunRunning
-	staging := artifactStagingDir(run)
+	ar := newActiveRun(run, time.Time{})
+	staging := ar.artifactDir
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -349,8 +355,6 @@ func TestApplySuccessInvalidArtifactTerminatesWithoutRetry(t *testing.T) {
 		Build()
 	store := &fakeArtifactStore{}
 	c := &Controller{Client: k8sClient, ArtifactStore: store, ArtifactStoreSpec: artifactTestStoreSpec()}
-	ar := &activeRun{run: run, workDir: filepath.Join(workspacePath, string(run.UID))}
-
 	if _, err := c.applySuccess(t.Context(), ar, &pb.StatusResponse{Stdout: "stdout"}); err != nil {
 		t.Fatalf("applySuccess: %v", err)
 	}

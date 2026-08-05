@@ -37,16 +37,49 @@ func TestPrepareSource_NoSource(t *testing.T) {
 
 	run := &v1alpha1.Run{}
 	run.UID = "test-uid"
-	workDir, err := prepareSource(run)
+	ar, err := prepareTestSource(run)
 	if err != nil {
 		t.Fatal(err)
 	}
+	workDir := ar.workDir
 	expected := filepath.Join(dir, string(run.UID))
 	if workDir != expected {
 		t.Errorf("expected %s, got %s", expected, workDir)
 	}
 	if _, err := os.Stat(workDir); err != nil {
 		t.Errorf("workDir not created: %v", err)
+	}
+}
+
+func TestPrepareSource_ReferencedWorkspacePreservesSharedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	workspacePath = dir
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{UID: "workspace-run-uid"},
+		Spec: v1alpha1.RunSpec{
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"},
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+		},
+	}
+	sharedDir := persistentWorkspacePath("build")
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedDir, "from-previous-run"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ar, err := prepareTestSource(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := ar.workDir
+	if workDir != sharedDir {
+		t.Fatalf("workDir = %q, want shared workspace %q", workDir, sharedDir)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "from-previous-run")); err != nil {
+		t.Fatalf("shared workspace content was not preserved: %v", err)
 	}
 }
 
@@ -95,10 +128,11 @@ func TestPrepareSource_Inline(t *testing.T) {
 	}
 	run.UID = "test-uid"
 
-	workDir, err := prepareSource(run)
+	ar, err := prepareTestSource(run)
 	if err != nil {
 		t.Fatal(err)
 	}
+	workDir := ar.workDir
 
 	if _, err := os.Stat(filepath.Join(workDir, "run.sh")); !os.IsNotExist(err) {
 		t.Fatalf("inline source should ignore entrypoint, stat err = %v", err)
@@ -126,14 +160,53 @@ func TestPrepareSource_InlineDefaultEntrypoint(t *testing.T) {
 	}
 	run.UID = "test-uid"
 
-	workDir, err := prepareSource(run)
+	ar, err := prepareTestSource(run)
 	if err != nil {
 		t.Fatal(err)
 	}
+	workDir := ar.workDir
 
 	scriptPath := filepath.Join(workDir, "script")
 	if _, err := os.Stat(scriptPath); err != nil {
 		t.Errorf("expected default 'script' file: %v", err)
+	}
+}
+
+func TestPrepareSource_InlineInReferencedWorkspaceUsesRunLocalStaging(t *testing.T) {
+	dir := t.TempDir()
+	workspacePath = dir
+
+	inline := "echo shared"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{UID: "workspace-inline-uid"},
+		Spec: v1alpha1.RunSpec{
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"},
+			Source:    &v1alpha1.CodeSource{Inline: &inline},
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+		},
+	}
+
+	ar, err := prepareTestSource(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := ar.workDir
+	if workDir != persistentWorkspacePath("build") {
+		t.Fatalf("workDir = %q, want shared workspace", workDir)
+	}
+	stagedScript := filepath.Join(ar.sourceDir, "script")
+	if data, err := os.ReadFile(stagedScript); err != nil || string(data) != inline {
+		t.Fatalf("staged script = %q, %v; want %q", data, err, inline)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "script")); !os.IsNotExist(err) {
+		t.Fatalf("shared workspace script should not be materialized at its root: %v", err)
+	}
+	entrypoint, args, err := runtimeExecutionInput(ar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(ar.sourceEntrypointPrefix, "script"); entrypoint != want || args != nil {
+		t.Fatalf("runtime input = %q, %v; want %q, nil", entrypoint, args, want)
 	}
 }
 
@@ -155,10 +228,11 @@ func TestPrepareSource_FunctionInlineMaterializesInlinePath(t *testing.T) {
 	}
 	run.UID = "test-function-uid"
 
-	workDir, err := prepareSource(run)
+	ar, err := prepareTestSource(run)
 	if err != nil {
 		t.Fatal(err)
 	}
+	workDir := ar.workDir
 
 	data, err := os.ReadFile(filepath.Join(workDir, "app", "handler.py"))
 	if err != nil {
@@ -185,7 +259,7 @@ func TestPrepareSource_FunctionInlineRejectsEscapingInlinePath(t *testing.T) {
 	}
 	run.UID = "test-function-uid"
 
-	if _, err := prepareSource(run); err == nil {
+	if _, err := prepareTestSource(run); err == nil {
 		t.Fatal("prepareSource succeeded for escaping inlinePath")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "handler.py")); !os.IsNotExist(err) {
@@ -208,10 +282,11 @@ func TestPrepareSource_InlineIgnoresEscapingEntrypoint(t *testing.T) {
 	}
 	run.UID = "test-uid"
 
-	workDir, err := prepareSource(run)
+	ar, err := prepareTestSource(run)
 	if err != nil {
 		t.Fatalf("prepareSource: %v", err)
 	}
+	workDir := ar.workDir
 	if _, err := os.Stat(filepath.Join(dir, "escape.sh")); !os.IsNotExist(err) {
 		t.Fatalf("escape target should not exist, stat err = %v", err)
 	}
@@ -235,7 +310,7 @@ func TestPrepareSource_ModeTaskRejectsEscapingEntrypoint(t *testing.T) {
 	}
 	run.UID = "test-uid"
 
-	if _, err := prepareSource(run); err == nil {
+	if _, err := prepareTestSource(run); err == nil {
 		t.Fatal("prepareSource() error = nil, want escaping entrypoint error")
 	}
 }
@@ -252,7 +327,7 @@ func TestRuntimeExecutionInput_ModeTask(t *testing.T) {
 		},
 	}
 
-	entrypoint, args, err := runtimeExecutionInput(run)
+	entrypoint, args, err := runtimeExecutionInput(newActiveRun(run, time.Time{}))
 	if err != nil {
 		t.Fatalf("runtimeExecutionInput: %v", err)
 	}
@@ -262,6 +337,11 @@ func TestRuntimeExecutionInput_ModeTask(t *testing.T) {
 	if len(args) != 2 || args[0] != "first" || args[1] != "second" {
 		t.Fatalf("args = %v, want [first second]", args)
 	}
+}
+
+func prepareTestSource(run *v1alpha1.Run) (*activeRun, error) {
+	ar := newActiveRun(run, time.Time{})
+	return ar, prepareSource(ar)
 }
 
 func TestReadOutputs_Empty(t *testing.T) {
@@ -616,11 +696,7 @@ func TestApplySuccessRejectsInvalidOutputsWithoutRetry(t *testing.T) {
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add scheme: %v", err)
 	}
-
-	workDir := t.TempDir()
-	if err := os.WriteFile(outputsPath(workDir), []byte("invalid\n"), 0o644); err != nil {
-		t.Fatalf("write outputs: %v", err)
-	}
+	setTestWorkspace(t)
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "invalid-outputs", Namespace: "default", UID: "invalid-outputs-uid"},
 		Spec: v1alpha1.RunSpec{
@@ -629,13 +705,19 @@ func TestApplySuccessRejectsInvalidOutputsWithoutRetry(t *testing.T) {
 		},
 		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning, AssignedPod: "pod-a"},
 	}
+	ar := newActiveRun(run, time.Now())
+	if err := os.MkdirAll(ar.cleanupDir, 0o755); err != nil {
+		t.Fatalf("create Run-local directory: %v", err)
+	}
+	if err := os.WriteFile(ar.outputPath, []byte("invalid\n"), 0o644); err != nil {
+		t.Fatalf("write outputs: %v", err)
+	}
 	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.Run{}).
 		WithObjects(run).
 		Build()
 	c := &Controller{Client: k8sClient, Hostname: "pod-a"}
-	ar := &activeRun{run: run, workDir: workDir, start: time.Now()}
 	c.activeRuns.Store(string(run.UID), ar)
 
 	if _, err := c.applySuccess(t.Context(), ar, &pb.StatusResponse{Stdout: "done"}); err != nil {
@@ -1032,13 +1114,11 @@ func TestRecoverActiveRunsOnceAddsRuntimeExecutions(t *testing.T) {
 func TestStartExecutionWaitsForRuntimeReady(t *testing.T) {
 	runtimeClient := &fakeRuntimeClient{}
 	c := &Controller{runtimeCli: runtimeClient}
-	ar := &activeRun{
-		run: &v1alpha1.Run{
-			ObjectMeta: metav1.ObjectMeta{UID: "run-uid"},
-			Spec:       v1alpha1.RunSpec{Runtime: "python"},
-		},
-		workDir: t.TempDir(),
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{UID: "run-uid"},
+		Spec:       v1alpha1.RunSpec{Runtime: "python"},
 	}
+	ar := newActiveRun(run, time.Time{})
 
 	if err := c.startExecution(t.Context(), ar); err != nil {
 		t.Fatalf("startExecution: %v", err)
@@ -1046,8 +1126,33 @@ func TestStartExecutionWaitsForRuntimeReady(t *testing.T) {
 	if runtimeClient.executeOptions == 0 {
 		t.Fatal("expected Execute to wait for the runtime connection to become ready")
 	}
-	if got := runtimeClient.executeRequest.Env[artifact.OutputsEnv]; got != outputsPath(ar.workDir) {
-		t.Fatalf("%s = %q, want %q", artifact.OutputsEnv, got, outputsPath(ar.workDir))
+	if got := runtimeClient.executeRequest.Env[artifact.OutputsEnv]; got != ar.outputPath {
+		t.Fatalf("%s = %q, want %q", artifact.OutputsEnv, got, ar.outputPath)
+	}
+}
+
+func TestStartExecutionUsesRunLocalOutputsForReferencedWorkspace(t *testing.T) {
+	setTestWorkspace(t)
+	runtimeClient := &fakeRuntimeClient{}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{UID: "workspace-output-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"},
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+		},
+	}
+	ar := newActiveRun(run, time.Time{})
+	c := &Controller{runtimeCli: runtimeClient}
+
+	if err := c.startExecution(t.Context(), ar); err != nil {
+		t.Fatalf("startExecution: %v", err)
+	}
+	if got, want := runtimeClient.executeRequest.WorkingDir, ar.workDir; got != want {
+		t.Fatalf("WorkingDir = %q, want shared workspace %q", got, want)
+	}
+	if got, want := runtimeClient.executeRequest.Env[artifact.OutputsEnv], ar.outputPath; got != want {
+		t.Fatalf("%s = %q, want Run-local path %q", artifact.OutputsEnv, got, want)
 	}
 }
 
@@ -1130,12 +1235,12 @@ func TestStartExecutionInjectsReservedArtifactDirectory(t *testing.T) {
 			}},
 		},
 	}
-	ar := &activeRun{run: run, workDir: filepath.Join(workspacePath, "run-uid")}
+	ar := newActiveRun(run, time.Time{})
 
 	if err := c.startExecution(t.Context(), ar); err != nil {
 		t.Fatalf("startExecution: %v", err)
 	}
-	want := filepath.Join(workspacePath, "run-uid", "artifacts")
+	want := ar.artifactDir
 	if got := runtimeClient.executeRequest.Env[artifact.ArtifactsDirEnv]; got != want {
 		t.Fatalf("%s = %q, want %q", artifact.ArtifactsDirEnv, got, want)
 	}
@@ -1147,17 +1252,16 @@ func TestCleanupForgetsExecutionAndRemovesWorkspace(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cleanup", Namespace: "default", UID: "cleanup-uid"},
 		Spec:       v1alpha1.RunSpec{Runtime: "bash"},
 	}
-	runWorkspace := workspaceForRun(run)
-	if err := os.MkdirAll(runWorkspace, 0o755); err != nil {
+	ar := newActiveRun(run, time.Now())
+	if err := os.MkdirAll(ar.cleanupDir, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(runWorkspace, "retained"), []byte("data"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(ar.cleanupDir, "retained"), []byte("data"), 0o600); err != nil {
 		t.Fatalf("write workspace file: %v", err)
 	}
 
 	runtimeClient := &fakeRuntimeClient{}
 	c := &Controller{runtimeCli: runtimeClient}
-	ar := &activeRun{run: run, workDir: runWorkspace, start: time.Now()}
 	c.activeRuns.Store(string(run.UID), ar)
 
 	c.cleanup(t.Context(), ar, v1alpha1.RunSucceeded)
@@ -1165,11 +1269,44 @@ func TestCleanupForgetsExecutionAndRemovesWorkspace(t *testing.T) {
 	if len(runtimeClient.forgetRequests) != 1 || runtimeClient.forgetRequests[0].Id != string(run.UID) {
 		t.Fatalf("Forget requests = %#v, want cleanup-uid", runtimeClient.forgetRequests)
 	}
-	if _, err := os.Stat(runWorkspace); !os.IsNotExist(err) {
+	if _, err := os.Stat(ar.cleanupDir); !os.IsNotExist(err) {
 		t.Fatalf("workspace still exists or stat failed unexpectedly: %v", err)
 	}
 	if c.activeRunCount() != 0 {
 		t.Fatalf("active runs = %d, want 0", c.activeRunCount())
+	}
+}
+
+func TestCleanupRetainsReferencedWorkspaceState(t *testing.T) {
+	setTestWorkspace(t)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "cleanup-shared", Namespace: "default", UID: "cleanup-shared-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "build"},
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+		},
+	}
+	ar := newActiveRun(run, time.Now())
+	sharedDir := ar.workDir
+	if err := os.MkdirAll(ar.cleanupDir, 0o755); err != nil {
+		t.Fatalf("create run-local workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedDir, "retained"), []byte("data"), 0o600); err != nil {
+		t.Fatalf("write shared workspace: %v", err)
+	}
+
+	runtimeClient := &fakeRuntimeClient{}
+	c := &Controller{runtimeCli: runtimeClient}
+	c.activeRuns.Store(string(run.UID), ar)
+
+	c.cleanup(t.Context(), ar, v1alpha1.RunSucceeded)
+
+	if _, err := os.Stat(filepath.Join(sharedDir, "retained")); err != nil {
+		t.Fatalf("shared workspace content was removed: %v", err)
+	}
+	if _, err := os.Stat(ar.cleanupDir); err != nil {
+		t.Fatalf("Run-local state was removed from PersistentWorkspace: %v", err)
 	}
 }
 
@@ -1192,8 +1329,8 @@ func TestReconcileDeletedRunReleasesActiveRun(t *testing.T) {
 		Spec:   v1alpha1.RunSpec{Runtime: "bash"},
 		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning},
 	}
-	runWorkspace := workspaceForRun(run)
-	if err := os.MkdirAll(runWorkspace, 0o755); err != nil {
+	ar := newActiveRun(run, time.Time{})
+	if err := os.MkdirAll(ar.cleanupDir, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 
@@ -1203,7 +1340,7 @@ func TestReconcileDeletedRunReleasesActiveRun(t *testing.T) {
 		Build()
 	runtimeClient := &fakeRuntimeClient{}
 	c := &Controller{Client: k8sClient, runtimeCli: runtimeClient}
-	c.activeRuns.Store(string(run.UID), &activeRun{run: run, workDir: runWorkspace})
+	c.activeRuns.Store(string(run.UID), ar)
 
 	if _, err := c.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -1215,7 +1352,7 @@ func TestReconcileDeletedRunReleasesActiveRun(t *testing.T) {
 	if len(runtimeClient.forgetRequests) != 1 || runtimeClient.forgetRequests[0].Id != string(run.UID) {
 		t.Fatalf("Forget requests = %#v, want deleted-uid", runtimeClient.forgetRequests)
 	}
-	if _, err := os.Stat(runWorkspace); !os.IsNotExist(err) {
+	if _, err := os.Stat(ar.cleanupDir); !os.IsNotExist(err) {
 		t.Fatalf("workspace still exists or stat failed unexpectedly: %v", err)
 	}
 }
@@ -1231,8 +1368,8 @@ func TestReconcileNotFoundRunReleasesActiveRunByName(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gone", Namespace: "default", UID: "gone-uid"},
 		Spec:       v1alpha1.RunSpec{Runtime: "bash"},
 	}
-	runWorkspace := workspaceForRun(run)
-	if err := os.MkdirAll(runWorkspace, 0o755); err != nil {
+	ar := newActiveRun(run, time.Time{})
+	if err := os.MkdirAll(ar.cleanupDir, 0o755); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 
@@ -1241,7 +1378,7 @@ func TestReconcileNotFoundRunReleasesActiveRunByName(t *testing.T) {
 		Build()
 	runtimeClient := &fakeRuntimeClient{}
 	c := &Controller{Client: k8sClient, runtimeCli: runtimeClient}
-	c.activeRuns.Store(string(run.UID), &activeRun{run: run, workDir: runWorkspace})
+	c.activeRuns.Store(string(run.UID), ar)
 
 	if _, err := c.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -1253,7 +1390,7 @@ func TestReconcileNotFoundRunReleasesActiveRunByName(t *testing.T) {
 	if len(runtimeClient.forgetRequests) != 1 || runtimeClient.forgetRequests[0].Id != string(run.UID) {
 		t.Fatalf("Forget requests = %#v, want gone-uid", runtimeClient.forgetRequests)
 	}
-	if _, err := os.Stat(runWorkspace); !os.IsNotExist(err) {
+	if _, err := os.Stat(ar.cleanupDir); !os.IsNotExist(err) {
 		t.Fatalf("workspace still exists or stat failed unexpectedly: %v", err)
 	}
 }
