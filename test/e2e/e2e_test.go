@@ -1857,6 +1857,63 @@ func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
 	waitForPendingRunMessage(t, lostRun, 30*time.Second, "was lost")
 }
 
+func TestWorkflowRunSharesJobLocalWorkspace(t *testing.T) {
+	ensureRuntime(t, "bash", bashRuntimeImage(), 9091)
+
+	workflowRun := &v1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("e2e-workspace-%d", time.Now().UnixNano()),
+			Namespace: testNamespace,
+		},
+		Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{
+			"build": {
+				RunsOn: "bash",
+				Steps: []v1alpha1.StepSpec{
+					{Name: "write", Run: "echo workflow-data > shared.txt"},
+					{Name: "read", Run: `test "$(cat shared.txt)" = workflow-data`},
+				},
+			},
+		}},
+	}
+	if err := k8sClient.Create(context.Background(), workflowRun); err != nil {
+		t.Fatalf("create WorkflowRun: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workflowRun) })
+
+	waitForWorkflowRunPhase(t, workflowRun, 30*time.Second, v1alpha1.WorkflowSucceeded)
+	var workspaces v1alpha1.PersistentWorkspaceList
+	if err := k8sClient.List(context.Background(), &workspaces, client.InNamespace(testNamespace), client.MatchingLabels{
+		v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+		v1alpha1.WorkflowJobLabel:    "build",
+	}); err != nil {
+		t.Fatalf("list job workspaces: %v", err)
+	}
+	if len(workspaces.Items) != 1 {
+		t.Fatalf("job workspaces = %#v, want one", workspaces.Items)
+	}
+	workspace := &workspaces.Items[0]
+	if workspace.Spec.Runtime != "bash" || !metav1.IsControlledBy(workspace, workflowRun) {
+		t.Fatalf("workspace = %#v, want WorkflowRun-owned bash workspace", workspace)
+	}
+
+	var runs v1alpha1.RunList
+	if err := k8sClient.List(context.Background(), &runs, client.InNamespace(testNamespace), client.MatchingLabels{
+		v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+		v1alpha1.WorkflowJobLabel:    "build",
+	}); err != nil {
+		t.Fatalf("list child Runs: %v", err)
+	}
+	if len(runs.Items) != 2 {
+		t.Fatalf("child Runs = %#v, want write and read", runs.Items)
+	}
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if run.Spec.Workspace == nil || run.Spec.Workspace.Name != workspace.Name {
+			t.Fatalf("Run %s workspace = %#v, want %q", run.Name, run.Spec.Workspace, workspace.Name)
+		}
+	}
+}
+
 func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration, phase v1alpha1.PersistentWorkspacePhase) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

@@ -42,6 +42,7 @@ rules:
     resources:
       - persistentworkspaces
     verbs:
+      - create
       - get
       - list
       - watch

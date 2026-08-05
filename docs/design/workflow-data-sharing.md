@@ -335,7 +335,7 @@ workspace capacity or failing because its controller-owned workspace was lost.
 | Workflow controller | Interprets job/step semantics, creates job-local workspaces from controller defaults, creates child Runs, wires artifact inputs, promotes outputs/artifact refs into Workflow status. |
 | PersistentWorkspace controller | Owns workspace lifecycle, binding to Runtime workspace volumes, status, TTL, and cleanup. |
 | Scheduler | Snapshots generic Run, Runtime Pod, and referenced workspace state; applies workspace fencing, Runtime capacity, and Run affinity/anti-affinity. It does not know about Workflows. |
-| runtimed | Prepares referenced workspace paths, stages artifact inputs, collects artifact outputs, and cleans per-Run temporary state. It does not know about Workflows. |
+| runtimed | Prepares referenced workspace paths, stages artifact inputs, and collects artifact outputs. It does not know about Workflows or delete referenced workspace paths. |
 | ArtifactStore | Stores durable artifacts outside etcd. |
 
 ## Failure and Recovery
@@ -395,7 +395,11 @@ Required safeguards:
    outputs and artifact staging remain Run-local; task source is staged under
    the reserved per-Run directory. PersistentWorkspace lifecycle owns cleanup
    within the workspace.
-10. Compose job-local workspaces in the Workflow controller.
+10. Compose job-local workspaces in the Workflow controller. **Implemented:**
+    initialization creates one WorkflowRun-owned PersistentWorkspace for each
+    inline job and every child Run for that job references it. Reusable
+    Workflow-call jobs create no parent workspace; their materialized child
+    WorkflowRun owns its own job workspaces.
 11. Add Workflow step artifact input fields and job-scoped artifact status.
 12. Promote child Run artifact refs into Workflow status.
 13. Add E2E coverage for Runtime workspace volume sources, job-local workspace

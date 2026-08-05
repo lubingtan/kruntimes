@@ -303,7 +303,7 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 | Workflow controller | 解释 job/step 语义，基于 controller defaults 创建 job-local workspaces，创建 child Runs，连接 artifact inputs，并把 outputs/artifact refs 提升到 Workflow status。 |
 | PersistentWorkspace controller | 拥有 workspace lifecycle、绑定到 Runtime workspace volumes、status、TTL 和 cleanup。 |
 | Scheduler | Snapshot 通用 Run、Runtime Pod 和 referenced workspace state；应用 workspace fencing、Runtime capacity 和 Run affinity/anti-affinity。不理解 Workflows。 |
-| runtimed | 准备被引用的 workspace paths，stage artifact inputs，collect artifact outputs，并清理 per-Run temporary state。不理解 Workflows。 |
+| runtimed | 准备被引用的 workspace paths，stage artifact inputs，collect artifact outputs。不理解 Workflows，也不删除 referenced workspace 中的路径。 |
 | ArtifactStore | 将 durable artifacts 存储在 etcd 之外。 |
 
 ## 失败和恢复
@@ -355,7 +355,11 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    referenced Run 在 persistent workspace 中执行；outputs 和 artifact staging 仍然是
    Run-local；task source 被 stage 到保留的 per-Run directory。PersistentWorkspace lifecycle
    负责 workspace 内的 cleanup。
-10. 在 Workflow controller 中组合 job-local workspaces。
+10. 在 Workflow controller 中组合 job-local workspaces。**已实现：**
+    初始化时会为每个 inline job 创建一个由 WorkflowRun 拥有的
+    PersistentWorkspace，并让该 job 的每个 child Run 引用它。reusable
+    Workflow-call job 不在父级创建 workspace；其 materialized child
+    WorkflowRun 拥有自己的 job workspace。
 11. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
 12. 将 child Run artifact refs 提升到 Workflow status。
 13. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
