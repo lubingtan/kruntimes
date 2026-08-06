@@ -93,6 +93,34 @@ spec:
                               type: string
                             maxItems: 256
                             type: array
+                          artifacts:
+                            description: |-
+                              Artifacts identifies artifacts produced by dependency jobs and materializes
+                              them below this step's working directory before execution.
+                            items:
+                              description: |-
+                                WorkflowArtifactInput identifies an artifact produced by another Workflow
+                                job and the relative path where it will be materialized for this step.
+                              properties:
+                                from:
+                                  description: From identifies a job-scoped artifact
+                                    as jobs.<job-id>.artifacts.<name>.
+                                  maxLength: 4096
+                                  minLength: 1
+                                  type: string
+                                path:
+                                  description: Path is the relative destination below
+                                    the Run working directory.
+                                  maxLength: 4096
+                                  minLength: 1
+                                  pattern: ^[^/].*$
+                                  type: string
+                              required:
+                              - from
+                              - path
+                              type: object
+                            maxItems: 32
+                            type: array
                           env:
                             additionalProperties:
                               type: string
@@ -135,8 +163,10 @@ spec:
                           rule: has(self.run) != has(self.uses)
                         - message: with can only be set when uses is set
                           rule: '!has(self.with) || has(self.uses)'
-                        - message: args and env can only be set on run steps
-                          rule: '!has(self.uses) || (!has(self.args) && !has(self.env))'
+                        - message: args, env, and artifacts can only be set on run
+                            steps
+                          rule: '!has(self.uses) || (!has(self.args) && !has(self.env)
+                            && !has(self.artifacts))'
                       maxItems: 128
                       minItems: 1
                       type: array
@@ -253,6 +283,114 @@ spec:
                   description: JobStatus tracks the execution status of a WorkflowRun
                     job.
                   properties:
+                    artifacts:
+                      additionalProperties:
+                        description: ArtifactRef is compact metadata that points to
+                          artifact content stored outside etcd.
+                        properties:
+                          contentType:
+                            description: ContentType is the detected media type.
+                            maxLength: 255
+                            type: string
+                          createdAt:
+                            description: CreatedAt records when the artifact was stored.
+                            format: date-time
+                            type: string
+                          digest:
+                            description: Digest is the content digest, including its
+                              algorithm prefix.
+                            maxLength: 256
+                            type: string
+                          driver:
+                            description: Driver identifies the ArtifactStore implementation.
+                            enum:
+                            - filesystem
+                            - s3
+                            type: string
+                          location:
+                            description: Location contains driver-specific storage
+                              coordinates.
+                            properties:
+                              filesystem:
+                                description: Filesystem identifies an artifact in
+                                  a filesystem store.
+                                properties:
+                                  path:
+                                    description: Path is relative to the artifact
+                                      store root.
+                                    maxLength: 4096
+                                    minLength: 1
+                                    type: string
+                                  volumeClaimName:
+                                    description: VolumeClaimName identifies the PVC
+                                      backing the filesystem store.
+                                    maxLength: 253
+                                    type: string
+                                required:
+                                - path
+                                type: object
+                              s3:
+                                description: S3 identifies an artifact in an S3-compatible
+                                  object store.
+                                properties:
+                                  bucket:
+                                    description: Bucket is the object store bucket.
+                                    maxLength: 255
+                                    minLength: 1
+                                    type: string
+                                  key:
+                                    description: Key is the object key within the
+                                      bucket.
+                                    maxLength: 4096
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - bucket
+                                - key
+                                type: object
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exactly one artifact location must be set
+                              rule: has(self.filesystem) != has(self.s3)
+                          name:
+                            description: |-
+                              Name is the logical artifact name exposed by the Run.
+                              Artifact collection enforces the same 255-byte upper bound.
+                            maxLength: 255
+                            minLength: 1
+                            type: string
+                          sizeBytes:
+                            description: SizeBytes is the stored artifact size.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                          type:
+                            description: Type describes how the artifact content is
+                              represented.
+                            enum:
+                            - file
+                            - directory
+                            - archive
+                            - blob
+                            type: string
+                        required:
+                        - createdAt
+                        - driver
+                        - location
+                        - name
+                        - sizeBytes
+                        - type
+                        type: object
+                        x-kubernetes-validations:
+                        - message: artifact location must match driver
+                          rule: (self.driver == 'filesystem' && has(self.location.filesystem))
+                            || (self.driver == 's3' && has(self.location.s3))
+                      description: |-
+                        Artifacts maps job-local artifact names to compact references stored
+                        outside etcd. It contains the latest successful child Run reference for
+                        each name in job step order.
+                      maxProperties: 32
+                      type: object
                     outputs:
                       additionalProperties:
                         type: string

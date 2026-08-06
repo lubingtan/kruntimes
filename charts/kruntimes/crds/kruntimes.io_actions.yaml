@@ -99,6 +99,34 @@ spec:
                         type: string
                       maxItems: 256
                       type: array
+                    artifacts:
+                      description: |-
+                        Artifacts identifies artifacts produced by dependency jobs and materializes
+                        them below this step's working directory before execution.
+                      items:
+                        description: |-
+                          WorkflowArtifactInput identifies an artifact produced by another Workflow
+                          job and the relative path where it will be materialized for this step.
+                        properties:
+                          from:
+                            description: From identifies a job-scoped artifact as
+                              jobs.<job-id>.artifacts.<name>.
+                            maxLength: 4096
+                            minLength: 1
+                            type: string
+                          path:
+                            description: Path is the relative destination below the
+                              Run working directory.
+                            maxLength: 4096
+                            minLength: 1
+                            pattern: ^[^/].*$
+                            type: string
+                        required:
+                        - from
+                        - path
+                        type: object
+                      maxItems: 32
+                      type: array
                     env:
                       additionalProperties:
                         type: string
@@ -140,8 +168,9 @@ spec:
                     rule: has(self.run) != has(self.uses)
                   - message: with can only be set when uses is set
                     rule: '!has(self.with) || has(self.uses)'
-                  - message: args and env can only be set on run steps
-                    rule: '!has(self.uses) || (!has(self.args) && !has(self.env))'
+                  - message: args, env, and artifacts can only be set on run steps
+                    rule: '!has(self.uses) || (!has(self.args) && !has(self.env) &&
+                      !has(self.artifacts))'
                 maxItems: 128
                 minItems: 1
                 type: array

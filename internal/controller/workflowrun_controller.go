@@ -264,6 +264,9 @@ func (r *WorkflowRunReconciler) applyInitializeWorkflowRun(ctx context.Context, 
 		if err != nil {
 			return rejectWorkflowRun(workflowRun, "WorkflowValidationFailed", err.Error())
 		}
+		if err := validateWorkflowArtifactDependencies(snapshot.Spec.Jobs, snapshot.Actions); err != nil {
+			return rejectWorkflowRun(workflowRun, "WorkflowValidationFailed", err.Error())
+		}
 		persistedName, persistedSnapshot, err := r.ensureWorkflowSnapshot(ctx, workflowRun, snapshot)
 		if err != nil {
 			var snapshotErr *workflowSnapshotError
@@ -686,7 +689,11 @@ func (r *WorkflowRunReconciler) createOrReuseStepRun(ctx context.Context, resour
 	if err != nil {
 		return nil, &workflowStepValidationError{err: err}
 	}
-	run = buildStepRun(workflowRun, target.jobName, step.Name, actionStepName, job, resolved, workflowStepLabels(workflowRun, target.jobName, step.Name, actionStepName))
+	artifactInputs, err := resolveWorkflowArtifactInputs(resolved.Artifacts, workflowRun.Status.Jobs)
+	if err != nil {
+		return nil, &workflowStepValidationError{err: err}
+	}
+	run = buildStepRun(workflowRun, target.jobName, step.Name, actionStepName, job, resolved, artifactInputs, workflowStepLabels(workflowRun, target.jobName, step.Name, actionStepName))
 	if err := controllerutil.SetControllerReference(workflowRun, run, r.Scheme); err != nil {
 		return nil, fmt.Errorf("set workflowrun owner reference on run %s/%s: %w", run.Namespace, run.Name, err)
 	}
@@ -1135,6 +1142,7 @@ func deriveJobStatuses(resources *workflowRunResources) {
 				workflowRun.Status.Message = fmt.Sprintf("resolve outputs for job %q: %v", jobName, err)
 			} else {
 				status.Outputs = outputs
+				status.Artifacts = resolveJobArtifactRefs(status, resources.childRuns)
 			}
 		}
 		workflowRun.Status.Jobs[jobName] = status
@@ -1417,7 +1425,7 @@ func terminalRunStepPhase(phase v1alpha1.RunPhase) (v1alpha1.StepPhase, bool) {
 	}
 }
 
-func buildStepRun(workflowRun *v1alpha1.WorkflowRun, jobName, stepName, actionStepName string, job v1alpha1.JobSpec, step v1alpha1.StepSpec, labels map[string]string) *v1alpha1.Run {
+func buildStepRun(workflowRun *v1alpha1.WorkflowRun, jobName, stepName, actionStepName string, job v1alpha1.JobSpec, step v1alpha1.StepSpec, artifactInputs []v1alpha1.ArtifactInput, labels map[string]string) *v1alpha1.Run {
 	inline := step.Run
 	env := make([]corev1.EnvVar, 0, len(step.Env))
 	envNames := make([]string, 0, len(step.Env))
@@ -1435,8 +1443,9 @@ func buildStepRun(workflowRun *v1alpha1.WorkflowRun, jobName, stepName, actionSt
 			Labels:    labels,
 		},
 		Spec: v1alpha1.RunSpec{
-			Runtime: job.RunsOn,
-			Source:  &v1alpha1.CodeSource{Inline: &inline},
+			Runtime:        job.RunsOn,
+			Source:         &v1alpha1.CodeSource{Inline: &inline},
+			ArtifactInputs: artifactInputs,
 			Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{
 				Args: slices.Clone(step.Args),
 			}},

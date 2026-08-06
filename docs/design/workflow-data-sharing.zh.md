@@ -279,7 +279,7 @@ spec:
         - name: verify-artifact
           artifacts:
             - from: jobs.build.artifacts.dist.tgz
-              path: ./dist.tgz
+              path: dist.tgz
           run: |
             tar -tzf dist.tgz
             echo "artifact verified"
@@ -311,9 +311,13 @@ status:
       artifacts:
         dist.tgz:
           name: dist.tgz
-          uri: s3://kruntimes-artifacts/workflows/ci-data-sharing-demo/jobs/build/dist.tgz
+          driver: Filesystem
+          type: File
+          location:
+            filesystem:
+              path: runs/<run-uid>/artifacts/dist.tgz
       steps:
-        package:
+        - name: package
           runName: ci-data-sharing-demo-build-package
           outputs:
             tests: passed

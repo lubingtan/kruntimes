@@ -1977,6 +1977,74 @@ func TestWorkflowRunSharesJobLocalWorkspace(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunTransfersArtifactsBetweenJobs(t *testing.T) {
+	runtimeName := fmt.Sprintf("workflow-artifacts-%d", time.Now().UnixNano())
+	claimName := runtimeName + "-artifacts"
+	ensureFilesystemRuntime(t, runtimeName, claimName)
+
+	workflowRun := &v1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-workflow-artifacts-" + fmt.Sprint(time.Now().UnixNano()), Namespace: testNamespace},
+		Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{
+			"build": {
+				RunsOn: runtimeName,
+				Steps: []v1alpha1.StepSpec{{
+					Name: "package",
+					Run:  `mkdir -p "$KRUNTIME_ARTIFACTS_DIR"; printf workflow-artifact > "$KRUNTIME_ARTIFACTS_DIR/dist.txt"`,
+				}},
+			},
+			"verify": {
+				RunsOn: runtimeName,
+				Needs:  []string{"build"},
+				Steps: []v1alpha1.StepSpec{{
+					Name: "verify",
+					Artifacts: []v1alpha1.WorkflowArtifactInput{{
+						From: "jobs.build.artifacts.dist.txt",
+						Path: "dist.txt",
+					}},
+					Run: `test "$(cat dist.txt)" = workflow-artifact`,
+				}},
+			},
+		}},
+	}
+	if err := k8sClient.Create(context.Background(), workflowRun); err != nil {
+		t.Fatalf("create artifact WorkflowRun: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workflowRun) })
+
+	waitForWorkflowRunPhase(t, workflowRun, 45*time.Second, v1alpha1.WorkflowSucceeded)
+	artifact, found := workflowRun.Status.Jobs["build"].Artifacts["dist.txt"]
+	if !found || artifact.Location.Filesystem == nil || artifact.Location.Filesystem.Path == "" {
+		t.Fatalf("build artifacts = %#v, want dist.txt filesystem reference", workflowRun.Status.Jobs["build"].Artifacts)
+	}
+
+	missingArtifact := workflowRun.DeepCopy()
+	missingArtifact.ResourceVersion = ""
+	missingArtifact.UID = ""
+	missingArtifact.Name = workflowRun.Name + "-missing"
+	missingArtifact.CreationTimestamp = metav1.Time{}
+	missingArtifact.Status = v1alpha1.WorkflowRunStatus{}
+	missingArtifact.Spec.Jobs["verify"] = v1alpha1.JobSpec{
+		RunsOn: runtimeName,
+		Needs:  []string{"build"},
+		Steps: []v1alpha1.StepSpec{{
+			Name: "verify",
+			Artifacts: []v1alpha1.WorkflowArtifactInput{{
+				From: "jobs.build.artifacts.missing.txt",
+				Path: "missing.txt",
+			}},
+			Run: "exit 0",
+		}},
+	}
+	if err := k8sClient.Create(context.Background(), missingArtifact); err != nil {
+		t.Fatalf("create missing-artifact WorkflowRun: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), missingArtifact) })
+	waitForWorkflowRunPhase(t, missingArtifact, 45*time.Second, v1alpha1.WorkflowFailed)
+	if status := missingArtifact.Status.Jobs["verify"]; status.Phase != v1alpha1.JobFailed {
+		t.Fatalf("missing artifact verify job = %#v, want Failed", status)
+	}
+}
+
 func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration, phase v1alpha1.PersistentWorkspacePhase) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
