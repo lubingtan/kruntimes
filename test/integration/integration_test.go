@@ -447,6 +447,23 @@ func TestRunArtifactRefValidation(t *testing.T) {
 		t.Fatalf("create namespace: %v", err)
 	}
 	defer func() { _ = k8sClient.Delete(ctx, ns) }()
+	invalidInput := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-artifact-input", Namespace: ns.Name},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash", Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+			ArtifactInputs: []v1alpha1.ArtifactInput{{
+				Path: "../escape",
+				Ref: v1alpha1.ArtifactRef{
+					Name: "report", Driver: v1alpha1.ArtifactDriverFilesystem, Type: v1alpha1.ArtifactTypeFile,
+					Location:  v1alpha1.ArtifactLocation{Filesystem: &v1alpha1.FilesystemArtifactLocation{Path: "runs/source/report"}},
+					CreatedAt: metav1.Now(),
+				},
+			}},
+		},
+	}
+	if err := k8sClient.Create(ctx, invalidInput); !apierrors.IsInvalid(err) {
+		t.Fatalf("invalid artifact input path error = %v, want Invalid", err)
+	}
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "artifact-ref", Namespace: ns.Name},
@@ -846,6 +863,14 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 					Entrypoint: "script",
 					Args:       []string{"--verbose"},
 				}},
+				ArtifactInputs: []v1alpha1.ArtifactInput{{
+					Path: "inputs/report.txt",
+					Ref: v1alpha1.ArtifactRef{
+						Name: "report.txt", Driver: v1alpha1.ArtifactDriverFilesystem, Type: v1alpha1.ArtifactTypeFile,
+						Location:  v1alpha1.ArtifactLocation{Filesystem: &v1alpha1.FilesystemArtifactLocation{Path: "runs/source/report.txt"}},
+						CreatedAt: metav1.Now(),
+					},
+				}},
 				Env:     []corev1.EnvVar{{Name: "LOG_LEVEL", Value: "info"}},
 				Timeout: &timeout,
 				RetryPolicy: &v1alpha1.RetryPolicy{
@@ -895,6 +920,12 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 			name: "mode",
 			mutate: func(run *v1alpha1.Run) {
 				run.Spec.Mode = v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "main.handle"}}
+			},
+		},
+		{
+			name: "artifact-inputs",
+			mutate: func(run *v1alpha1.Run) {
+				run.Spec.ArtifactInputs[0].Path = "inputs/updated.txt"
 			},
 		},
 		{

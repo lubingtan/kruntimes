@@ -75,6 +75,40 @@ step -> KRUNTIME_OUTPUTS -> Run.status.outputs -> Workflow status
 Larger files should not be embedded in Workflow or Run status. They should move
 through artifact references or a referenced workspace.
 
+### Artifact Input Contract
+
+Artifact transfer has two layers so that the Workflow controller never copies
+data and runtimed never needs Workflow knowledge:
+
+1. A generic Run artifact input contains an immutable `ArtifactRef` and a
+   relative destination path. Before execution, runtimed opens the reference
+   through its configured `ArtifactStore` and safely stages it below the Run
+   working directory. File artifacts are copied to the destination path;
+   directory artifacts are extracted into it without permitting symlinks or
+   path traversal.
+2. A Workflow step expresses the source as
+   `jobs.<job-id>.artifacts.<artifact-name>`. When its job becomes ready, the
+   Workflow controller resolves that name from the producing job's compact
+   artifact status and materializes the generic Run input. Neither the Run API
+   nor runtimed contains a Workflow, job, or step identifier.
+
+The producing job must be a `needs` dependency of the consuming job. A missing
+artifact after all dependencies have succeeded is a deterministic Workflow job
+failure, rather than a request that waits forever.
+
+An `ArtifactRef` identifies storage coordinates, not authorization. In v0.x,
+jobs that exchange artifacts must use compatible `Runtime.spec.artifactStore`
+configuration: the consuming runtimed must be able to open the producer's
+reference with its own credentials and store scope. This supports shared PVC
+filesystem stores and shared S3 bucket/prefix access. A project-wide artifact
+relay with independent credentials is a future feature; the Workflow controller
+does not proxy artifact bytes.
+
+Artifact names form one job-local namespace. Job status projects the most
+recent successful child Run reference for each name, so a later sequential step
+can intentionally replace an earlier artifact. Consumers read the final
+producer-job reference after that job succeeds.
+
 ## PersistentWorkspace CRD
 
 `PersistentWorkspace` represents a workspace boundary and lifecycle. It is not a

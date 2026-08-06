@@ -1322,6 +1322,69 @@ func TestFilesystemArtifacts(t *testing.T) {
 	assertFilesystemArtifactMissing(t, claimName, report.Location.Filesystem.Path)
 }
 
+func TestRunStagesArtifactInputs(t *testing.T) {
+	runtimeName := "bash-artifact-inputs"
+	claimName := "e2e-artifact-inputs"
+	ensureFilesystemRuntime(t, runtimeName, claimName)
+
+	producer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-artifact-producer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    taskMode(`mkdir -p "$KRUNTIME_ARTIFACTS_DIR/bundle"; printf report > "$KRUNTIME_ARTIFACTS_DIR/report.txt"; printf nested > "$KRUNTIME_ARTIFACTS_DIR/bundle/data.txt"`),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), producer); err != nil {
+		t.Fatalf("create artifact producer: %v", err)
+	}
+	waitForRun(t, producer, 30*time.Second)
+
+	refs := make(map[string]v1alpha1.ArtifactRef, len(producer.Status.ArtifactRefs))
+	for _, ref := range producer.Status.ArtifactRefs {
+		refs[ref.Name] = ref
+	}
+	report, reportFound := refs["report.txt"]
+	bundle, bundleFound := refs["bundle"]
+	if !reportFound || !bundleFound {
+		t.Fatalf("producer artifact refs = %#v, want report.txt and bundle", producer.Status.ArtifactRefs)
+	}
+
+	consumer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-artifact-consumer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			ArtifactInputs: []v1alpha1.ArtifactInput{
+				{Ref: report, Path: "inputs/report.txt"},
+				{Ref: bundle, Path: "inputs/bundle"},
+			},
+			Mode: taskMode(`test "$(cat inputs/report.txt)" = report && test "$(cat inputs/bundle/data.txt)" = nested`),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), consumer); err != nil {
+		t.Fatalf("create artifact consumer: %v", err)
+	}
+	waitForRun(t, consumer, 30*time.Second)
+
+	missing := report.DeepCopy()
+	missing.Name = "missing.txt"
+	missing.Location.Filesystem.Path = filepath.ToSlash(filepath.Join("namespaces", testNamespace, "runs", "missing", missing.Name))
+	missingConsumer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-missing-artifact-consumer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:        runtimeName,
+			ArtifactInputs: []v1alpha1.ArtifactInput{{Ref: *missing, Path: "inputs/missing.txt"}},
+			Mode:           taskMode(`exit 1`),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), missingConsumer); err != nil {
+		t.Fatalf("create missing-artifact consumer: %v", err)
+	}
+	waitForRunPhase(t, missingConsumer, 30*time.Second, v1alpha1.RunFailed)
+	if !strings.Contains(missingConsumer.Status.Message, "open artifact input") {
+		t.Fatalf("missing artifact consumer message = %q, want artifact input error", missingConsumer.Status.Message)
+	}
+}
+
 func deleteRuntimeAndWait(t *testing.T, name string, timeout time.Duration) {
 	t.Helper()
 	runtimeResource := &v1alpha1.Runtime{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}

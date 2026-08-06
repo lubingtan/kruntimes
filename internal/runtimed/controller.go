@@ -748,6 +748,9 @@ func (c *Controller) startExecution(ctx context.Context, ar *activeRun) error {
 	if err := os.Remove(ar.outputPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reset outputs file: %w", err)
 	}
+	if err := c.stageArtifactInputs(ctx, ar); err != nil {
+		return err
+	}
 	env[artifact.OutputsEnv] = ar.outputPath
 	artifactsDir, err := c.prepareArtifactStaging(ar)
 	if err != nil {

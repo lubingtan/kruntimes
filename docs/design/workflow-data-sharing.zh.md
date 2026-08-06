@@ -66,6 +66,33 @@ step -> KRUNTIME_OUTPUTS -> Run.status.outputs -> Workflow status
 较大的文件不应嵌入 Workflow 或 Run status。它们应通过 artifact references 或被引用的
 workspace 传递。
 
+### Artifact Input Contract
+
+artifact transfer 分为两层，这样 Workflow controller 不复制数据，而 runtimed
+也不需要了解 Workflow：
+
+1. 通用 Run artifact input 包含 immutable `ArtifactRef` 和 relative destination
+   path。执行前，runtimed 通过配置的 `ArtifactStore` 打开该 reference，并将内容安全地
+   stage 到 Run working directory 下。file artifact 会复制到 destination path；directory
+   artifact 会被解压到该位置，且不允许 symlink 或 path traversal。
+2. Workflow step 使用 `jobs.<job-id>.artifacts.<artifact-name>` 表达 source。当 job
+   ready 后，Workflow controller 从 producing job 的 compact artifact status 解析该名称，
+   再 materialize 通用 Run input。Run API 和 runtimed 都不包含 Workflow、job 或 step
+   identifier。
+
+producing job 必须是 consuming job 的 `needs` dependency。当所有 dependencies 都成功后
+artifact 仍不存在时，Workflow job 应 deterministically failed，而不是无限等待。
+
+`ArtifactRef` 只标识 storage coordinates，不携带 authorization。v0.x 中，交换 artifacts
+的 jobs 必须使用 compatible 的 `Runtime.spec.artifactStore` configuration：consuming
+runtimed 必须能用自己的 credentials 和 store scope 打开 producer reference。该约束支持 shared
+PVC filesystem store 和 shared S3 bucket/prefix access。具有 independent credentials 的
+project-wide artifact relay 是后续 feature；Workflow controller 不代理 artifact bytes。
+
+artifact name 在同一个 job 内形成一个 namespace。Job status 会为每个名称投影最近成功的 child
+Run reference，因此后续 sequential step 可以有意替换前一个 artifact。consumer 会在 producer job
+succeed 后读取其最终 reference。
+
 ## PersistentWorkspace CRD
 
 `PersistentWorkspace` 表示 workspace 边界和生命周期。它不是 Workflow-specific 对象；
