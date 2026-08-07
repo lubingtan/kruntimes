@@ -209,6 +209,44 @@ The binding controller should use the following v0.x rules:
 Binding is metadata-only in this slice. TTL cleanup, filesystem deletion,
 `lastUsedTime`, and Run admission/preparation remain separate follow-up work.
 
+### Cleanup Protocol
+
+`PersistentWorkspace` cleanup is a two-part protocol. The controller owns the
+logical lifecycle; runtimed owns deletion of bytes in the Runtime Pod-local
+mount. The controller must never use Pod exec or assume that a custom Runtime
+implements a shell command merely to remove a workspace.
+
+1. The PersistentWorkspace controller indexes Runs by `spec.workspace.name`.
+   A workspace is active while any referencing Run is non-terminal. When the
+   last active Run becomes terminal, the controller sets `status.lastUsedTime`
+   once. A newly Bound workspace with no Runs starts its unused interval when
+   it becomes Bound.
+2. `cleanupPolicy: DeleteAfterTTL` starts cleanup only when
+   `ttlSecondsAfterUnused` is set and has elapsed. A nil TTL deliberately means
+   no automatic deletion. `Retain` never starts automatic cleanup.
+3. On a cleanup request, the controller changes the workspace to `Released`,
+   then requests Kubernetes deletion while keeping a dedicated workspace
+   finalizer. A Released workspace is terminal for scheduling: no new Run may
+   claim it.
+4. The runtimed instance on the recorded `status.boundPod` watches only
+   workspace objects bound to its own Pod. After independently confirming that
+   no local non-terminal Run references the workspace, it removes exactly
+   `/workspace/persistent/<workspace-name>` and removes that finalizer. It does
+   not write Workspace status. Runtimed does not need Workflow knowledge or any
+   runtime-server extension for this operation.
+5. The controller is the only status writer. If its bound Pod has disappeared,
+   the workspace is already `Lost`; there is no remaining Pod-local data to
+   remove, so the controller removes the finalizer without waiting for
+   runtimed.
+
+Deletion follows the same protocol for `DeleteAfterTTL`, regardless of the
+TTL: the finalizer keeps the object until the bound runtimed removes it after
+physical removal. A `Retain` workspace has no cleanup finalizer and
+leaves its Pod-local directory to the Runtime Pod lifecycle. If a live bound
+Pod is unavailable, cleanup remains pending rather than risking a directory on
+another Pod; deletion of that Pod transitions the workspace to `Lost` and
+unblocks the finalizer.
+
 ## Run Workspace Reference
 
 Runs should be able to reference a workspace through a small typed object
@@ -400,6 +438,8 @@ Required safeguards:
 - labels for workflow, job, and controller ownership;
 - validation that rejects absolute paths and path traversal in artifact inputs;
 - explicit cleanup policy and TTL;
+- finalizer-based deletion, active-Run usage tracking, and runtimed-only
+  physical cleanup for `DeleteAfterTTL` workspaces;
 - documented warning that shared workspace is not hostile-code isolation.
 
 ## Implementation Sequence
@@ -447,3 +487,7 @@ Required safeguards:
     permission boundaries. **Partially implemented:** the Runtime workspace,
     job-local sharing, Run artifact staging, and job-to-job transfer paths are
     covered. Cleanup and permission-boundary coverage remain.
+14. Implement the cleanup protocol: active-Run tracking, Released admission
+    fencing, a workspace finalizer, runtimed local-path cleanup, and E2E
+    coverage for TTL, explicit deletion, retained workspaces, and bound-Pod
+    loss during cleanup.

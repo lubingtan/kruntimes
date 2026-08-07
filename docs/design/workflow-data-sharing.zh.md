@@ -179,6 +179,33 @@ binding controller 在 v0.x 中应遵循以下规则：
 这个 binding slice 仅写入 metadata。TTL cleanup、filesystem deletion、`lastUsedTime` 和 Run
 admission/preparation 都是独立的后续工作。
 
+### Cleanup Protocol
+
+`PersistentWorkspace` cleanup 是两部分协议。controller 负责 logical lifecycle；runtimed
+负责删除 Runtime Pod-local mount 中的 bytes。controller 不得通过 Pod exec 删除路径，也不得因为
+删除 workspace 而假定某个 custom Runtime 实现了 shell command。
+
+1. PersistentWorkspace controller 按 `spec.workspace.name` 为 Run 建立索引。当任一引用 Run
+   非 terminal 时 workspace 为 active。当最后一个 active Run 变为 terminal 时，controller
+   只设置一次 `status.lastUsedTime`。新 Bound 且没有 Run 的 workspace 从 Bound 时开始 unused
+   interval。
+2. `cleanupPolicy: DeleteAfterTTL` 仅在设置且到达 `ttlSecondsAfterUnused` 后开始 cleanup。nil TTL
+   有意表示不自动删除。`Retain` 永远不自动开始 cleanup。
+3. controller 请求 cleanup 时，将 workspace 置为 `Released`，然后请求 Kubernetes deletion，
+   同时保留专用 workspace finalizer。`Released` 对调度是 terminal：
+   不允许新的 Run claim 它。
+4. 已记录 `status.boundPod` 上的 runtimed 仅 watch 绑定到自己 Pod 的 workspace object。在独立确认
+   没有 local non-terminal Run 引用该 workspace 后，它只删除
+   `/workspace/persistent/<workspace-name>`，然后移除该 finalizer。它不写 Workspace status。该操作
+   不需要 Workflow 语义，也不需要 runtime-server extension。
+5. controller 是唯一的 status writer。如果其 bound Pod 已消失，workspace 已为 `Lost`；没有剩余
+   Pod-local data 需要删除，controller 不等待 runtimed 即可移除 finalizer。
+
+不论 TTL，`DeleteAfterTTL` 的显式 deletion 也遵循同一协议：finalizer 保留 object，直到 bound
+runtimed 在物理删除后移除 finalizer。`Retain` workspace 没有 cleanup finalizer，并把 Pod-local directory 留给 Runtime
+Pod lifecycle。如果 live bound Pod 暂时 unavailable，cleanup 保持 pending，不能冒险删除另一个 Pod
+上的目录；该 Pod 被删除后 workspace 转为 `Lost`，并解除 finalizer 阻塞。
+
 ## Run Workspace Reference
 
 Runs 应能通过一个小的 typed object reference 引用 workspace。`PersistentWorkspace` 是这个
@@ -359,6 +386,8 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 - workflow、job 和 controller ownership labels；
 - validation 拒绝 artifact inputs 中的绝对路径和 path traversal；
 - 显式 cleanup policy 和 TTL；
+- `DeleteAfterTTL` workspace 的 finalizer-based deletion、active-Run usage tracking 和仅由
+  runtimed 执行的 physical cleanup；
 - 文档警告 shared workspace 不是 hostile-code isolation。
 
 ## 实现顺序
@@ -398,3 +427,6 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。
    **部分实现：**已覆盖 Runtime workspace、job-local sharing、Run artifact staging 和
    job-to-job transfer；cleanup 与 permission boundary 覆盖仍未完成。
+14. 实现 cleanup protocol：active-Run tracking、Released admission fencing、workspace finalizer、
+    runtimed local-path cleanup，以及 TTL、explicit deletion、retained workspace 和 cleanup 中
+    bound-Pod loss 的 E2E 覆盖。

@@ -251,6 +251,9 @@ controller wiring 累积不必要的冲突。
     - [x] Runtime workspace sources、job-local sharing、job-to-job artifact passing 和
       Runtime Pod loss；
     - [ ] cleanup 和权限边界。
+  - [ ] 将 PersistentWorkspace cleanup 作为单独 review 的 lifecycle slice 实现：active Run
+    tracking、`Released` scheduling fence、finalizer-based deletion、仅 runtimed 执行的
+    Pod-local directory removal，以及 TTL/deletion/loss E2E 覆盖。
 - [x] Workflow reuse model：在 Workflow API 稳定前拆分执行实例和可复用定义。目标模型：
   - 将当前表示 execution instance 的 `Workflow` API 替换为 `WorkflowRun`；
   - `WorkflowRun.spec` 只包含 inline `jobs`；`krt workflow trigger` 将 reusable
