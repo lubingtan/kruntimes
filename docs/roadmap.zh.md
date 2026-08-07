@@ -240,14 +240,17 @@ controller wiring 累积不必要的冲突。
   - [x] 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent
     workspace 但不感知 Workflow 语义：只创建 bound workspace directory、保留其内容，并只
     清理 Run-local temporary state。
-  - [ ] 在 Workflow controller 中组合这些 generic primitives：创建并 owner job-local
+  - [x] 在 Workflow controller 中组合这些 generic primitives：创建并 owner job-local
     PersistentWorkspace、为每个 child Run 添加 workspace reference 和 bound-Pod placement，并在
     不向 Workflow API 暴露 workspace controls 的情况下呈现 workspace loss。
-  - [ ] 增加显式 step artifact inputs 和 job-scoped artifact references：将
+  - [x] 增加显式 step artifact inputs 和 job-scoped artifact references：将
     `jobs.<job>.artifacts.<name>` stage 到 downstream child Runs，并把 compact child Run
     artifact refs 提升到 Workflow status。
-  - [ ] 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
-    job-to-job artifact passing、Runtime Pod loss、cleanup 和权限边界。
+  - [ ] 完成 Runtime workspace volume sources、job-local workspace sharing、
+    job-to-job artifact passing、Runtime Pod loss、cleanup 和权限边界的 E2E 覆盖：
+    - [x] Runtime workspace sources、job-local sharing、job-to-job artifact passing 和
+      Runtime Pod loss；
+    - [ ] cleanup 和权限边界。
 - [x] Workflow reuse model：在 Workflow API 稳定前拆分执行实例和可复用定义。目标模型：
   - 将当前表示 execution instance 的 `Workflow` API 替换为 `WorkflowRun`；
   - `WorkflowRun.spec` 只包含 inline `jobs`；`krt workflow trigger` 将 reusable

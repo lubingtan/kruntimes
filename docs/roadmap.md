@@ -282,16 +282,19 @@ wiring from accumulating avoidable conflicts.
     persistent workspaces without knowing Workflow semantics; create only the
     bound workspace directory, preserve its contents, and clean only Run-local
     temporary state.
-  - [ ] compose the generic primitives in the Workflow controller: create and
+  - [x] compose the generic primitives in the Workflow controller: create and
     own a job-local PersistentWorkspace, add the workspace reference and
     bound-Pod placement to each child Run, and surface workspace loss without
     exposing workspace controls in Workflow APIs.
-  - [ ] add explicit step artifact inputs and job-scoped artifact references;
+  - [x] add explicit step artifact inputs and job-scoped artifact references;
     stage `jobs.<job>.artifacts.<name>` into downstream child Runs and promote
     compact child Run artifact refs into Workflow status.
-  - [ ] add E2E coverage for Runtime workspace volume sources, job-local
+  - [ ] complete E2E coverage for Runtime workspace volume sources, job-local
     workspace sharing, job-to-job artifact passing, Runtime Pod loss, cleanup,
-    and permission boundaries.
+    and permission boundaries:
+    - [x] Runtime workspace sources, job-local sharing, job-to-job artifact
+      passing, and Runtime Pod loss;
+    - [ ] cleanup and permission boundaries.
 - [x] Workflow reuse model: split execution instances from reusable
   definitions before Workflow APIs stabilize. Target model:
   - replace the current execution-instance `Workflow` API with `WorkflowRun`;

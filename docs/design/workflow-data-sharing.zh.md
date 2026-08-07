@@ -1,7 +1,8 @@
 # Workflow Data Sharing
 
-本文描述 v0.x 设计。API prerequisite、RuntimePodLocal binding、scheduler admission 和
-runtimed workspace preparation 已实现；Workflow composition 仍是独立的 implementation slice。
+本文描述 v0.x 设计。API prerequisite、RuntimePodLocal binding、scheduler admission、
+runtimed workspace preparation、Workflow job-local workspace 和 job-to-job artifact transfer
+均已实现。
 
 RuntimePodLocal binding、scheduler fencing 和 runtimed preparation：**已实现**
 
@@ -24,11 +25,7 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 - 通用 Run workspace references 和 Kubernetes-style Run affinity fields。
 - workspace-aware scheduler filtering，以及 workspace 变更触发的 Pending Run wakeup。
 
-当前尚不支持：
-
-- job 之间的 first-class artifact inputs；
-- 将 child Run artifact references 显式提升到 Workflow status；
-- shared job-local workspace 的 cleanup 和权限边界。
+当前尚不支持 shared job-local workspace 的 cleanup 和权限边界。
 
 ## 目标
 
@@ -392,6 +389,12 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
     Workflow-call job 不在父级创建 workspace；其 materialized child
     WorkflowRun 拥有自己的 job workspace。
 11. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
-12. 将 child Run artifact refs 提升到 Workflow status。
+    **已实现：**step 可从 direct `needs` dependency 引用
+    `jobs.<job-id>.artifacts.<artifact-name>`；controller 将其解析为通用的
+    `Run.spec.artifactInputs`。
+12. 将 child Run artifact refs 提升到 Workflow status。**已实现：**成功的 Job 在
+    `status.jobs.<job-id>.artifacts` 中暴露每个 artifact name 最后一次成功的 ref。
 13. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。
+   **部分实现：**已覆盖 Runtime workspace、job-local sharing、Run artifact staging 和
+   job-to-job transfer；cleanup 与 permission boundary 覆盖仍未完成。

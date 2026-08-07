@@ -1,8 +1,8 @@
 # Workflow Data Sharing
 
 This document describes the v0.x design. Its API prerequisites, RuntimePodLocal
-binding, scheduler admission, and runtimed workspace preparation are
-implemented; Workflow composition remains a separate implementation slice.
+binding, scheduler admission, runtimed workspace preparation, job-local
+Workflow workspaces, and job-to-job artifact transfer are implemented.
 
 RuntimePodLocal binding, scheduler fencing, and runtimed preparation:
 **Implemented**
@@ -30,11 +30,8 @@ The current experimental Workflow API supports:
 - workspace-aware scheduler filtering and Pending Run wakeups on workspace
   changes.
 
-It does not yet provide:
-
-- first-class artifact inputs between jobs;
-- explicit promotion of child Run artifact references into Workflow status;
-- cleanup and permission boundaries for shared job-local workspaces.
+It does not yet provide cleanup and permission boundaries for shared job-local
+workspaces.
 
 ## Goals
 
@@ -439,7 +436,14 @@ Required safeguards:
     Workflow-call jobs create no parent workspace; their materialized child
     WorkflowRun owns its own job workspaces.
 11. Add Workflow step artifact input fields and job-scoped artifact status.
-12. Promote child Run artifact refs into Workflow status.
+    **Implemented:** a step can reference
+    `jobs.<job-id>.artifacts.<artifact-name>` from a direct `needs` dependency;
+    the controller resolves it into a generic `Run.spec.artifactInputs` entry.
+12. Promote child Run artifact refs into Workflow status. **Implemented:** a
+    successful Job exposes the final successful ref for each artifact name in
+    `status.jobs.<job-id>.artifacts`.
 13. Add E2E coverage for Runtime workspace volume sources, job-local workspace
-   sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
-   permission boundaries.
+    sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
+    permission boundaries. **Partially implemented:** the Runtime workspace,
+    job-local sharing, Run artifact staging, and job-to-job transfer paths are
+    covered. Cleanup and permission-boundary coverage remain.
