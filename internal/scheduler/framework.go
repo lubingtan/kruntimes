@@ -55,6 +55,8 @@ func waitingMessageForFilterRejections(run *v1alpha1.Run, rejections map[filterR
 			return fmt.Sprintf("waiting for referenced PersistentWorkspace %q to bind", workspace)
 		case rejections[filterReasonWorkspaceLost] > 0:
 			return fmt.Sprintf("waiting for referenced PersistentWorkspace %q to be replaced after it was lost", workspace)
+		case rejections[filterReasonWorkspaceReleased] > 0:
+			return fmt.Sprintf("referenced PersistentWorkspace %q is being deleted", workspace)
 		case rejections[filterReasonWorkspaceBoundPodMismatch] > 0:
 			return fmt.Sprintf("waiting for bound Runtime Pod of PersistentWorkspace %q", workspace)
 		}
@@ -79,6 +81,7 @@ const (
 	filterReasonWorkspaceRuntimeMismatch  filterReason = "WorkspaceRuntimeMismatch"
 	filterReasonWorkspaceUnbound          filterReason = "WorkspaceUnbound"
 	filterReasonWorkspaceLost             filterReason = "WorkspaceLost"
+	filterReasonWorkspaceReleased         filterReason = "WorkspaceReleased"
 	filterReasonWorkspaceBoundPodMismatch filterReason = "WorkspaceBoundPodMismatch"
 	filterReasonRunAffinity               filterReason = "UnsatisfiedRunAffinity"
 	filterReasonRunAntiAffinity           filterReason = "UnsatisfiedRunAntiAffinity"

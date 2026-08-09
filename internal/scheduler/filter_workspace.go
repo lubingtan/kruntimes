@@ -25,6 +25,9 @@ func newWorkspaceFilter(_ *RunReconciler, snapshot *schedulingSnapshot, _ *sched
 	if workspace.Status.Phase == v1alpha1.PersistentWorkspaceLost {
 		return &workspaceFilter{reason: filterReasonWorkspaceLost}, nil
 	}
+	if workspace.Status.Phase == v1alpha1.PersistentWorkspaceReleased {
+		return &workspaceFilter{reason: filterReasonWorkspaceReleased}, nil
+	}
 	if workspace.Status.Phase != v1alpha1.PersistentWorkspaceBound || workspace.Status.BoundPod == "" || workspace.Status.BoundPodUID == "" {
 		return &workspaceFilter{reason: filterReasonWorkspaceUnbound}, nil
 	}

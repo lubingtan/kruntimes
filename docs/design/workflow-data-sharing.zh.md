@@ -201,10 +201,10 @@ admission/preparation 都是独立的后续工作。
 5. controller 是唯一的 status writer。如果其 bound Pod 已消失，workspace 已为 `Lost`；没有剩余
    Pod-local data 需要删除，controller 不等待 runtimed 即可移除 finalizer。
 
-不论 TTL，`DeleteAfterTTL` 的显式 deletion 也遵循同一协议：finalizer 保留 object，直到 bound
-runtimed 在物理删除后移除 finalizer。`Retain` workspace 没有 cleanup finalizer，并把 Pod-local directory 留给 Runtime
-Pod lifecycle。如果 live bound Pod 暂时 unavailable，cleanup 保持 pending，不能冒险删除另一个 Pod
-上的目录；该 Pod 被删除后 workspace 转为 `Lost`，并解除 finalizer 阻塞。
+所有已 Bound workspace 不论 cleanup policy 或 deletion 原因都遵循同一删除协议：finalizer 保留 object，直到 bound
+runtimed 在物理删除后移除 finalizer。`Retain` 仅禁止自动 TTL 删除；显式删除仍会移除 Pod-local directory。
+如果 live bound Pod 暂时 unavailable，cleanup 保持 pending，不能冒险删除另一个 Pod 上的目录；该 Pod 被删除后
+workspace 转为 `Lost`，并解除 finalizer 阻塞。
 
 ## Run Workspace Reference
 
@@ -386,7 +386,7 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 - workflow、job 和 controller ownership labels；
 - validation 拒绝 artifact inputs 中的绝对路径和 path traversal；
 - 显式 cleanup policy 和 TTL；
-- `DeleteAfterTTL` workspace 的 finalizer-based deletion、active-Run usage tracking 和仅由
+- 所有已 Bound workspace 的 finalizer-based deletion、active-Run usage tracking 和仅由
   runtimed 执行的 physical cleanup；
 - 文档警告 shared workspace 不是 hostile-code isolation。
 

@@ -26,8 +26,10 @@ const (
 	persistentWorkspaceAcceptedCondition = "Accepted"
 	persistentWorkspaceRuntimeCondition  = "RuntimeReady"
 	persistentWorkspaceBoundCondition    = "Bound"
+	persistentWorkspaceInUseCondition    = "InUse"
 	persistentWorkspacePathPrefix        = "/workspace/persistent"
 	persistentWorkspaceRuntimeLabel      = "runtime"
+	persistentWorkspaceRunWorkspaceField = "spec.workspace.name"
 )
 
 // PersistentWorkspaceReconciler owns PersistentWorkspace lifecycle state.
@@ -40,6 +42,7 @@ type PersistentWorkspaceReconciler struct {
 // +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runtimes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kruntimes.io,resources=runs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -49,7 +52,7 @@ func (r *PersistentWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !workspace.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		return r.reconcileDeletingWorkspace(ctx, &workspace)
 	}
 	original := workspace.DeepCopy()
 
@@ -91,11 +94,25 @@ func (r *PersistentWorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.
 	if workspace.Status.Phase == v1alpha1.PersistentWorkspaceLost {
 		return r.updatePersistentWorkspaceStatus(ctx, original, &workspace)
 	}
+	if workspace.Status.Phase == v1alpha1.PersistentWorkspaceReleased {
+		if _, err := r.updatePersistentWorkspaceStatus(ctx, original, &workspace); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.requestPersistentWorkspaceDeletion(ctx, &workspace)
+	}
 	if workspace.Status.BoundPod != "" {
 		if err := r.reconcileBoundWorkspace(ctx, &workspace); err != nil {
 			return ctrl.Result{}, err
 		}
-		return r.updatePersistentWorkspaceStatus(ctx, original, &workspace)
+		if workspace.Status.Phase == v1alpha1.PersistentWorkspaceBound {
+			if err := r.reconcileWorkspaceUsage(ctx, &workspace); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		if _, err := r.updatePersistentWorkspaceStatus(ctx, original, &workspace); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.reconcilePersistentWorkspaceCleanup(ctx, &workspace)
 	}
 
 	if err := r.bindPendingWorkspace(ctx, &workspace); err != nil {
@@ -262,11 +279,31 @@ func (r *PersistentWorkspaceReconciler) workspacesForRuntimePod(ctx context.Cont
 	return requests
 }
 
+func (r *PersistentWorkspaceReconciler) workspacesForRun(_ context.Context, obj client.Object) []reconcile.Request {
+	run, ok := obj.(*v1alpha1.Run)
+	if !ok || run.Spec.Workspace == nil || run.Spec.Workspace.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.Workspace.Name}}}
+}
+
 // SetupWithManager registers the PersistentWorkspace reconciler.
 func (r *PersistentWorkspaceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Run{}, persistentWorkspaceRunWorkspaceField, persistentWorkspaceRunWorkspaceIndexValues); err != nil {
+		return fmt.Errorf("index Runs by workspace: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.PersistentWorkspace{}).
 		Watches(&v1alpha1.Runtime{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForRuntime)).
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForRuntimePod)).
+		Watches(&v1alpha1.Run{}, handler.EnqueueRequestsFromMapFunc(r.workspacesForRun)).
 		Complete(r)
+}
+
+func persistentWorkspaceRunWorkspaceIndexValues(object client.Object) []string {
+	run, ok := object.(*v1alpha1.Run)
+	if !ok || run.Spec.Workspace == nil || run.Spec.Workspace.Name == "" {
+		return nil
+	}
+	return []string{run.Spec.Workspace.Name}
 }

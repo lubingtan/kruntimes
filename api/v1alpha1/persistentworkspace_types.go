@@ -16,9 +16,10 @@ const (
 type PersistentWorkspaceCleanupPolicy string
 
 const (
-	// PersistentWorkspaceDeleteAfterTTL deletes workspace data after the unused TTL expires.
+	// PersistentWorkspaceDeleteAfterTTL deletes the PersistentWorkspace after the unused TTL expires.
 	PersistentWorkspaceDeleteAfterTTL PersistentWorkspaceCleanupPolicy = "DeleteAfterTTL"
-	// PersistentWorkspaceRetain leaves workspace data for an external actor to clean up.
+	// PersistentWorkspaceRetain disables automatic deletion after the workspace becomes unused.
+	// Deleting the PersistentWorkspace still deletes its runtime-local data.
 	PersistentWorkspaceRetain PersistentWorkspaceCleanupPolicy = "Retain"
 )
 
@@ -31,6 +32,10 @@ const (
 	PersistentWorkspaceBound    PersistentWorkspacePhase = "Bound"
 	PersistentWorkspaceLost     PersistentWorkspacePhase = "Lost"
 	PersistentWorkspaceReleased PersistentWorkspacePhase = "Released"
+
+	// PersistentWorkspaceCleanupFinalizer keeps a bound workspace present until
+	// its bound runtimed removes the runtime-local data during deletion.
+	PersistentWorkspaceCleanupFinalizer = "kruntimes.io/persistent-workspace-cleanup"
 )
 
 // +kubebuilder:object:generate=true

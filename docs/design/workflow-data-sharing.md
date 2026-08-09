@@ -239,13 +239,13 @@ implements a shell command merely to remove a workspace.
    remove, so the controller removes the finalizer without waiting for
    runtimed.
 
-Deletion follows the same protocol for `DeleteAfterTTL`, regardless of the
-TTL: the finalizer keeps the object until the bound runtimed removes it after
-physical removal. A `Retain` workspace has no cleanup finalizer and
-leaves its Pod-local directory to the Runtime Pod lifecycle. If a live bound
-Pod is unavailable, cleanup remains pending rather than risking a directory on
-another Pod; deletion of that Pod transitions the workspace to `Lost` and
-unblocks the finalizer.
+All bound workspaces use the same deletion protocol, regardless of cleanup
+policy or deletion reason: the finalizer keeps the object until the bound
+runtimed removes it after physical removal. `Retain` disables automatic TTL
+deletion only; an explicit deletion still removes its Pod-local directory. If
+a live bound Pod is unavailable, cleanup remains pending rather than risking a
+directory on another Pod; deletion of that Pod transitions the workspace to
+`Lost` and unblocks the finalizer.
 
 ## Run Workspace Reference
 
@@ -439,7 +439,7 @@ Required safeguards:
 - validation that rejects absolute paths and path traversal in artifact inputs;
 - explicit cleanup policy and TTL;
 - finalizer-based deletion, active-Run usage tracking, and runtimed-only
-  physical cleanup for `DeleteAfterTTL` workspaces;
+  physical cleanup for every bound workspace;
 - documented warning that shared workspace is not hostile-code isolation.
 
 ## Implementation Sequence
