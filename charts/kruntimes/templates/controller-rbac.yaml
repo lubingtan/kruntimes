@@ -48,6 +48,7 @@ rules:
       - watch
       - update
       - patch
+      - delete
   - apiGroups:
       - kruntimes.io
     resources:

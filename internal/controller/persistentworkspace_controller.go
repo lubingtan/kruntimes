@@ -39,7 +39,7 @@ type PersistentWorkspaceReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runtimes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runs,verbs=get;list;watch

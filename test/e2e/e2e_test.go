@@ -1965,6 +1965,53 @@ func TestPersistentWorkspaceExplicitDeletionCleansRetainedData(t *testing.T) {
 	}
 }
 
+func TestPersistentWorkspaceTTLDeletionCleansData(t *testing.T) {
+	nameSuffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runtimeName := "workspace-ttl-cleanup-" + nameSuffix
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+
+	// A newly Bound workspace begins its unused interval immediately. Leave
+	// enough time to create and complete the writer Run before exercising the
+	// post-Run TTL cleanup path.
+	ttlSeconds := int32(10)
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-ttl-cleanup-" + nameSuffix, Namespace: testNamespace},
+		Spec: v1alpha1.PersistentWorkspaceSpec{
+			Runtime:                runtimeName,
+			CleanupPolicy:          v1alpha1.PersistentWorkspaceDeleteAfterTTL,
+			TTLSecondsAfterUnused: &ttlSeconds,
+		},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workspace) })
+
+	waitForPersistentWorkspacePhase(t, workspace, 45*time.Second, v1alpha1.PersistentWorkspaceBound)
+	marker := "ttl-cleanup-marker"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-ttl-cleanup-write-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo ttl-data > " + marker),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create workspace writer Run: %v", err)
+	}
+	waitForRun(t, run, 30*time.Second)
+
+	markerPath := filepath.Join(workspace.Status.Path, marker)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test -f " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker before TTL cleanup: %v: %s", err, stderr)
+	}
+	waitForPersistentWorkspaceDeleted(t, workspace, 45*time.Second)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test ! -e " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker after TTL cleanup: %v: %s", err, stderr)
+	}
+}
+
 func TestWorkflowRunSharesJobLocalWorkspace(t *testing.T) {
 	ensureRuntime(t, "bash", bashRuntimeImage(), 9091)
 
