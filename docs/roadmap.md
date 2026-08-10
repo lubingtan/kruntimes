@@ -297,7 +297,7 @@ wiring from accumulating avoidable conflicts.
     - [x] explicit-deletion cleanup;
     - [x] automatic-TTL cleanup;
     - [ ] permission boundaries:
-      - [ ] review the `persistentworkspaces/use` authorization contract and
+      - [x] review the `persistentworkspaces/use` authorization contract and
         direct-Run missing-reference behavior;
       - [ ] add a validating admission webhook with SubjectAccessReview,
         reviewed failure policy, and Helm/TLS installation support;

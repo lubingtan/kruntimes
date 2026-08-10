@@ -253,7 +253,7 @@ controller wiring 累积不必要的冲突。
     - [x] 显式删除 cleanup；
     - [x] 自动 TTL cleanup；
     - [ ] 权限边界：
-      - [ ] review `persistentworkspaces/use` authorization contract，以及 direct Run 对不存在
+      - [x] review `persistentworkspaces/use` authorization contract，以及 direct Run 对不存在
         reference 的行为；
       - [ ] 增加带 SubjectAccessReview、已 review failure policy 以及 Helm/TLS installation support 的
         validating admission webhook；
