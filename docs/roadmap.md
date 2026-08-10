@@ -296,7 +296,15 @@ wiring from accumulating avoidable conflicts.
       passing, and Runtime Pod loss;
     - [x] explicit-deletion cleanup;
     - [x] automatic-TTL cleanup;
-    - [ ] permission boundaries.
+    - [ ] permission boundaries:
+      - [ ] review the `persistentworkspaces/use` authorization contract and
+        direct-Run missing-reference behavior;
+      - [ ] add a validating admission webhook with SubjectAccessReview,
+        reviewed failure policy, and Helm/TLS installation support;
+      - [ ] prove controller-created Workflow child Runs cannot bypass the
+        workspace authorization boundary;
+      - [ ] add impersonation-focused integration and E2E coverage for allow,
+        deny, named-resource, and controller-owned cases.
   - [x] implement PersistentWorkspace cleanup as a separately reviewed lifecycle
     slice: active Run tracking, `Released` scheduling fence, finalizer-based
     deletion, runtimed-only Pod-local directory removal, deletion/TTL E2E

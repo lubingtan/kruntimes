@@ -252,7 +252,14 @@ controller wiring 累积不必要的冲突。
       Runtime Pod loss；
     - [x] 显式删除 cleanup；
     - [x] 自动 TTL cleanup；
-    - [ ] 权限边界。
+    - [ ] 权限边界：
+      - [ ] review `persistentworkspaces/use` authorization contract，以及 direct Run 对不存在
+        reference 的行为；
+      - [ ] 增加带 SubjectAccessReview、已 review failure policy 以及 Helm/TLS installation support 的
+        validating admission webhook；
+      - [ ] 证明 controller 创建的 Workflow child Run 不能绕过 workspace authorization boundary；
+      - [ ] 增加面向 impersonation 的 integration 和 E2E coverage，覆盖 allow、deny、named-resource
+        和 controller-owned case。
   - [x] 将 PersistentWorkspace cleanup 作为单独 review 的 lifecycle slice 实现：active Run
     tracking、`Released` scheduling fence、finalizer-based deletion、仅 runtimed 执行的
     Pod-local directory removal、删除/TTL E2E 覆盖，以及 focused loss controller 覆盖。

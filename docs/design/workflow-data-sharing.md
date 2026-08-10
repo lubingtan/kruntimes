@@ -28,10 +28,12 @@ The current experimental Workflow API supports:
   binding lifecycle with UID fencing;
 - generic Run workspace references and Kubernetes-style Run affinity fields.
 - workspace-aware scheduler filtering and Pending Run wakeups on workspace
-  changes.
+  changes;
+- controller-managed workspace lifecycle and cleanup, including explicit
+  deletion and unused-TTL E2E coverage.
 
-It does not yet provide cleanup and permission boundaries for shared job-local
-workspaces.
+It does not yet provide identity-based permission boundaries for shared
+job-local workspaces.
 
 ## Goals
 
@@ -246,6 +248,49 @@ deletion only; an explicit deletion still removes its Pod-local directory. If
 a live bound Pod is unavailable, cleanup remains pending rather than risking a
 directory on another Pod; deletion of that Pod transitions the workspace to
 `Lost` and unblocks the finalizer.
+
+### Permission Boundary Design
+
+Kubernetes RBAC on the `PersistentWorkspace` resource alone is insufficient:
+it controls who can read or mutate the object, but not whether a principal that
+can create a Run may consume a particular existing workspace. Scheduler and
+runtimed cannot make that decision because they do not receive the original
+Kubernetes request identity.
+
+The proposed v1.0 model uses a Kubernetes-native `use` permission on the
+`persistentworkspaces/use` subresource:
+
+1. A validating admission webhook handles direct Run creation with
+   `spec.workspace`. It requires that the referenced workspace already exists,
+   checks that its Runtime matches the Run, then synchronously creates and
+   waits for a `SubjectAccessReview` for the requesting principal. The review
+   uses verb `use`, resource `persistentworkspaces`, subresource `use`, and the
+   workspace name as the resource name. The webhook must return an admission
+   decision within a bounded timeout: it should give the review about two
+   seconds, while the webhook configuration allows five seconds for the full
+   request. A denied review, timeout, or API error rejects the Run rather than
+   leaving an unauthorized reference Pending. The webhook configuration uses
+   `failurePolicy: Fail`, so an unreachable or timed-out webhook also fails
+   closed.
+2. Namespace administrators grant this permission through ordinary Role or
+   RoleBinding rules. `resourceNames` can restrict a principal to named
+   workspaces without adding a kruntimes-specific ACL to the CRD.
+3. The Workflow controller remains a trusted internal producer of job-local
+   workspaces and child Runs. Its generated Runs must be provably owned by the
+   same WorkflowRun as the referenced workspace; it must not become a general
+   authorization bypass for user-authored Runs.
+4. Scheduler and runtimed remain workflow-agnostic and authorization-agnostic.
+   They continue to enforce only workspace existence, Runtime compatibility,
+   binding, lifecycle, and Pod placement.
+
+This changes direct Run behavior for a missing workspace reference: instead of
+being accepted and waiting for a future object, it is rejected at admission.
+Workflow-controlled child Runs are created only after their owned workspace
+exists, so they retain their normal asynchronous binding behavior.
+
+Before implementation, this model needs review of webhook deployment and TLS,
+failure policy, controller identity, update semantics, SubjectAccessReview
+availability, and impersonation test coverage.
 
 ## Run Workspace Reference
 

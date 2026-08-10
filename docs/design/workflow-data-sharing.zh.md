@@ -23,9 +23,10 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 - 使用 inline Kubernetes `VolumeSource` 和 `emptyDir` 默认值的 `Runtime.spec.workspace`；
 - `PersistentWorkspace` API types、CRD validation、status，以及带 UID fencing 的 binding lifecycle；
 - 通用 Run workspace references 和 Kubernetes-style Run affinity fields。
-- workspace-aware scheduler filtering，以及 workspace 变更触发的 Pending Run wakeup。
+- workspace-aware scheduler filtering，以及 workspace 变更触发的 Pending Run wakeup；
+- controller-managed workspace lifecycle 和 cleanup，包括显式删除和 unused-TTL 的 E2E 覆盖。
 
-当前尚不支持 shared job-local workspace 的 cleanup 和权限边界。
+当前尚不支持 shared job-local workspace 的 identity-based 权限边界。
 
 ## 目标
 
@@ -205,6 +206,33 @@ admission/preparation 都是独立的后续工作。
 runtimed 在物理删除后移除 finalizer。`Retain` 仅禁止自动 TTL 删除；显式删除仍会移除 Pod-local directory。
 如果 live bound Pod 暂时 unavailable，cleanup 保持 pending，不能冒险删除另一个 Pod 上的目录；该 Pod 被删除后
 workspace 转为 `Lost`，并解除 finalizer 阻塞。
+
+### 权限边界设计
+
+仅对 `PersistentWorkspace` resource 使用 Kubernetes RBAC 并不足够：它控制谁可以读取或修改 object，
+但不能控制一个允许创建 Run 的主体是否可以使用某个已有 workspace。scheduler 和 runtimed 不能承担该决策，
+因为它们拿不到原始 Kubernetes request identity。
+
+提议的 v1.0 模型在 `persistentworkspaces/use` subresource 上使用 Kubernetes-native 的 `use` permission：
+
+1. validating admission webhook 处理带 `spec.workspace` 的直接 Run create。它要求被引用的 workspace
+   已存在，检查其 Runtime 与 Run 匹配，然后为请求主体同步创建并等待 `SubjectAccessReview`：verb 为 `use`，resource
+   为 `persistentworkspaces`，subresource 为 `use`，resource name 为 workspace name。webhook 必须在有界 timeout
+   内返回 admission decision：建议为 review 分配约两秒，并为完整 webhook request 配置五秒。review 被拒绝、超时或
+   API error 时，Run 会被拒绝，而不是让未授权 reference 保持 Pending。webhook 配置使用 `failurePolicy: Fail`，因此
+   webhook 不可达或超时时也会 fail closed。
+2. namespace administrator 通过普通 Role 或 RoleBinding 授予该 permission。`resourceNames` 可以将主体限制到
+   指定 workspace，而无需在 CRD 中增加 kruntimes-specific ACL。
+3. Workflow controller 仍是 job-local workspace 和 child Run 的 trusted internal producer。它生成的 Run 必须
+   可证明与被引用 workspace 属于同一个 WorkflowRun；它不能成为用户自定义 Run 的通用 authorization bypass。
+4. scheduler 和 runtimed 保持 workflow-agnostic 和 authorization-agnostic。它们继续只负责 workspace existence、
+   Runtime compatibility、binding、lifecycle 和 Pod placement。
+
+这会改变 direct Run 对不存在 workspace reference 的行为：不再接受后等待未来 object，而是在 admission 时拒绝。
+Workflow controller 仅在其 owned workspace 已存在后创建 child Run，因此仍保留正常的 asynchronous binding 行为。
+
+实现前需要 review webhook deployment 与 TLS、failure policy、controller identity、update semantics、
+SubjectAccessReview availability，以及 impersonation test coverage。
 
 ## Run Workspace Reference
 
