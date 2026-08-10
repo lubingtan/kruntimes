@@ -322,6 +322,7 @@ func TestBuildRuntimedRBACUsesNamespaceScopedRole(t *testing.T) {
 	}
 	assertPolicyRule(t, role.Rules, "kruntimes.io", "runs", "get", "list", "watch", "update", "patch")
 	assertPolicyRule(t, role.Rules, "kruntimes.io", "runs/status", "get", "update", "patch")
+	assertPolicyRule(t, role.Rules, "kruntimes.io", "persistentworkspaces", "get", "list", "watch", "update", "patch")
 	assertPolicyRule(t, role.Rules, "", "pods", "get")
 	assertPolicyRule(t, role.Rules, "", "pods/status", "get", "patch")
 	assertPolicyRule(t, role.Rules, "", "events", "create", "patch")

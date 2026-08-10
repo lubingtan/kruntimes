@@ -99,7 +99,7 @@ type Controller struct {
 	PodReader         client.Reader
 	RunReader         client.Reader
 	Log               logr.Logger
-	Hostname          string
+	PodName           string
 	RuntimeName       string
 	RuntimeNamespace  string
 	RuntimeEndpoint   string
@@ -153,7 +153,7 @@ func (c *Controller) Start(ctx context.Context) error {
 	go c.heartbeat(ctx)
 	go c.recoverActiveRuns(ctx)
 
-	klog.Infof("runtimed controller started, hostname=%s, runtime=%s, workers=%d", c.Hostname, c.RuntimeEndpoint, c.capacity())
+	klog.Infof("runtimed controller started, pod=%s, runtime=%s, workers=%d", c.PodName, c.RuntimeEndpoint, c.capacity())
 	return nil
 }
 
@@ -180,16 +180,16 @@ func (c *Controller) runFilter() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			run, ok := e.Object.(*v1alpha1.Run)
-			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.Hostname
+			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.PodName
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			run, ok := e.ObjectNew.(*v1alpha1.Run)
-			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.Hostname
+			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.PodName
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool { return false },
 		GenericFunc: func(e event.GenericEvent) bool {
 			run, ok := e.Object.(*v1alpha1.Run)
-			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.Hostname
+			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.PodName
 		},
 	}
 }
@@ -287,12 +287,12 @@ func (c *Controller) heartbeat(ctx context.Context) {
 }
 
 func (c *Controller) patchRuntimedReady(ctx context.Context) {
-	if c.Hostname == "" {
+	if c.PodName == "" {
 		return
 	}
 
 	var pod corev1.Pod
-	key := types.NamespacedName{Name: c.Hostname, Namespace: podNamespace()}
+	key := types.NamespacedName{Name: c.PodName, Namespace: podNamespace()}
 	reader := c.PodReader
 	if reader == nil {
 		reader = c.Client
@@ -730,7 +730,7 @@ func (c *Controller) applyStartExecutionFailure(ctx context.Context, ar *activeR
 		c.Log.Error(err, "failed to get Run after runtime Execute error", "run", client.ObjectKeyFromObject(ar.run))
 		return
 	}
-	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.Hostname {
+	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
 		return
 	}
 	ar.run = &run
@@ -843,7 +843,7 @@ func (c *Controller) recoverActiveRunsOnce(ctx context.Context) {
 	recovered := 0
 	for i := range runs.Items {
 		run := &runs.Items[i]
-		if run.Status.AssignedPod != c.Hostname || run.Status.Phase != v1alpha1.RunRunning {
+		if run.Status.AssignedPod != c.PodName || run.Status.Phase != v1alpha1.RunRunning {
 			continue
 		}
 		if _, ok := entries[string(run.UID)]; !ok {

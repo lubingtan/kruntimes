@@ -243,7 +243,7 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 		},
 		Env: []corev1.EnvVar{
 			{
-				Name: "HOSTNAME",
+				Name: "POD_NAME",
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 				},
@@ -405,6 +405,11 @@ func (r *RuntimeReconciler) buildRuntimedRole(rt *v1alpha1.Runtime) *rbacv1.Role
 				APIGroups: []string{"kruntimes.io"},
 				Resources: []string{"runs/status"},
 				Verbs:     []string{"get", "update", "patch"},
+			},
+			{
+				APIGroups: []string{"kruntimes.io"},
+				Resources: []string{"persistentworkspaces"},
+				Verbs:     []string{"get", "list", "watch", "update", "patch"},
 			},
 			{
 				APIGroups: []string{""},

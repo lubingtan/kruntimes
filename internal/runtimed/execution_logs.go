@@ -57,7 +57,7 @@ func (c *Controller) emitStream(writer io.Writer, run *v1alpha1.Run, stream, con
 			RunName:   run.Name,
 			Namespace: run.Namespace,
 			Runtime:   run.Spec.Runtime,
-			Pod:       c.Hostname,
+			Pod:       c.PodName,
 			Stream:    stream,
 			Message:   strings.TrimSuffix(message, "\r"),
 		}

@@ -564,7 +564,7 @@ func TestReconcileScheduledRespectsLocalCapacity(t *testing.T) {
 }
 
 func TestRunFilterAllowsRLEGGenericEventsForAssignedRuns(t *testing.T) {
-	c := &Controller{Hostname: "runtime-pod", RuntimeNamespace: "default"}
+	c := &Controller{PodName: "runtime-pod", RuntimeNamespace: "default"}
 	filter := c.runFilter()
 
 	assigned := &v1alpha1.Run{
@@ -619,7 +619,7 @@ func TestReconcileScheduledCancelBeforeClaim(t *testing.T) {
 		Build()
 	c := &Controller{
 		Client:     k8sClient,
-		Hostname:   "pod-a",
+		PodName:    "pod-a",
 		Recorder:   nil,
 		runtimeCli: &fakeRuntimeClient{},
 	}
@@ -667,7 +667,7 @@ func TestReconcileRunningRecoversMissingActiveRun(t *testing.T) {
 		Build()
 	c := &Controller{
 		Client:     k8sClient,
-		Hostname:   "pod-a",
+		PodName:    "pod-a",
 		runtimeCli: &fakeRuntimeClient{status: &pb.StatusResponse{Id: "run-uid", State: pb.ExecutionState_EXECUTION_STATE_SUCCEEDED, Stdout: "done"}},
 	}
 
@@ -717,7 +717,7 @@ func TestApplySuccessRejectsInvalidOutputsWithoutRetry(t *testing.T) {
 		WithStatusSubresource(&v1alpha1.Run{}).
 		WithObjects(run).
 		Build()
-	c := &Controller{Client: k8sClient, Hostname: "pod-a"}
+	c := &Controller{Client: k8sClient, PodName: "pod-a"}
 	c.activeRuns.Store(string(run.UID), ar)
 
 	if _, err := c.applySuccess(t.Context(), ar, &pb.StatusResponse{Stdout: "done"}); err != nil {
@@ -759,7 +759,7 @@ func TestApplySuccessEmitsStructuredOutputAfterStatusUpdate(t *testing.T) {
 		WithObjects(run).
 		Build()
 	var output bytes.Buffer
-	c := &Controller{Client: k8sClient, Hostname: "pod-a", ExecutionLogWriter: &output}
+	c := &Controller{Client: k8sClient, PodName: "pod-a", ExecutionLogWriter: &output}
 	ar := &activeRun{run: run, workDir: t.TempDir(), start: time.Now()}
 	largeStdout := "stdout-secret-" + strings.Repeat("x", maxStatusMessageBytes*2)
 
@@ -810,7 +810,7 @@ func TestApplyFailureBoundsStatusMessageAndLogsFullStderr(t *testing.T) {
 		WithObjects(run).
 		Build()
 	var output bytes.Buffer
-	c := &Controller{Client: k8sClient, Hostname: "pod-a", ExecutionLogWriter: &output}
+	c := &Controller{Client: k8sClient, PodName: "pod-a", ExecutionLogWriter: &output}
 	ar := &activeRun{run: run, workDir: t.TempDir(), start: time.Now()}
 	stderr := strings.Repeat("early-", 400) + "useful-tail"
 	resp := &pb.StatusResponse{Stderr: stderr}
@@ -888,7 +888,7 @@ func TestReconcileRunningFailsWhenRecoveredExecutionMissing(t *testing.T) {
 		Build()
 	c := &Controller{
 		Client:     k8sClient,
-		Hostname:   "pod-a",
+		PodName:    "pod-a",
 		runtimeCli: &fakeRuntimeClient{statusErr: status.Error(codes.NotFound, "execution not found")},
 	}
 
@@ -927,7 +927,7 @@ func TestReconcileRunningRecoveredKeepsRunActiveOnTransientStatusError(t *testin
 		},
 	}
 	c := &Controller{
-		Hostname:   "pod-a",
+		PodName:    "pod-a",
 		runtimeCli: &fakeRuntimeClient{statusErr: status.Error(codes.Unavailable, "runtime unavailable")},
 	}
 
@@ -994,7 +994,7 @@ func TestReconcileRunningActiveDistinguishesStatusErrors(t *testing.T) {
 				Build()
 			c := &Controller{
 				Client:     k8sClient,
-				Hostname:   "pod-a",
+				PodName:    "pod-a",
 				runtimeCli: &fakeRuntimeClient{statusErr: tt.statusErr},
 			}
 			ar := c.addRecoveredRun(run)
@@ -1034,7 +1034,7 @@ func TestReconcileRunningActiveRequeuesWhileExecutionRunning(t *testing.T) {
 		},
 	}
 	c := &Controller{
-		Hostname: "pod-a",
+		PodName: "pod-a",
 		runtimeCli: &fakeRuntimeClient{status: &pb.StatusResponse{
 			Id:    string(run.UID),
 			State: pb.ExecutionState_EXECUTION_STATE_RUNNING,
@@ -1090,8 +1090,8 @@ func TestRecoverActiveRunsOnceAddsRuntimeExecutions(t *testing.T) {
 		WithObjects(run, otherPodRun).
 		Build()
 	c := &Controller{
-		Client:   k8sClient,
-		Hostname: "pod-a",
+		Client:  k8sClient,
+		PodName: "pod-a",
 		runtimeCli: &fakeRuntimeClient{list: &pb.ListResponse{Entries: []*pb.StatusResponse{
 			{Id: "recover-uid", State: pb.ExecutionState_EXECUTION_STATE_RUNNING},
 			{Id: "orphan-runtime-execution", State: pb.ExecutionState_EXECUTION_STATE_RUNNING},

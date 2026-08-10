@@ -75,7 +75,7 @@ func TestMain(m *testing.M) {
 	if err := (&runtimed.Controller{
 		Client:          testMgr.GetClient(),
 		Log:             ctrl.Log.WithName("runtimed"),
-		Hostname:        "test-runtimed-pod",
+		PodName:         "test-runtimed-pod",
 		RuntimeEndpoint: "localhost:19091",
 		Workers:         1,
 	}).SetupWithManager(testMgr); err != nil {

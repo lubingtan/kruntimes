@@ -1920,6 +1920,51 @@ func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
 	waitForPendingRunMessage(t, lostRun, 30*time.Second, "was lost")
 }
 
+func TestPersistentWorkspaceExplicitDeletionCleansRetainedData(t *testing.T) {
+	nameSuffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runtimeName := "workspace-cleanup-" + nameSuffix
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-cleanup-" + nameSuffix, Namespace: testNamespace},
+		Spec: v1alpha1.PersistentWorkspaceSpec{
+			Runtime:       runtimeName,
+			CleanupPolicy: v1alpha1.PersistentWorkspaceRetain,
+		},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workspace) })
+
+	waitForPersistentWorkspacePhase(t, workspace, 45*time.Second, v1alpha1.PersistentWorkspaceBound)
+	marker := "cleanup-marker"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-cleanup-write-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo retained-data > " + marker),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create workspace writer Run: %v", err)
+	}
+	waitForRun(t, run, 30*time.Second)
+
+	markerPath := filepath.Join(workspace.Status.Path, marker)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test -f " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker before deletion: %v: %s", err, stderr)
+	}
+	if err := k8sClient.Delete(context.Background(), workspace); err != nil {
+		t.Fatalf("delete PersistentWorkspace: %v", err)
+	}
+	waitForPersistentWorkspaceDeleted(t, workspace, 45*time.Second)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test ! -e " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker after deletion: %v: %s", err, stderr)
+	}
+}
+
 func TestWorkflowRunSharesJobLocalWorkspace(t *testing.T) {
 	ensureRuntime(t, "bash", bashRuntimeImage(), 9091)
 
@@ -2059,6 +2104,27 @@ func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.Persisten
 		select {
 		case <-ctx.Done():
 			t.Fatalf("PersistentWorkspace = %#v, want phase %s", workspace.Status, phase)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func waitForPersistentWorkspaceDeleted(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		var current v1alpha1.PersistentWorkspace
+		err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), &current)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("get PersistentWorkspace while waiting for deletion: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("PersistentWorkspace %s/%s was not deleted", workspace.Namespace, workspace.Name)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
