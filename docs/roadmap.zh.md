@@ -359,6 +359,10 @@ controller wiring 累积不必要的冲突。
 - [ ] 设计 persistent per-registration Function worker processes，以降低 Python invocation 的启动开销。
   在替换当前每次 invocation 都启动 subprocess 的模型前，review worker lifecycle、module state、
   cancellation、concurrency、output limits 和 isolation。
+- [ ] 在不削弱覆盖的前提下缩短本地和 CI E2E suite 执行时间：识别不必要的串行等待，安全地并行
+  隔离的 case，并拆分快速反馈和较慢的 lifecycle coverage，同时保留完整 release gate。
+- [ ] Runtime 删除时清理其 runtime maintainer。定义 ownership 和 finalization，避免 orphaned
+  maintainer 累积，同时保留仍需要 artifact cleanup 的 Run 的正确性。
 - 定义兼容性和迁移保证。
 - 记录弃用策略。
 - 明确生产环境的多租户隔离策略。

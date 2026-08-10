@@ -424,6 +424,13 @@ wiring from accumulating avoidable conflicts.
   Python invocation startup overhead. Review worker lifecycle, module state,
   cancellation, concurrency, output limits, and isolation before replacing the
   current per-invocation subprocess model.
+- [ ] Reduce local and CI E2E suite duration without weakening coverage:
+  identify avoidable serial waits, safely parallelize isolated cases, and split
+  fast feedback from slower lifecycle coverage while preserving a complete
+  release gate.
+- [ ] Clean up a Runtime's runtime maintainer when the Runtime is deleted.
+  Define ownership and finalization so orphaned maintainers do not accumulate,
+  while preserving artifact cleanup for Runs that still require it.
 - Define compatibility and migration guarantees.
 - Document deprecation policy.
 - Clarify multi-tenant isolation strategy for production environments.
