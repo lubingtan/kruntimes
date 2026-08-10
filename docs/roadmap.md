@@ -294,11 +294,12 @@ wiring from accumulating avoidable conflicts.
     and permission boundaries:
     - [x] Runtime workspace sources, job-local sharing, job-to-job artifact
       passing, and Runtime Pod loss;
-    - [ ] cleanup and permission boundaries.
-  - [ ] implement PersistentWorkspace cleanup as a separately reviewed lifecycle
+    - [x] explicit-deletion cleanup;
+    - [ ] automatic-TTL cleanup and permission boundaries.
+  - [x] implement PersistentWorkspace cleanup as a separately reviewed lifecycle
     slice: active Run tracking, `Released` scheduling fence, finalizer-based
-    deletion, runtimed-only Pod-local directory removal, and TTL/deletion/loss
-    E2E coverage.
+    deletion, runtimed-only Pod-local directory removal, explicit-deletion E2E
+    coverage, and focused TTL/loss controller coverage.
 - [x] Workflow reuse model: split execution instances from reusable
   definitions before Workflow APIs stabilize. Target model:
   - replace the current execution-instance `Workflow` API with `WorkflowRun`;
