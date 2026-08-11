@@ -357,6 +357,10 @@ controller wiring 累积不必要的冲突。
 ### 迈向 v1.0
 
 - 稳定 CRD API。
+- [ ] 仅在 Python 3.15 正式镜像可用、且包括 `grpcio` 在内的所有锁定 native dependency
+  都发布兼容的 `cp315` wheels 后，才将 Python Runtime base image 恢复升级至受支持的
+  Python 3.15 release。以镜像构建和 runtime test 作为升级 gate；不要依赖 slim
+  production image 中隐式发生的 source build。
 - [ ] 将 `Run.spec.priority` 作为 scheduler API 加入。先 review priority、fairness、aging/starvation、
   namespace isolation、authorization、retry/backoff 和 non-preemption semantics，再用 scheduler-owned
   queue ordering 替换 controller-runtime event ordering，并增加 unit、integration 和 E2E coverage。

@@ -213,7 +213,7 @@ workspace 转为 `Lost`，并解除 finalizer 阻塞。
 但不能控制一个允许创建 Run 的主体是否可以使用某个已有 workspace。scheduler 和 runtimed 不能承担该决策，
 因为它们拿不到原始 Kubernetes request identity。
 
-提议的 v1.0 模型在 `persistentworkspaces/use` subresource 上使用 Kubernetes-native 的 `use` permission：
+已实现的 v1.0 模型在 `persistentworkspaces/use` subresource 上使用 Kubernetes-native 的 `use` permission：
 
 1. validating admission webhook 处理带 `spec.workspace` 的直接 Run create。它要求被引用的 workspace
    已存在，检查其 Runtime 与 Run 匹配，然后为请求主体同步创建并等待 `SubjectAccessReview`：verb 为 `use`，resource
@@ -231,8 +231,9 @@ workspace 转为 `Lost`，并解除 finalizer 阻塞。
 这会改变 direct Run 对不存在 workspace reference 的行为：不再接受后等待未来 object，而是在 admission 时拒绝。
 Workflow controller 仅在其 owned workspace 已存在后创建 child Run，因此仍保留正常的 asynchronous binding 行为。
 
-实现前需要 review webhook deployment 与 TLS、failure policy、controller identity、update semantics、
-SubjectAccessReview availability，以及 impersonation test coverage。
+Helm chart 部署 webhook Service、由 chart 管理的 TLS Secret，以及配置了 `failurePolicy: Fail` 的
+`ValidatingWebhookConfiguration`。controller ServiceAccount 可以创建 `SubjectAccessReview`，并能为其内部生成的
+Workflow child Run 使用 workspace reference。controller-owned Run fencing 与 impersonation coverage 仍属于后续工作。
 
 ## Run Workspace Reference
 

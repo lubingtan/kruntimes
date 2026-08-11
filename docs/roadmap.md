@@ -419,6 +419,11 @@ wiring from accumulating avoidable conflicts.
 ### Toward v1.0
 
 - Stabilize CRD APIs.
+- [ ] Restore the Python runtime base image to a supported Python 3.15 release
+  only after its final image is available and every locked native dependency,
+  including `grpcio`, publishes compatible `cp315` wheels. Keep the image build
+  and runtime test coverage as the upgrade gate; do not rely on an implicit
+  source build in the slim production image.
 - [ ] Add `Run.spec.priority` as a scheduler API. First review the priority,
   fairness, aging/starvation, namespace isolation, authorization, retry/backoff,
   and non-preemption semantics, then replace controller-runtime event ordering

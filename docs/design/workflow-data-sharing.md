@@ -257,7 +257,7 @@ can create a Run may consume a particular existing workspace. Scheduler and
 runtimed cannot make that decision because they do not receive the original
 Kubernetes request identity.
 
-The proposed v1.0 model uses a Kubernetes-native `use` permission on the
+The implemented v1.0 model uses a Kubernetes-native `use` permission on the
 `persistentworkspaces/use` subresource:
 
 1. A validating admission webhook handles direct Run creation with
@@ -288,9 +288,11 @@ being accepted and waiting for a future object, it is rejected at admission.
 Workflow-controlled child Runs are created only after their owned workspace
 exists, so they retain their normal asynchronous binding behavior.
 
-Before implementation, this model needs review of webhook deployment and TLS,
-failure policy, controller identity, update semantics, SubjectAccessReview
-availability, and impersonation test coverage.
+The Helm chart deploys the webhook Service, a chart-managed TLS Secret, and a
+`ValidatingWebhookConfiguration` with `failurePolicy: Fail`. The controller
+ServiceAccount may create `SubjectAccessReview` objects and use workspace
+references for its internally generated Workflow child Runs. Controller-owned
+Run fencing and impersonation coverage remain follow-up work.
 
 ## Run Workspace Reference
 

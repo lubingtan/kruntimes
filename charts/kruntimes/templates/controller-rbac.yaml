@@ -60,6 +60,12 @@ rules:
   - apiGroups:
       - kruntimes.io
     resources:
+      - persistentworkspaces/use
+    verbs:
+      - use
+  - apiGroups:
+      - kruntimes.io
+    resources:
       - actions
     verbs:
       - get
@@ -201,6 +207,12 @@ rules:
       - create
       - get
       - update
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

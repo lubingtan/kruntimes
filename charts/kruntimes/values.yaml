@@ -42,6 +42,8 @@ controller:
   probeBindAddress: ":8083"
   metricsPort: 8082
   probePort: 8083
+  webhookPort: 9443
+  webhookCertDir: /tmp/k8s-webhook-server/serving-certs
   podAnnotations: {}
   podSecurityContext:
     seccompProfile:
