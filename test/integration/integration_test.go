@@ -4,9 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -19,8 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	workspaceadmission "github.com/kruntimes/kruntimes/internal/admission"
 	"github.com/kruntimes/kruntimes/internal/runtimed"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
 	"github.com/kruntimes/kruntimes/internal/scheduler"
@@ -57,6 +62,11 @@ func TestMain(m *testing.M) {
 	skipNameValidation := true
 	testMgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
+		WebhookServer: webhookserver.NewServer(webhookserver.Options{
+			Host:    testEnv.WebhookInstallOptions.LocalServingHost,
+			Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+			CertDir: testEnv.WebhookInstallOptions.LocalServingCertDir,
+		}),
 		Controller: config.Controller{
 			SkipNameValidation: &skipNameValidation,
 		},
@@ -64,6 +74,12 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("failed to create manager: " + err.Error())
 	}
+	workspaceadmission.RegisterRunWorkspaceValidator(
+		testMgr.GetWebhookServer(),
+		testMgr.GetAPIReader(),
+		allowSubjectAccessReviewer{},
+		scheme,
+	)
 
 	if err := (&scheduler.RunReconciler{
 		Client: testMgr.GetClient(),
@@ -99,6 +115,108 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+func TestRunWorkspaceAdmissionWebhook(t *testing.T) {
+	configuration := runWorkspaceValidatingWebhookConfiguration()
+	testEnv.WebhookInstallOptions.ValidatingWebhooks = []*admissionregistrationv1.ValidatingWebhookConfiguration{configuration}
+	if err := testEnv.WebhookInstallOptions.ModifyWebhookDefinitions(); err != nil {
+		t.Fatalf("configure Run validating webhook for envtest: %v", err)
+	}
+	if err := k8sClient.Create(context.Background(), configuration); err != nil {
+		t.Fatalf("create Run validating webhook configuration: %v", err)
+	}
+	defer func() { _ = k8sClient.Delete(context.Background(), configuration) }()
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-admission-"}}
+	if err := k8sClient.Create(context.Background(), namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	defer func() { _ = k8sClient.Delete(context.Background(), namespace) }()
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: namespace.Name},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+
+	allowed := integrationRun(namespace.Name, "build")
+	if err := k8sClient.Create(context.Background(), allowed); err != nil {
+		t.Fatalf("create authorized Run: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rejected := integrationRun(namespace.Name, "missing")
+		err := k8sClient.Create(context.Background(), rejected)
+		if apierrors.IsForbidden(err) && strings.Contains(err.Error(), "does not exist") {
+			return
+		}
+		if err == nil {
+			if deleteErr := k8sClient.Delete(context.Background(), rejected); deleteErr != nil {
+				t.Fatalf("delete Run created before webhook became active: %v", deleteErr)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("missing workspace Run was not rejected by validating webhook: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func integrationRun(namespace, workspaceName string) *v1alpha1.Run {
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-admission-", Namespace: namespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{Args: []string{"echo hello"}}},
+			Workspace: &v1alpha1.RunWorkspaceReference{
+				Name: workspaceName,
+			},
+		},
+	}
+}
+
+func runWorkspaceValidatingWebhookConfiguration() *admissionregistrationv1.ValidatingWebhookConfiguration {
+	failurePolicy := admissionregistrationv1.Fail
+	matchPolicy := admissionregistrationv1.Equivalent
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	timeoutSeconds := int32(5)
+	path := workspaceadmission.RunWorkspaceValidationPath
+	return &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-workspace.integration.kruntimes.io"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:                    "run-workspace.integration.kruntimes.io",
+			FailurePolicy:           &failurePolicy,
+			MatchPolicy:             &matchPolicy,
+			SideEffects:             &sideEffects,
+			TimeoutSeconds:          &timeoutSeconds,
+			AdmissionReviewVersions: []string{"v1"},
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{
+				Service: &admissionregistrationv1.ServiceReference{
+					Namespace: "default",
+					Name:      "integration-webhook",
+					Path:      &path,
+				},
+			},
+			Rules: []admissionregistrationv1.RuleWithOperations{{
+				Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create},
+				Rule: admissionregistrationv1.Rule{
+					APIGroups:   []string{v1alpha1.GroupVersion.Group},
+					APIVersions: []string{v1alpha1.GroupVersion.Version},
+					Resources:   []string{"runs"},
+				},
+			}},
+		}},
+	}
+}
+
+type allowSubjectAccessReviewer struct{}
+
+func (allowSubjectAccessReviewer) Review(context.Context, authorizationv1.SubjectAccessReview) (authorizationv1.SubjectAccessReviewStatus, error) {
+	return authorizationv1.SubjectAccessReviewStatus{Allowed: true}, nil
 }
 
 func TestSchedulerReconcile(t *testing.T) {
