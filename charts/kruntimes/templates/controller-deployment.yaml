@@ -63,6 +63,10 @@ spec:
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --metrics-bind-address={{ .Values.controller.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.controller.probeBindAddress }}
+            - --webhook-port={{ .Values.controller.webhookPort }}
+            - --webhook-cert-dir={{ .Values.controller.webhookCertDir }}
+            - --webhook-controller-service-account-name={{ include "kruntimes.controller.name" . }}
+            - --webhook-controller-service-account-namespace={{ .Release.Namespace }}
             - --default-daemon-image={{ include "kruntimes.image" (list . .Values.runtimed.image) }}
             - --runtimed-service-account-name={{ include "kruntimes.runtimed.name" . }}
             - --runtime-maintainer-image={{ include "kruntimes.image" (list . .Values.controller.image) }}
@@ -75,6 +79,9 @@ spec:
               protocol: TCP
             - containerPort: {{ .Values.controller.probePort }}
               name: probes
+              protocol: TCP
+            - containerPort: {{ .Values.controller.webhookPort }}
+              name: webhook
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -90,3 +97,16 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: {{ .Values.controller.webhookCertDir }}
+              readOnly: true
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ include "kruntimes.webhook.secretName" . }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key

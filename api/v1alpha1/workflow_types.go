@@ -99,10 +99,28 @@ type JobSpec struct {
 }
 
 // +kubebuilder:object:generate=true
+// WorkflowArtifactInput identifies an artifact produced by another Workflow
+// job and the relative path where it will be materialized for this step.
+type WorkflowArtifactInput struct {
+	// From identifies a job-scoped artifact as jobs.<job-id>.artifacts.<name>.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	From string `json:"from"`
+
+	// Path is the relative destination below the Run working directory.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	// +kubebuilder:validation:Pattern=`^[^/].*$`
+	Path string `json:"path"`
+}
+
+// +kubebuilder:object:generate=true
 // StepSpec defines a single step within a job.
 // +kubebuilder:validation:XValidation:rule="has(self.run) != has(self.uses)",message="exactly one of run or uses must be set"
 // +kubebuilder:validation:XValidation:rule="!has(self.with) || has(self.uses)",message="with can only be set when uses is set"
-// +kubebuilder:validation:XValidation:rule="!has(self.uses) || (!has(self.args) && !has(self.env))",message="args and env can only be set on run steps"
+// +kubebuilder:validation:XValidation:rule="!has(self.uses) || (!has(self.args) && !has(self.env) && !has(self.artifacts))",message="args, env, and artifacts can only be set on run steps"
 type StepSpec struct {
 	// Name of the step.
 	// +kubebuilder:validation:Required
@@ -128,6 +146,12 @@ type StepSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxProperties=256
 	Env map[string]string `json:"env,omitempty"`
+
+	// Artifacts identifies artifacts produced by dependency jobs and materializes
+	// them below this step's working directory before execution.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Artifacts []WorkflowArtifactInput `json:"artifacts,omitempty"`
 
 	// Uses references an Action in the same namespace.
 	// +optional

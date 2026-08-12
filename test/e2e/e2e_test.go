@@ -15,6 +15,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1322,6 +1323,69 @@ func TestFilesystemArtifacts(t *testing.T) {
 	assertFilesystemArtifactMissing(t, claimName, report.Location.Filesystem.Path)
 }
 
+func TestRunStagesArtifactInputs(t *testing.T) {
+	runtimeName := "bash-artifact-inputs"
+	claimName := "e2e-artifact-inputs"
+	ensureFilesystemRuntime(t, runtimeName, claimName)
+
+	producer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-artifact-producer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    taskMode(`mkdir -p "$KRUNTIME_ARTIFACTS_DIR/bundle"; printf report > "$KRUNTIME_ARTIFACTS_DIR/report.txt"; printf nested > "$KRUNTIME_ARTIFACTS_DIR/bundle/data.txt"`),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), producer); err != nil {
+		t.Fatalf("create artifact producer: %v", err)
+	}
+	waitForRun(t, producer, 30*time.Second)
+
+	refs := make(map[string]v1alpha1.ArtifactRef, len(producer.Status.ArtifactRefs))
+	for _, ref := range producer.Status.ArtifactRefs {
+		refs[ref.Name] = ref
+	}
+	report, reportFound := refs["report.txt"]
+	bundle, bundleFound := refs["bundle"]
+	if !reportFound || !bundleFound {
+		t.Fatalf("producer artifact refs = %#v, want report.txt and bundle", producer.Status.ArtifactRefs)
+	}
+
+	consumer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-artifact-consumer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			ArtifactInputs: []v1alpha1.ArtifactInput{
+				{Ref: report, Path: "inputs/report.txt"},
+				{Ref: bundle, Path: "inputs/bundle"},
+			},
+			Mode: taskMode(`test "$(cat inputs/report.txt)" = report && test "$(cat inputs/bundle/data.txt)" = nested`),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), consumer); err != nil {
+		t.Fatalf("create artifact consumer: %v", err)
+	}
+	waitForRun(t, consumer, 30*time.Second)
+
+	missing := report.DeepCopy()
+	missing.Name = "missing.txt"
+	missing.Location.Filesystem.Path = filepath.ToSlash(filepath.Join("namespaces", testNamespace, "runs", "missing", missing.Name))
+	missingConsumer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-missing-artifact-consumer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:        runtimeName,
+			ArtifactInputs: []v1alpha1.ArtifactInput{{Ref: *missing, Path: "inputs/missing.txt"}},
+			Mode:           taskMode(`exit 1`),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), missingConsumer); err != nil {
+		t.Fatalf("create missing-artifact consumer: %v", err)
+	}
+	waitForRunPhase(t, missingConsumer, 30*time.Second, v1alpha1.RunFailed)
+	if !strings.Contains(missingConsumer.Status.Message, "open artifact input") {
+		t.Fatalf("missing artifact consumer message = %q, want artifact input error", missingConsumer.Status.Message)
+	}
+}
+
 func deleteRuntimeAndWait(t *testing.T, name string, timeout time.Duration) {
 	t.Helper()
 	runtimeResource := &v1alpha1.Runtime{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}
@@ -1782,6 +1846,488 @@ func TestSchedulerKeepsRunPendingWithoutRuntimePod(t *testing.T) {
 			t.Fatalf("timed out waiting for pending run observation, phase=%s pod=%s msg=%s",
 				run.Status.Phase, run.Status.AssignedPod, run.Status.Message)
 		default:
+		}
+	}
+}
+
+func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
+	nameSuffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runtimeName := "workspace-binding-" + nameSuffix
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-" + nameSuffix, Namespace: testNamespace},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: runtimeName},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workspace) })
+
+	waitForPersistentWorkspacePhase(t, workspace, 45*time.Second, v1alpha1.PersistentWorkspaceBound)
+	if workspace.Status.BoundPod == "" || workspace.Status.BoundPodUID == "" || workspace.Status.Path == "" {
+		t.Fatalf("bound workspace status = %#v, want fenced Pod and path", workspace.Status)
+	}
+	boundPod := workspace.Status.BoundPod
+	writerRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-write-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo workspace-data > shared.txt"),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), writerRun); err != nil {
+		t.Fatalf("create workspace writer Run: %v", err)
+	}
+	waitForRun(t, writerRun, 30*time.Second)
+	if writerRun.Status.AssignedPod != boundPod {
+		t.Fatalf("workspace writer assignedPod = %q, want bound Pod %q", writerRun.Status.AssignedPod, boundPod)
+	}
+	readerRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-read-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode(`test "$(cat shared.txt)" = workspace-data`),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), readerRun); err != nil {
+		t.Fatalf("create workspace reader Run: %v", err)
+	}
+	waitForRun(t, readerRun, 30*time.Second)
+	if readerRun.Status.AssignedPod != boundPod {
+		t.Fatalf("workspace reader assignedPod = %q, want bound Pod %q", readerRun.Status.AssignedPod, boundPod)
+	}
+	if err := coreClientset.CoreV1().Pods(testNamespace).Delete(context.Background(), boundPod, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete bound Runtime Pod %s: %v", boundPod, err)
+	}
+
+	waitForPersistentWorkspacePhase(t, workspace, 60*time.Second, v1alpha1.PersistentWorkspaceLost)
+	if workspace.Status.BoundPod != boundPod {
+		t.Fatalf("lost workspace boundPod = %q, want original %q", workspace.Status.BoundPod, boundPod)
+	}
+	lostRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-lost-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo workspace-lost"),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), lostRun); err != nil {
+		t.Fatalf("create lost workspace run: %v", err)
+	}
+	waitForPendingRunMessage(t, lostRun, 30*time.Second, "was lost")
+}
+
+func TestPersistentWorkspaceAdmissionAuthorization(t *testing.T) {
+	ensureRuntime(t, "bash", bashRuntimeImage(), 9091)
+
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-admission-" + suffix, Namespace: testNamespace},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(ctx, workspace); err != nil {
+		t.Fatalf("create authorization workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, workspace) })
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workspace-user-" + suffix, Namespace: testNamespace}}
+	if err := k8sClient.Create(ctx, serviceAccount); err != nil {
+		t.Fatalf("create workspace test ServiceAccount: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, serviceAccount) })
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-user-" + suffix, Namespace: testNamespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{v1alpha1.GroupVersion.Group},
+			Resources: []string{"runs"},
+			Verbs:     []string{"create"},
+		}},
+	}
+	if err := k8sClient.Create(ctx, role); err != nil {
+		t.Fatalf("create workspace test Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccount.Name, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(ctx, binding); err != nil {
+		t.Fatalf("create workspace test RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, binding) })
+
+	workspaceUser := impersonatedClient(t, "system:serviceaccount:"+testNamespace+":"+serviceAccount.Name)
+	deniedRun := workspaceAuthorizationRun("workspace-denied-"+suffix, workspace.Name)
+	if err := workspaceUser.Create(ctx, deniedRun); !apierrors.IsForbidden(err) {
+		t.Fatalf("create Run without workspace use permission = %v, want forbidden", err)
+	}
+
+	role.Rules = append(role.Rules, rbacv1.PolicyRule{
+		APIGroups:     []string{v1alpha1.GroupVersion.Group},
+		Resources:     []string{"persistentworkspaces/use"},
+		ResourceNames: []string{workspace.Name},
+		Verbs:         []string{"use"},
+	})
+	if err := k8sClient.Update(ctx, role); err != nil {
+		t.Fatalf("grant named workspace use permission: %v", err)
+	}
+	allowedRun := workspaceAuthorizationRun("workspace-allowed-"+suffix, workspace.Name)
+	if err := workspaceUser.Create(ctx, allowedRun); err != nil {
+		t.Fatalf("create Run with named workspace use permission: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, allowedRun) })
+
+	workflowRun := &v1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-workflow-" + suffix, Namespace: testNamespace},
+		Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{
+			"build": {RunsOn: "bash", Steps: []v1alpha1.StepSpec{{Name: "run", Run: "echo authorized"}}},
+		}},
+	}
+	if err := k8sClient.Create(ctx, workflowRun); err != nil {
+		t.Fatalf("create WorkflowRun for controller authorization: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, workflowRun) })
+	waitForWorkflowRunPhase(t, workflowRun, 45*time.Second, v1alpha1.WorkflowSucceeded)
+
+	workflowWorkspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "workspace-controller-" + suffix,
+			Namespace:       testNamespace,
+			Labels:          map[string]string{v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID), v1alpha1.WorkflowJobLabel: "build"},
+			OwnerReferences: []metav1.OwnerReference{workflowRunOwnerReference(workflowRun)},
+		},
+		Spec: v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(ctx, workflowWorkspace); err != nil {
+		t.Fatalf("create WorkflowRun-owned workspace: %v", err)
+	}
+	controllerClient := impersonatedClient(t, "system:serviceaccount:"+testNamespace+":kruntimes-controller")
+	crossJobRun := workspaceAuthorizationRun("workspace-controller-cross-job-"+suffix, workflowWorkspace.Name)
+	crossJobRun.Labels = map[string]string{
+		v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+		v1alpha1.WorkflowJobLabel:    "other",
+	}
+	crossJobRun.OwnerReferences = []metav1.OwnerReference{workflowRunOwnerReference(workflowRun)}
+	if err := controllerClient.Create(ctx, crossJobRun); !apierrors.IsForbidden(err) {
+		t.Fatalf("controller create cross-job workspace Run = %v, want forbidden", err)
+	}
+}
+
+func workspaceAuthorizationRun(name, workspaceName string) *v1alpha1.Run {
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{Args: []string{"echo authorization"}}},
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspaceName},
+		},
+	}
+}
+
+func impersonatedClient(t *testing.T, username string) client.Client {
+	t.Helper()
+	config := rest.CopyConfig(restConfig)
+	config.Impersonate = rest.ImpersonationConfig{UserName: username}
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	impersonated, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatalf("create impersonated Kubernetes client: %v", err)
+	}
+	return impersonated
+}
+
+func workflowRunOwnerReference(workflowRun *v1alpha1.WorkflowRun) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: v1alpha1.GroupVersion.String(),
+		Kind:       "WorkflowRun",
+		Name:       workflowRun.Name,
+		UID:        workflowRun.UID,
+		Controller: &controller,
+	}
+}
+
+func TestPersistentWorkspaceExplicitDeletionCleansRetainedData(t *testing.T) {
+	nameSuffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runtimeName := "workspace-cleanup-" + nameSuffix
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-cleanup-" + nameSuffix, Namespace: testNamespace},
+		Spec: v1alpha1.PersistentWorkspaceSpec{
+			Runtime:       runtimeName,
+			CleanupPolicy: v1alpha1.PersistentWorkspaceRetain,
+		},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workspace) })
+
+	waitForPersistentWorkspacePhase(t, workspace, 45*time.Second, v1alpha1.PersistentWorkspaceBound)
+	marker := "cleanup-marker"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-cleanup-write-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo retained-data > " + marker),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create workspace writer Run: %v", err)
+	}
+	waitForRun(t, run, 30*time.Second)
+
+	markerPath := filepath.Join(workspace.Status.Path, marker)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test -f " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker before deletion: %v: %s", err, stderr)
+	}
+	if err := k8sClient.Delete(context.Background(), workspace); err != nil {
+		t.Fatalf("delete PersistentWorkspace: %v", err)
+	}
+	waitForPersistentWorkspaceDeleted(t, workspace, 45*time.Second)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test ! -e " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker after deletion: %v: %s", err, stderr)
+	}
+}
+
+func TestPersistentWorkspaceTTLDeletionCleansData(t *testing.T) {
+	nameSuffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	runtimeName := "workspace-ttl-cleanup-" + nameSuffix
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+
+	// A newly Bound workspace begins its unused interval immediately. Leave
+	// enough time to create and complete the writer Run before exercising the
+	// post-Run TTL cleanup path.
+	ttlSeconds := int32(10)
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-ttl-cleanup-" + nameSuffix, Namespace: testNamespace},
+		Spec: v1alpha1.PersistentWorkspaceSpec{
+			Runtime:               runtimeName,
+			CleanupPolicy:         v1alpha1.PersistentWorkspaceDeleteAfterTTL,
+			TTLSecondsAfterUnused: &ttlSeconds,
+		},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workspace) })
+
+	waitForPersistentWorkspacePhase(t, workspace, 45*time.Second, v1alpha1.PersistentWorkspaceBound)
+	marker := "ttl-cleanup-marker"
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-ttl-cleanup-write-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   runtimeName,
+			Mode:      taskMode("echo ttl-data > " + marker),
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create workspace writer Run: %v", err)
+	}
+	waitForRun(t, run, 30*time.Second)
+
+	markerPath := filepath.Join(workspace.Status.Path, marker)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test -f " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker before TTL cleanup: %v: %s", err, stderr)
+	}
+	waitForPersistentWorkspaceDeleted(t, workspace, 45*time.Second)
+	if _, stderr, err := execInPod(context.Background(), workspace.Status.BoundPod, "runtimed", []string{"/bin/sh", "-c", "test ! -e " + markerPath}); err != nil {
+		t.Fatalf("verify workspace marker after TTL cleanup: %v: %s", err, stderr)
+	}
+}
+
+func TestWorkflowRunSharesJobLocalWorkspace(t *testing.T) {
+	ensureRuntime(t, "bash", bashRuntimeImage(), 9091)
+
+	workflowRun := &v1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("e2e-workspace-%d", time.Now().UnixNano()),
+			Namespace: testNamespace,
+		},
+		Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{
+			"build": {
+				RunsOn: "bash",
+				Steps: []v1alpha1.StepSpec{
+					{Name: "write", Run: "echo workflow-data > shared.txt"},
+					{Name: "read", Run: `test "$(cat shared.txt)" = workflow-data`},
+				},
+			},
+		}},
+	}
+	if err := k8sClient.Create(context.Background(), workflowRun); err != nil {
+		t.Fatalf("create WorkflowRun: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workflowRun) })
+
+	waitForWorkflowRunPhase(t, workflowRun, 30*time.Second, v1alpha1.WorkflowSucceeded)
+	var workspaces v1alpha1.PersistentWorkspaceList
+	if err := k8sClient.List(context.Background(), &workspaces, client.InNamespace(testNamespace), client.MatchingLabels{
+		v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+		v1alpha1.WorkflowJobLabel:    "build",
+	}); err != nil {
+		t.Fatalf("list job workspaces: %v", err)
+	}
+	if len(workspaces.Items) != 1 {
+		t.Fatalf("job workspaces = %#v, want one", workspaces.Items)
+	}
+	workspace := &workspaces.Items[0]
+	if workspace.Spec.Runtime != "bash" || !metav1.IsControlledBy(workspace, workflowRun) {
+		t.Fatalf("workspace = %#v, want WorkflowRun-owned bash workspace", workspace)
+	}
+
+	var runs v1alpha1.RunList
+	if err := k8sClient.List(context.Background(), &runs, client.InNamespace(testNamespace), client.MatchingLabels{
+		v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+		v1alpha1.WorkflowJobLabel:    "build",
+	}); err != nil {
+		t.Fatalf("list child Runs: %v", err)
+	}
+	if len(runs.Items) != 2 {
+		t.Fatalf("child Runs = %#v, want write and read", runs.Items)
+	}
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if run.Spec.Workspace == nil || run.Spec.Workspace.Name != workspace.Name {
+			t.Fatalf("Run %s workspace = %#v, want %q", run.Name, run.Spec.Workspace, workspace.Name)
+		}
+	}
+}
+
+func TestWorkflowRunTransfersArtifactsBetweenJobs(t *testing.T) {
+	runtimeName := fmt.Sprintf("workflow-artifacts-%d", time.Now().UnixNano())
+	claimName := runtimeName + "-artifacts"
+	ensureFilesystemRuntime(t, runtimeName, claimName)
+
+	workflowRun := &v1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-workflow-artifacts-" + fmt.Sprint(time.Now().UnixNano()), Namespace: testNamespace},
+		Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{
+			"build": {
+				RunsOn: runtimeName,
+				Steps: []v1alpha1.StepSpec{{
+					Name: "package",
+					Run:  `mkdir -p "$KRUNTIME_ARTIFACTS_DIR"; printf workflow-artifact > "$KRUNTIME_ARTIFACTS_DIR/dist.txt"`,
+				}},
+			},
+			"verify": {
+				RunsOn: runtimeName,
+				Needs:  []string{"build"},
+				Steps: []v1alpha1.StepSpec{{
+					Name: "verify",
+					Artifacts: []v1alpha1.WorkflowArtifactInput{{
+						From: "jobs.build.artifacts.dist.txt",
+						Path: "dist.txt",
+					}},
+					Run: `test "$(cat dist.txt)" = workflow-artifact`,
+				}},
+			},
+		}},
+	}
+	if err := k8sClient.Create(context.Background(), workflowRun); err != nil {
+		t.Fatalf("create artifact WorkflowRun: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), workflowRun) })
+
+	waitForWorkflowRunPhase(t, workflowRun, 45*time.Second, v1alpha1.WorkflowSucceeded)
+	artifact, found := workflowRun.Status.Jobs["build"].Artifacts["dist.txt"]
+	if !found || artifact.Location.Filesystem == nil || artifact.Location.Filesystem.Path == "" {
+		t.Fatalf("build artifacts = %#v, want dist.txt filesystem reference", workflowRun.Status.Jobs["build"].Artifacts)
+	}
+
+	missingArtifact := workflowRun.DeepCopy()
+	missingArtifact.ResourceVersion = ""
+	missingArtifact.UID = ""
+	missingArtifact.Name = workflowRun.Name + "-missing"
+	missingArtifact.CreationTimestamp = metav1.Time{}
+	missingArtifact.Status = v1alpha1.WorkflowRunStatus{}
+	missingArtifact.Spec.Jobs["verify"] = v1alpha1.JobSpec{
+		RunsOn: runtimeName,
+		Needs:  []string{"build"},
+		Steps: []v1alpha1.StepSpec{{
+			Name: "verify",
+			Artifacts: []v1alpha1.WorkflowArtifactInput{{
+				From: "jobs.build.artifacts.missing.txt",
+				Path: "missing.txt",
+			}},
+			Run: "exit 0",
+		}},
+	}
+	if err := k8sClient.Create(context.Background(), missingArtifact); err != nil {
+		t.Fatalf("create missing-artifact WorkflowRun: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), missingArtifact) })
+	waitForWorkflowRunPhase(t, missingArtifact, 45*time.Second, v1alpha1.WorkflowFailed)
+	if status := missingArtifact.Status.Jobs["verify"]; status.Phase != v1alpha1.JobFailed {
+		t.Fatalf("missing artifact verify job = %#v, want Failed", status)
+	}
+}
+
+func waitForPersistentWorkspacePhase(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration, phase v1alpha1.PersistentWorkspacePhase) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), workspace); err != nil {
+			t.Fatalf("get PersistentWorkspace while waiting for %s: %v", phase, err)
+		}
+		if workspace.Status.Phase == phase {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("PersistentWorkspace = %#v, want phase %s", workspace.Status, phase)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func waitForPersistentWorkspaceDeleted(t *testing.T, workspace *v1alpha1.PersistentWorkspace, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		var current v1alpha1.PersistentWorkspace
+		err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(workspace), &current)
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("get PersistentWorkspace while waiting for deletion: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("PersistentWorkspace %s/%s was not deleted", workspace.Namespace, workspace.Name)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func waitForPendingRunMessage(t *testing.T, run *v1alpha1.Run, timeout time.Duration, message string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), run); err != nil {
+			t.Fatalf("get run while waiting for Pending: %v", err)
+		}
+		if run.Status.Phase == v1alpha1.RunPending && run.Status.AssignedPod == "" && strings.Contains(run.Status.Message, message) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("Run status = %#v, want unassigned Pending Run with message containing %q", run.Status, message)
+		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }

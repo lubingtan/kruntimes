@@ -4,9 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -19,8 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	workspaceadmission "github.com/kruntimes/kruntimes/internal/admission"
 	"github.com/kruntimes/kruntimes/internal/runtimed"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
 	"github.com/kruntimes/kruntimes/internal/scheduler"
@@ -57,6 +62,11 @@ func TestMain(m *testing.M) {
 	skipNameValidation := true
 	testMgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
+		WebhookServer: webhookserver.NewServer(webhookserver.Options{
+			Host:    testEnv.WebhookInstallOptions.LocalServingHost,
+			Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+			CertDir: testEnv.WebhookInstallOptions.LocalServingCertDir,
+		}),
 		Controller: config.Controller{
 			SkipNameValidation: &skipNameValidation,
 		},
@@ -64,6 +74,13 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("failed to create manager: " + err.Error())
 	}
+	workspaceadmission.RegisterRunWorkspaceValidator(
+		testMgr.GetWebhookServer(),
+		testMgr.GetAPIReader(),
+		allowSubjectAccessReviewer{},
+		workspaceadmission.ServiceAccountIdentity{},
+		scheme,
+	)
 
 	if err := (&scheduler.RunReconciler{
 		Client: testMgr.GetClient(),
@@ -75,7 +92,7 @@ func TestMain(m *testing.M) {
 	if err := (&runtimed.Controller{
 		Client:          testMgr.GetClient(),
 		Log:             ctrl.Log.WithName("runtimed"),
-		Hostname:        "test-runtimed-pod",
+		PodName:         "test-runtimed-pod",
 		RuntimeEndpoint: "localhost:19091",
 		Workers:         1,
 	}).SetupWithManager(testMgr); err != nil {
@@ -99,6 +116,108 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Exit(code)
+}
+
+func TestRunWorkspaceAdmissionWebhook(t *testing.T) {
+	configuration := runWorkspaceValidatingWebhookConfiguration()
+	testEnv.WebhookInstallOptions.ValidatingWebhooks = []*admissionregistrationv1.ValidatingWebhookConfiguration{configuration}
+	if err := testEnv.WebhookInstallOptions.ModifyWebhookDefinitions(); err != nil {
+		t.Fatalf("configure Run validating webhook for envtest: %v", err)
+	}
+	if err := k8sClient.Create(context.Background(), configuration); err != nil {
+		t.Fatalf("create Run validating webhook configuration: %v", err)
+	}
+	defer func() { _ = k8sClient.Delete(context.Background(), configuration) }()
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-admission-"}}
+	if err := k8sClient.Create(context.Background(), namespace); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	defer func() { _ = k8sClient.Delete(context.Background(), namespace) }()
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: namespace.Name},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(context.Background(), workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+
+	allowed := integrationRun(namespace.Name, "build")
+	if err := k8sClient.Create(context.Background(), allowed); err != nil {
+		t.Fatalf("create authorized Run: %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rejected := integrationRun(namespace.Name, "missing")
+		err := k8sClient.Create(context.Background(), rejected)
+		if apierrors.IsForbidden(err) && strings.Contains(err.Error(), "does not exist") {
+			return
+		}
+		if err == nil {
+			if deleteErr := k8sClient.Delete(context.Background(), rejected); deleteErr != nil {
+				t.Fatalf("delete Run created before webhook became active: %v", deleteErr)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("missing workspace Run was not rejected by validating webhook: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func integrationRun(namespace, workspaceName string) *v1alpha1.Run {
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-admission-", Namespace: namespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{Args: []string{"echo hello"}}},
+			Workspace: &v1alpha1.RunWorkspaceReference{
+				Name: workspaceName,
+			},
+		},
+	}
+}
+
+func runWorkspaceValidatingWebhookConfiguration() *admissionregistrationv1.ValidatingWebhookConfiguration {
+	failurePolicy := admissionregistrationv1.Fail
+	matchPolicy := admissionregistrationv1.Equivalent
+	sideEffects := admissionregistrationv1.SideEffectClassNone
+	timeoutSeconds := int32(5)
+	path := workspaceadmission.RunWorkspaceValidationPath
+	return &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-workspace.integration.kruntimes.io"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
+			Name:                    "run-workspace.integration.kruntimes.io",
+			FailurePolicy:           &failurePolicy,
+			MatchPolicy:             &matchPolicy,
+			SideEffects:             &sideEffects,
+			TimeoutSeconds:          &timeoutSeconds,
+			AdmissionReviewVersions: []string{"v1"},
+			ClientConfig: admissionregistrationv1.WebhookClientConfig{
+				Service: &admissionregistrationv1.ServiceReference{
+					Namespace: "default",
+					Name:      "integration-webhook",
+					Path:      &path,
+				},
+			},
+			Rules: []admissionregistrationv1.RuleWithOperations{{
+				Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.Create},
+				Rule: admissionregistrationv1.Rule{
+					APIGroups:   []string{v1alpha1.GroupVersion.Group},
+					APIVersions: []string{v1alpha1.GroupVersion.Version},
+					Resources:   []string{"runs"},
+				},
+			}},
+		}},
+	}
+}
+
+type allowSubjectAccessReviewer struct{}
+
+func (allowSubjectAccessReviewer) Review(context.Context, authorizationv1.SubjectAccessReview) (authorizationv1.SubjectAccessReviewStatus, error) {
+	return authorizationv1.SubjectAccessReviewStatus{Allowed: true}, nil
 }
 
 func TestSchedulerReconcile(t *testing.T) {
@@ -170,6 +289,56 @@ func TestSchedulerReconcile(t *testing.T) {
 		}
 	}
 	t.Errorf("expected Scheduled, got phase=%s assignedPod=%s", updated.Status.Phase, updated.Status.AssignedPod)
+}
+
+func TestSchedulerWakesPendingRunWhenWorkspaceBinds(t *testing.T) {
+	ctx := context.Background()
+	ns := testNamespace(t, "test-scheduler-workspace-")
+	pod := createReadyRuntimePod(t, ctx, ns.Name, "runtime-workspace", 1)
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: ns.Name},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+		Status:     v1alpha1.PersistentWorkspaceStatus{Phase: v1alpha1.PersistentWorkspacePending},
+	}
+	if err := k8sClient.Create(ctx, workspace); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-run", Namespace: ns.Name},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspace.Name},
+		},
+	}
+	if err := k8sClient.Create(ctx, run); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	var pending v1alpha1.Run
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &pending); err != nil {
+		t.Fatalf("get pending run: %v", err)
+	}
+	if pending.Status.AssignedPod != "" {
+		t.Fatalf("pending workspace run assigned to %q, want no assignment", pending.Status.AssignedPod)
+	}
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(workspace), workspace); err != nil {
+			return err
+		}
+		workspace.Status.Phase = v1alpha1.PersistentWorkspaceBound
+		workspace.Status.BoundPod = pod.Name
+		workspace.Status.BoundPodUID = string(pod.UID)
+		return k8sClient.Status().Update(ctx, workspace)
+	}); err != nil {
+		t.Fatalf("bind workspace: %v", err)
+	}
+
+	assigned := waitForRunAssignment(t, ctx, run)
+	if assigned.Status.AssignedPod != pod.Name {
+		t.Fatalf("assigned pod = %q, want workspace Pod %q", assigned.Status.AssignedPod, pod.Name)
+	}
 }
 
 func TestSchedulerAggregatesAffinityAndCapacityScores(t *testing.T) {
@@ -397,6 +566,23 @@ func TestRunArtifactRefValidation(t *testing.T) {
 		t.Fatalf("create namespace: %v", err)
 	}
 	defer func() { _ = k8sClient.Delete(ctx, ns) }()
+	invalidInput := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-artifact-input", Namespace: ns.Name},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash", Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+			ArtifactInputs: []v1alpha1.ArtifactInput{{
+				Path: "../escape",
+				Ref: v1alpha1.ArtifactRef{
+					Name: "report", Driver: v1alpha1.ArtifactDriverFilesystem, Type: v1alpha1.ArtifactTypeFile,
+					Location:  v1alpha1.ArtifactLocation{Filesystem: &v1alpha1.FilesystemArtifactLocation{Path: "runs/source/report"}},
+					CreatedAt: metav1.Now(),
+				},
+			}},
+		},
+	}
+	if err := k8sClient.Create(ctx, invalidInput); !apierrors.IsInvalid(err) {
+		t.Fatalf("invalid artifact input path error = %v, want Invalid", err)
+	}
 
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "artifact-ref", Namespace: ns.Name},
@@ -796,6 +982,14 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 					Entrypoint: "script",
 					Args:       []string{"--verbose"},
 				}},
+				ArtifactInputs: []v1alpha1.ArtifactInput{{
+					Path: "inputs/report.txt",
+					Ref: v1alpha1.ArtifactRef{
+						Name: "report.txt", Driver: v1alpha1.ArtifactDriverFilesystem, Type: v1alpha1.ArtifactTypeFile,
+						Location:  v1alpha1.ArtifactLocation{Filesystem: &v1alpha1.FilesystemArtifactLocation{Path: "runs/source/report.txt"}},
+						CreatedAt: metav1.Now(),
+					},
+				}},
 				Env:     []corev1.EnvVar{{Name: "LOG_LEVEL", Value: "info"}},
 				Timeout: &timeout,
 				RetryPolicy: &v1alpha1.RetryPolicy{
@@ -845,6 +1039,12 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 			name: "mode",
 			mutate: func(run *v1alpha1.Run) {
 				run.Spec.Mode = v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "main.handle"}}
+			},
+		},
+		{
+			name: "artifact-inputs",
+			mutate: func(run *v1alpha1.Run) {
+				run.Spec.ArtifactInputs[0].Path = "inputs/updated.txt"
 			},
 		},
 		{
@@ -1440,6 +1640,37 @@ func TestCRDValidationRejectsUnsupportedFunctionEndpointProtocol(t *testing.T) {
 	})
 	if !apierrors.IsInvalid(err) {
 		t.Fatalf("invalid endpoint protocol error = %v, want Invalid", err)
+	}
+}
+
+func TestCRDValidationAllowsPersistentWorkspaceBindingStatus(t *testing.T) {
+	ctx := context.Background()
+	ns := testNamespace(t, "test-persistent-workspace-binding-status-")
+
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "bound-workspace", Namespace: ns.Name},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(ctx, workspace); err != nil {
+		t.Fatalf("create PersistentWorkspace: %v", err)
+	}
+	workspace.Status = v1alpha1.PersistentWorkspaceStatus{
+		Phase:       v1alpha1.PersistentWorkspaceBound,
+		Runtime:     "bash",
+		BoundPod:    "runtime-bash-abcde",
+		BoundPodUID: "2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6",
+		Path:        "/workspace/persistent/bound-workspace",
+	}
+	if err := k8sClient.Status().Update(ctx, workspace); err != nil {
+		t.Fatalf("update PersistentWorkspace status: %v", err)
+	}
+
+	var got v1alpha1.PersistentWorkspace
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(workspace), &got); err != nil {
+		t.Fatalf("get PersistentWorkspace: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.PersistentWorkspaceBound || got.Status.BoundPodUID != workspace.Status.BoundPodUID {
+		t.Fatalf("PersistentWorkspace status = %#v, want Bound status with fenced Pod UID", got.Status)
 	}
 }
 

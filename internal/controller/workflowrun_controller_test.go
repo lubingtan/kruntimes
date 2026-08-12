@@ -140,6 +140,9 @@ func TestWorkflowRunReconcilerAcceptsWorkflowRun(t *testing.T) {
 	if childRun.Spec.Runtime != "bash" || childRun.Spec.Source == nil || childRun.Spec.Source.Inline == nil || *childRun.Spec.Source.Inline != "git status" {
 		t.Fatalf("child run spec = %#v, want bash inline git status", childRun.Spec)
 	}
+	if childRun.Spec.Workspace == nil || childRun.Spec.Workspace.Name != workflowJobWorkspaceName(workflowRun.Name, "build") {
+		t.Fatalf("child run workspace = %#v, want build job workspace", childRun.Spec.Workspace)
+	}
 	if childRun.Labels[v1alpha1.WorkflowRunUIDLabel] != string(workflowRun.UID) ||
 		childRun.Labels[v1alpha1.WorkflowJobLabel] != "build" ||
 		childRun.Labels[v1alpha1.WorkflowStepLabel] != "checkout" {
@@ -147,6 +150,22 @@ func TestWorkflowRunReconcilerAcceptsWorkflowRun(t *testing.T) {
 	}
 	if len(childRun.OwnerReferences) != 1 || childRun.OwnerReferences[0].Name != workflowRun.Name {
 		t.Fatalf("owner references = %#v, want WorkflowRun owner", childRun.OwnerReferences)
+	}
+	var workspaces v1alpha1.PersistentWorkspaceList
+	if err := c.List(context.Background(), &workspaces, client.InNamespace(workflowRun.Namespace)); err != nil {
+		t.Fatalf("list job workspaces: %v", err)
+	}
+	if len(workspaces.Items) != 2 {
+		t.Fatalf("job workspaces = %#v, want build and test", workspaces.Items)
+	}
+	for i := range workspaces.Items {
+		workspace := &workspaces.Items[i]
+		if workspace.Spec.Runtime != "bash" || workspace.Labels[v1alpha1.WorkflowRunUIDLabel] != string(workflowRun.UID) {
+			t.Fatalf("workspace = %#v, want workflow-owned bash workspace", workspace)
+		}
+		if !metav1.IsControlledBy(workspace, workflowRun) {
+			t.Fatalf("workspace %s is not owned by workflowrun", workspace.Name)
+		}
 	}
 	testJob := updated.Status.Jobs["test"]
 	if testJob.Phase != v1alpha1.JobWaiting {

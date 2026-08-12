@@ -1,8 +1,10 @@
 # Workflow Data Sharing
 
-本文描述 v0.x 的目标设计，当前尚未实现。
+本文描述 v0.x 设计。API prerequisite、RuntimePodLocal binding、scheduler admission、
+runtimed workspace preparation、Workflow job-local workspace 和 job-to-job artifact transfer
+均已实现。
 
-RuntimePodLocal binding fencing 修订：**Proposed，等待 review**
+RuntimePodLocal binding、scheduler fencing 和 runtimed preparation：**已实现**
 
 目标是定义 Workflow jobs 和 Runs 如何共享数据，同时不让 scheduler 或 runtimed 理解
 Workflow-specific 语义。这个设计由 v0.x workflow demo 目标驱动：job-to-job 数据应通过
@@ -19,17 +21,12 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 - 来自 `KRUNTIME_OUTPUTS` 的有界 step outputs；
 - 用于小字符串 outputs 的 cross-step 和 cross-job expression references。
 - 使用 inline Kubernetes `VolumeSource` 和 `emptyDir` 默认值的 `Runtime.spec.workspace`；
-- `PersistentWorkspace` API types、CRD validation、status 和 controller skeleton；
+- `PersistentWorkspace` API types、CRD validation、status，以及带 UID fencing 的 binding lifecycle；
 - 通用 Run workspace references 和 Kubernetes-style Run affinity fields。
-
-当前尚不支持：
-
-- job 之间的 first-class artifact inputs；
-- `RuntimePodLocal` workspace binding、UID fencing 或 workspace lifecycle operations；
-- scheduler 对 Run affinity/anti-affinity 的 enforcement；
-- runtimed 对 referenced workspaces 的 preparation 和 cleanup；
-- 将 child Run artifact references 显式提升到 Workflow status；
-- shared job-local workspace 的 cleanup 和权限边界。
+- workspace-aware scheduler filtering，以及 workspace 变更触发的 Pending Run wakeup；
+- controller-managed workspace lifecycle 和 cleanup，包括显式删除和 unused-TTL 的 E2E 覆盖；
+- 通过 admission-time `use` review 和针对已验证 Workflow child Run 的 fenced controller
+  ServiceAccount path 实现 identity-based workspace authorization。
 
 ## 目标
 
@@ -66,6 +63,33 @@ step -> KRUNTIME_OUTPUTS -> Run.status.outputs -> Workflow status
 
 较大的文件不应嵌入 Workflow 或 Run status。它们应通过 artifact references 或被引用的
 workspace 传递。
+
+### Artifact Input Contract
+
+artifact transfer 分为两层，这样 Workflow controller 不复制数据，而 runtimed
+也不需要了解 Workflow：
+
+1. 通用 Run artifact input 包含 immutable `ArtifactRef` 和 relative destination
+   path。执行前，runtimed 通过配置的 `ArtifactStore` 打开该 reference，并将内容安全地
+   stage 到 Run working directory 下。file artifact 会复制到 destination path；directory
+   artifact 会被解压到该位置，且不允许 symlink 或 path traversal。
+2. Workflow step 使用 `jobs.<job-id>.artifacts.<artifact-name>` 表达 source。当 job
+   ready 后，Workflow controller 从 producing job 的 compact artifact status 解析该名称，
+   再 materialize 通用 Run input。Run API 和 runtimed 都不包含 Workflow、job 或 step
+   identifier。
+
+producing job 必须是 consuming job 的 `needs` dependency。当所有 dependencies 都成功后
+artifact 仍不存在时，Workflow job 应 deterministically failed，而不是无限等待。
+
+`ArtifactRef` 只标识 storage coordinates，不携带 authorization。v0.x 中，交换 artifacts
+的 jobs 必须使用 compatible 的 `Runtime.spec.artifactStore` configuration：consuming
+runtimed 必须能用自己的 credentials 和 store scope 打开 producer reference。该约束支持 shared
+PVC filesystem store 和 shared S3 bucket/prefix access。具有 independent credentials 的
+project-wide artifact relay 是后续 feature；Workflow controller 不代理 artifact bytes。
+
+artifact name 在同一个 job 内形成一个 namespace。Job status 会为每个名称投影最近成功的 child
+Run reference，因此后续 sequential step 可以有意替换前一个 artifact。consumer 会在 producer job
+succeed 后读取其最终 reference。
 
 ## PersistentWorkspace CRD
 
@@ -138,8 +162,9 @@ binding controller 在 v0.x 中应遵循以下规则：
 
 1. 未绑定 workspace 在其引用的 Runtime 没有 ready Runtime Pods 时保持等待。无论等待或已经绑定，
    它都不会消耗或预留 Run capacity。
-2. 有候选 Pod 时，controller 先按 `metadata.name` 对 ready Runtime Pod 排序，再选择名称字典序最小的
-   Pod。在稳定 Pod 集合下该选择是 deterministic 的；后续调度工作使用 `status.boundPod` 和
+2. 有候选 Pod 时，controller 先按 `metadata.name` 对 ready Runtime Pod 排序，再根据
+   PersistentWorkspace UID 的稳定哈希选择一个 Pod。这样可将首次绑定分散到多个 ready Pod，且在
+   候选集合不变时保持 deterministic；后续调度工作使用 `status.boundPod` 和
    `status.boundPodUID`，而不是试图重复这个选择。
 3. controller 记录 `status.phase: Bound`、`status.runtime`、`status.boundPod`，以及计划使用的本地
    immutable 的 `status.boundPodUID`，以及计划使用的本地
@@ -154,6 +179,67 @@ binding controller 在 v0.x 中应遵循以下规则：
 
 这个 binding slice 仅写入 metadata。TTL cleanup、filesystem deletion、`lastUsedTime` 和 Run
 admission/preparation 都是独立的后续工作。
+
+### Cleanup Protocol
+
+`PersistentWorkspace` cleanup 是两部分协议。controller 负责 logical lifecycle；runtimed
+负责删除 Runtime Pod-local mount 中的 bytes。controller 不得通过 Pod exec 删除路径，也不得因为
+删除 workspace 而假定某个 custom Runtime 实现了 shell command。
+
+1. PersistentWorkspace controller 按 `spec.workspace.name` 为 Run 建立索引。当任一引用 Run
+   非 terminal 时 workspace 为 active。当最后一个 active Run 变为 terminal 时，controller
+   只设置一次 `status.lastUsedTime`。新 Bound 且没有 Run 的 workspace 从 Bound 时开始 unused
+   interval。
+2. `cleanupPolicy: DeleteAfterTTL` 仅在设置且到达 `ttlSecondsAfterUnused` 后开始 cleanup。nil TTL
+   有意表示不自动删除。`Retain` 永远不自动开始 cleanup。
+3. controller 请求 cleanup 时，将 workspace 置为 `Released`，然后请求 Kubernetes deletion，
+   同时保留专用 workspace finalizer。`Released` 对调度是 terminal：
+   不允许新的 Run claim 它。
+4. 已记录 `status.boundPod` 上的 runtimed 仅 watch 绑定到自己 Pod 的 workspace object。在独立确认
+   没有 local non-terminal Run 引用该 workspace 后，它只删除
+   `/workspace/persistent/<workspace-name>`，然后移除该 finalizer。它不写 Workspace status。该操作
+   不需要 Workflow 语义，也不需要 runtime-server extension。
+5. controller 是唯一的 status writer。如果其 bound Pod 已消失，workspace 已为 `Lost`；没有剩余
+   Pod-local data 需要删除，controller 不等待 runtimed 即可移除 finalizer。
+
+所有已 Bound workspace 不论 cleanup policy 或 deletion 原因都遵循同一删除协议：finalizer 保留 object，直到 bound
+runtimed 在物理删除后移除 finalizer。`Retain` 仅禁止自动 TTL 删除；显式删除仍会移除 Pod-local directory。
+如果 live bound Pod 暂时 unavailable，cleanup 保持 pending，不能冒险删除另一个 Pod 上的目录；该 Pod 被删除后
+workspace 转为 `Lost`，并解除 finalizer 阻塞。
+
+### 权限边界设计
+
+仅对 `PersistentWorkspace` resource 使用 Kubernetes RBAC 并不足够：它控制谁可以读取或修改 object，
+但不能控制一个允许创建 Run 的主体是否可以使用某个已有 workspace。scheduler 和 runtimed 不能承担该决策，
+因为它们拿不到原始 Kubernetes request identity。
+
+已实现的 v1.0 模型在 `persistentworkspaces/use` subresource 上使用 Kubernetes-native 的 `use` permission：
+
+1. validating admission webhook 处理带 `spec.workspace` 的直接 Run create。它要求被引用的 workspace
+   已存在，检查其 Runtime 与 Run 匹配，然后为请求主体同步创建并等待 `SubjectAccessReview`：verb 为 `use`，resource
+   为 `persistentworkspaces`，subresource 为 `use`，resource name 为 workspace name。webhook 必须在有界 timeout
+   内返回 admission decision：建议为 review 分配约两秒，并为完整 webhook request 配置五秒。review 被拒绝、超时或
+   API error 时，Run 会被拒绝，而不是让未授权 reference 保持 Pending。webhook 配置使用 `failurePolicy: Fail`，因此
+   webhook 不可达或超时时也会 fail closed。
+2. namespace administrator 通过普通 Role 或 RoleBinding 授予该 permission。`resourceNames` 可以将主体限制到
+   指定 workspace，而无需在 CRD 中增加 kruntimes-specific ACL。
+3. chart 配置的 controller ServiceAccount 对 Workflow child Run 有一条受限的 internal path。仅当 webhook
+   能证明 Run 和被引用 workspace 的 controller owner reference 指向同一个 live `WorkflowRun` UID、两者的
+   `WorkflowRunUIDLabel` 都匹配该 UID、且 workflow job label 相同，才允许该身份绕过第二次
+   `SubjectAccessReview`。malformed、stale 或 cross-job reference 会被拒绝。用户即使复制 labels 或
+   owner references 也无法获得该路径，因为只有配置的 ServiceAccount identity 会进入它；其它所有调用方
+   都走普通 `use` review。
+4. scheduler 和 runtimed 保持 workflow-agnostic 和 authorization-agnostic。它们继续只负责 workspace existence、
+   Runtime compatibility、binding、lifecycle 和 Pod placement。
+
+这会改变 direct Run 对不存在 workspace reference 的行为：不再接受后等待未来 object，而是在 admission 时拒绝。
+Workflow controller 仅在其 owned workspace 已存在后创建 child Run，因此仍保留正常的 asynchronous binding 行为。
+
+Helm chart 部署 webhook Service、由 chart 管理的 TLS Secret，以及配置了 `failurePolicy: Fail` 的
+`ValidatingWebhookConfiguration`，并将 controller ServiceAccount identity 显式配置给 webhook process。
+该 ServiceAccount 可以创建 `SubjectAccessReview`，但没有泛化的 `persistentworkspaces/use` permission；仅能通过
+上面已验证的 Workflow child-Run path 使用 workspace reference。面向 impersonation 的 integration 和 E2E coverage
+仍属于后续工作。
 
 ## Run Workspace Reference
 
@@ -179,8 +265,14 @@ spec:
 `kind` 和 `apiGroup` 是 optional。省略时默认是 `PersistentWorkspace` 和
 `kruntimes.io/v1alpha1`。
 
-runtimed 在执行前准备被引用的 workspace path，并在 Run 完成后只清理 per-Run temporary
-state。workspace lifecycle 由 `PersistentWorkspace` controller 拥有。
+runtimed 在执行前准备被引用的 workspace path。workspace lifecycle 由
+`PersistentWorkspace` controller 拥有。对于 task-mode Run，
+runtimed 将 inline 和 Git source stage 到 workspace 保留的
+`.kruntimes/runs/<run-uid>` 目录，以 workspace 作为 current directory 执行。outputs 和
+artifact staging 也使用这个 Run-local directory。runtimed 不会删除 referenced workspace
+中的任何路径；PersistentWorkspace controller 根据其 lifecycle 与 cleanup policy 回收。
+这样所有 runtimed-managed 文件都不会覆盖其他 Run 有意共享的文件。Function-mode source 保持在
+workspace root，以便 handler module resolution 仍然相对于 working directory。
 
 ## Run Affinity
 
@@ -246,7 +338,7 @@ spec:
         - name: verify-artifact
           artifacts:
             - from: jobs.build.artifacts.dist.tgz
-              path: ./dist.tgz
+              path: dist.tgz
           run: |
             tar -tzf dist.tgz
             echo "artifact verified"
@@ -278,9 +370,13 @@ status:
       artifacts:
         dist.tgz:
           name: dist.tgz
-          uri: s3://kruntimes-artifacts/workflows/ci-data-sharing-demo/jobs/build/dist.tgz
+          driver: Filesystem
+          type: File
+          location:
+            filesystem:
+              path: runs/<run-uid>/artifacts/dist.tgz
       steps:
-        package:
+        - name: package
           runName: ci-data-sharing-demo-build-package
           outputs:
             tests: passed
@@ -296,16 +392,17 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 | --- | --- |
 | Workflow controller | 解释 job/step 语义，基于 controller defaults 创建 job-local workspaces，创建 child Runs，连接 artifact inputs，并把 outputs/artifact refs 提升到 Workflow status。 |
 | PersistentWorkspace controller | 拥有 workspace lifecycle、绑定到 Runtime workspace volumes、status、TTL 和 cleanup。 |
-| Scheduler | 应用通用 Runtime capacity 和 Run affinity/anti-affinity。不理解 Workflows。 |
-| runtimed | 准备被引用的 workspace paths，stage artifact inputs，collect artifact outputs，并清理 per-Run temporary state。不理解 Workflows。 |
+| Scheduler | Snapshot 通用 Run、Runtime Pod 和 referenced workspace state；应用 workspace fencing、Runtime capacity 和 Run affinity/anti-affinity。不理解 Workflows。 |
+| runtimed | 准备被引用的 workspace paths，stage artifact inputs，collect artifact outputs。不理解 Workflows，也不删除 referenced workspace 中的路径。 |
 | ArtifactStore | 将 durable artifacts 存储在 etcd 之外。 |
 
 ## 失败和恢复
 
 - 如果 Runtime Pod 消失，由该 Pod workspace volume 支撑的 `RuntimePodLocal` workspaces 变为
   `Lost`；它们不会自动 rebind 到另一个 Pod。
-- 需要不可用 workspace 的 Runs 应保持 Pending，或根据 retry policy/controller decision 以清晰
-  workspace condition 失败。
+- 引用 missing、Pending、Lost、Runtime-incompatible 或 UID-mismatched workspace Pod 的 Runs 必须保持
+  Pending 并显示明确 message。workspace changes 会重新入队匹配的 Pending Runs；上述状态都不是 scheduler
+  terminal failure。
 - Workflow controller 应通过 Workflow conditions 或 messages 暴露 workspace-related
   failures，但不在 Workflow spec 中暴露 workspace controls。
 - Workspace cleanup 不应依赖 Runtime Pod 仍然存在。
@@ -324,6 +421,8 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
 - workflow、job 和 controller ownership labels；
 - validation 拒绝 artifact inputs 中的绝对路径和 path traversal；
 - 显式 cleanup policy 和 TTL；
+- 所有已 Bound workspace 的 finalizer-based deletion、active-Run usage tracking 和仅由
+  runtimed 执行的 physical cleanup；
 - 文档警告 shared workspace 不是 hostile-code isolation。
 
 ## 实现顺序
@@ -339,8 +438,31 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    Runs Pending。
 7. review bound-Pod UID fencing 修订后，增加 `status.boundPodUID`，再将 `RuntimePodLocal`
    PersistentWorkspaces 绑定到 ready Runtime Pods，并记录 lifecycle status，不修改 runtime filesystems。
-8. 更新 runtimed workspace preparation 和 cleanup，使其支持 referenced workspaces。
-9. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
-10. 将 child Run artifact refs 提升到 Workflow status。
-11. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
+8. 增加通用 `Workspace` scheduler Filter plugin。**已实现：** scheduling snapshot 只解析一次
+   referenced workspace；filter 拒绝 Runtime 不匹配的 candidates；对于 Bound RuntimePodLocal workspace，
+   只允许 fenced `status.boundPod` 和 `status.boundPodUID`。Pending 或 Lost workspace 没有 eligible
+   candidates，因此对应 Run 保持 Pending 并显示清晰的 scheduling message；workspace changes 会重新入队
+   对应的 Pending Run。
+9. 更新 runtimed workspace preparation，使其支持 referenced workspaces。**已实现：**
+   referenced Run 在 persistent workspace 中执行；outputs 和 artifact staging 仍然是
+   Run-local；task source 被 stage 到保留的 per-Run directory。PersistentWorkspace lifecycle
+   负责 workspace 内的 cleanup。
+10. 在 Workflow controller 中组合 job-local workspaces。**已实现：**
+    初始化时会为每个 inline job 创建一个由 WorkflowRun 拥有的
+    PersistentWorkspace，并让该 job 的每个 child Run 引用它。reusable
+    Workflow-call job 不在父级创建 workspace；其 materialized child
+    WorkflowRun 拥有自己的 job workspace。
+11. 增加 Workflow step artifact input fields 和 job-scoped artifact status。
+    **已实现：**step 可从 direct `needs` dependency 引用
+    `jobs.<job-id>.artifacts.<artifact-name>`；controller 将其解析为通用的
+    `Run.spec.artifactInputs`。
+12. 将 child Run artifact refs 提升到 Workflow status。**已实现：**成功的 Job 在
+    `status.jobs.<job-id>.artifacts` 中暴露每个 artifact name 最后一次成功的 ref。
+13. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。
+   **已实现：**E2E 覆盖 Runtime workspace sources、job-local sharing、Run artifact staging、
+   job-to-job transfer、Runtime Pod loss、cleanup 和 permission boundaries。admission authorization
+   与 controller ownership 另有 focused unit 和 integration coverage。
+14. 实现 cleanup protocol：active-Run tracking、Released admission fencing、workspace finalizer、
+    runtimed local-path cleanup，以及 TTL、explicit deletion、retained workspace 和 cleanup 中
+    bound-Pod loss 的 E2E 覆盖。

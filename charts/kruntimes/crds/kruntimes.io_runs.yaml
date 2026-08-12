@@ -385,6 +385,134 @@ spec:
                         type: array
                     type: object
                 type: object
+              artifactInputs:
+                description: |-
+                  ArtifactInputs are materialized from the configured ArtifactStore into the
+                  Run working directory before execution.
+                items:
+                  description: |-
+                    ArtifactInput materializes an artifact stored outside etcd into a Run working
+                    directory before execution.
+                  properties:
+                    path:
+                      description: |-
+                        Path is the relative destination below the Run working directory. File
+                        artifacts are written to this path; directory artifacts are extracted into
+                        this directory.
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    ref:
+                      description: |-
+                        Ref identifies immutable artifact content readable by the Runtime's
+                        configured ArtifactStore.
+                      properties:
+                        contentType:
+                          description: ContentType is the detected media type.
+                          maxLength: 255
+                          type: string
+                        createdAt:
+                          description: CreatedAt records when the artifact was stored.
+                          format: date-time
+                          type: string
+                        digest:
+                          description: Digest is the content digest, including its
+                            algorithm prefix.
+                          maxLength: 256
+                          type: string
+                        driver:
+                          description: Driver identifies the ArtifactStore implementation.
+                          enum:
+                          - filesystem
+                          - s3
+                          type: string
+                        location:
+                          description: Location contains driver-specific storage coordinates.
+                          properties:
+                            filesystem:
+                              description: Filesystem identifies an artifact in a
+                                filesystem store.
+                              properties:
+                                path:
+                                  description: Path is relative to the artifact store
+                                    root.
+                                  maxLength: 4096
+                                  minLength: 1
+                                  type: string
+                                volumeClaimName:
+                                  description: VolumeClaimName identifies the PVC
+                                    backing the filesystem store.
+                                  maxLength: 253
+                                  type: string
+                              required:
+                              - path
+                              type: object
+                            s3:
+                              description: S3 identifies an artifact in an S3-compatible
+                                object store.
+                              properties:
+                                bucket:
+                                  description: Bucket is the object store bucket.
+                                  maxLength: 255
+                                  minLength: 1
+                                  type: string
+                                key:
+                                  description: Key is the object key within the bucket.
+                                  maxLength: 4096
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - bucket
+                              - key
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                          - message: exactly one artifact location must be set
+                            rule: has(self.filesystem) != has(self.s3)
+                        name:
+                          description: |-
+                            Name is the logical artifact name exposed by the Run.
+                            Artifact collection enforces the same 255-byte upper bound.
+                          maxLength: 255
+                          minLength: 1
+                          type: string
+                        sizeBytes:
+                          description: SizeBytes is the stored artifact size.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        type:
+                          description: Type describes how the artifact content is
+                            represented.
+                          enum:
+                          - file
+                          - directory
+                          - archive
+                          - blob
+                          type: string
+                      required:
+                      - createdAt
+                      - driver
+                      - location
+                      - name
+                      - sizeBytes
+                      - type
+                      type: object
+                      x-kubernetes-validations:
+                      - message: artifact location must match driver
+                        rule: (self.driver == 'filesystem' && has(self.location.filesystem))
+                          || (self.driver == 's3' && has(self.location.s3))
+                  required:
+                  - path
+                  - ref
+                  type: object
+                  x-kubernetes-validations:
+                  - message: path must be a relative path without empty, '.' or '..'
+                      segments
+                    rule: '!self.path.startsWith(''/'') && !self.path.split(''/'').exists(segment,
+                      size(segment) == 0 || segment == ''.'' || segment == ''..'')'
+                maxItems: 32
+                type: array
               cancelRequested:
                 description: CancelRequested is set to true to request cancellation
                   of a running Run.
@@ -749,16 +877,18 @@ spec:
             - message: function mode inline source requires source.inlinePath
               rule: '!has(self.mode.function) || !has(self.source) || !has(self.source.inline)
                 || has(self.source.inlinePath)'
-            - message: runtime, source, mode, env, timeout, retryPolicy, and resources
-                are immutable after Run creation
+            - message: runtime, source, mode, artifactInputs, env, timeout, retryPolicy,
+                and resources are immutable after Run creation
               rule: self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source)
                 && (!has(self.source) || self.source == oldSelf.source) && self.mode
-                == oldSelf.mode && has(self.env) == has(oldSelf.env) && (!has(self.env)
-                || self.env == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout)
-                && (!has(self.timeout) || self.timeout == oldSelf.timeout) && has(self.retryPolicy)
-                == has(oldSelf.retryPolicy) && (!has(self.retryPolicy) || self.retryPolicy
-                == oldSelf.retryPolicy) && has(self.resources) == has(oldSelf.resources)
-                && (!has(self.resources) || self.resources == oldSelf.resources)
+                == oldSelf.mode && has(self.artifactInputs) == has(oldSelf.artifactInputs)
+                && (!has(self.artifactInputs) || self.artifactInputs == oldSelf.artifactInputs)
+                && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env
+                == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout)
+                || self.timeout == oldSelf.timeout) && has(self.retryPolicy) == has(oldSelf.retryPolicy)
+                && (!has(self.retryPolicy) || self.retryPolicy == oldSelf.retryPolicy)
+                && has(self.resources) == has(oldSelf.resources) && (!has(self.resources)
+                || self.resources == oldSelf.resources)
             - message: workspace and affinity are immutable after Run creation
               rule: has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace)
                 || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity)

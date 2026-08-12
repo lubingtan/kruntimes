@@ -136,6 +136,13 @@ type JobStatus struct {
 	// +kubebuilder:validation:MaxProperties=64
 	Outputs map[string]string `json:"outputs,omitempty"`
 
+	// Artifacts maps job-local artifact names to compact references stored
+	// outside etcd. It contains the latest successful child Run reference for
+	// each name in job step order.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=32
+	Artifacts map[string]ArtifactRef `json:"artifacts,omitempty"`
+
 	// Steps tracks each step in the original job step order.
 	// +optional
 	// +kubebuilder:validation:MaxItems=128

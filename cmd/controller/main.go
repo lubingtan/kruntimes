@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -15,8 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	workspaceadmission "github.com/kruntimes/kruntimes/internal/admission"
 	"github.com/kruntimes/kruntimes/internal/controller"
 	"github.com/kruntimes/kruntimes/internal/healthcheck"
 )
@@ -33,18 +36,26 @@ func init() {
 
 func main() {
 	var (
-		metricsAddr                  string
-		probeAddr                    string
-		enableLeaderElection         bool
-		staleThreshold               time.Duration
-		defaultDaemonImage           string
-		runtimedServiceAccountName   string
-		runtimeMaintainerImage       string
-		runtimeMaintainerPullSecrets string
+		metricsAddr                              string
+		probeAddr                                string
+		webhookPort                              int
+		webhookCertDir                           string
+		webhookControllerServiceAccountName      string
+		webhookControllerServiceAccountNamespace string
+		enableLeaderElection                     bool
+		staleThreshold                           time.Duration
+		defaultDaemonImage                       string
+		runtimedServiceAccountName               string
+		runtimeMaintainerImage                   string
+		runtimeMaintainerPullSecrets             string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8083", "The address the probe endpoint binds to.")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "The HTTPS port for admission webhooks.")
+	flag.StringVar(&webhookCertDir, "webhook-cert-dir", "/tmp/k8s-webhook-server/serving-certs", "Directory containing tls.crt and tls.key for admission webhooks.")
+	flag.StringVar(&webhookControllerServiceAccountName, "webhook-controller-service-account-name", "", "ServiceAccount name trusted to create verified WorkflowRun child Runs with workspaces.")
+	flag.StringVar(&webhookControllerServiceAccountNamespace, "webhook-controller-service-account-namespace", "", "Namespace of the ServiceAccount trusted to create verified WorkflowRun child Runs with workspaces.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.DurationVar(&staleThreshold, "stale-threshold", 30*time.Second, "Threshold for marking a Run as stale when its assigned pod is unhealthy.")
 	flag.StringVar(&defaultDaemonImage, "default-daemon-image", "", "Default runtimed daemon image injected into Runtime Pods.")
@@ -54,14 +65,22 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	if webhookControllerServiceAccountName == "" || webhookControllerServiceAccountNamespace == "" {
+		setupLog.Error(fmt.Errorf("both controller service account name and namespace are required"), "admission webhook configuration is incomplete")
+		os.Exit(1)
+	}
 
 	skipNameValidation := true
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "kruntimes-controller.kruntimes.com",
+		WebhookServer: webhookserver.NewServer(webhookserver.Options{
+			Port:    webhookPort,
+			CertDir: webhookCertDir,
+		}),
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "kruntimes-controller.kruntimes.com",
 		Controller: config.Controller{
 			SkipNameValidation: &skipNameValidation,
 		},
@@ -82,6 +101,20 @@ func main() {
 		setupLog.Error(err, "unable to register readiness check")
 		os.Exit(1)
 	}
+	if err := mgr.AddReadyzCheck("admission-webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+		setupLog.Error(err, "unable to register readiness check", "check", "admission-webhook")
+		os.Exit(1)
+	}
+	workspaceadmission.RegisterRunWorkspaceValidator(
+		mgr.GetWebhookServer(),
+		mgr.GetAPIReader(),
+		workspaceadmission.KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
+		workspaceadmission.ServiceAccountIdentity{
+			Name:      webhookControllerServiceAccountName,
+			Namespace: webhookControllerServiceAccountNamespace,
+		},
+		mgr.GetScheme(),
+	)
 
 	reconciler := &controller.RuntimeReconciler{
 		Client:                     mgr.GetClient(),

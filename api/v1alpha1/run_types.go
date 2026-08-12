@@ -156,6 +156,25 @@ type ArtifactRef struct {
 }
 
 // +kubebuilder:object:generate=true
+// ArtifactInput materializes an artifact stored outside etcd into a Run working
+// directory before execution.
+// +kubebuilder:validation:XValidation:rule="!self.path.startsWith('/') && !self.path.split('/').exists(segment, size(segment) == 0 || segment == '.' || segment == '..')",message="path must be a relative path without empty, '.' or '..' segments"
+type ArtifactInput struct {
+	// Ref identifies immutable artifact content readable by the Runtime's
+	// configured ArtifactStore.
+	// +kubebuilder:validation:Required
+	Ref ArtifactRef `json:"ref"`
+
+	// Path is the relative destination below the Run working directory. File
+	// artifacts are written to this path; directory artifacts are extracted into
+	// this directory.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	Path string `json:"path"`
+}
+
+// +kubebuilder:object:generate=true
 // RetryPolicy specifies the retry strategy for a Run.
 type RetryPolicy struct {
 	// MaxAttempts is the maximum number of execution attempts (including the initial attempt).
@@ -365,7 +384,7 @@ type RunAffinityTerm struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.mode.task) || !has(self.mode.task.entrypoint) || (has(self.source) && has(self.source.inline)) || (!self.mode.task.entrypoint.startsWith('/') && !self.mode.task.entrypoint.split('/').exists(segment, segment == '..'))",message="mode.task.entrypoint must be a relative path that does not contain '..'"
 // +kubebuilder:validation:XValidation:rule="!has(self.source) || !has(self.source.inlinePath) || (has(self.mode.function) && has(self.source.inline))",message="source.inlinePath is only valid for function mode with inline source"
 // +kubebuilder:validation:XValidation:rule="!has(self.mode.function) || !has(self.source) || !has(self.source.inline) || has(self.source.inlinePath)",message="function mode inline source requires source.inlinePath"
-// +kubebuilder:validation:XValidation:rule="self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source) && (!has(self.source) || self.source == oldSelf.source) && self.mode == oldSelf.mode && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout) && has(self.retryPolicy) == has(oldSelf.retryPolicy) && (!has(self.retryPolicy) || self.retryPolicy == oldSelf.retryPolicy) && has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="runtime, source, mode, env, timeout, retryPolicy, and resources are immutable after Run creation"
+// +kubebuilder:validation:XValidation:rule="self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source) && (!has(self.source) || self.source == oldSelf.source) && self.mode == oldSelf.mode && has(self.artifactInputs) == has(oldSelf.artifactInputs) && (!has(self.artifactInputs) || self.artifactInputs == oldSelf.artifactInputs) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout) && has(self.retryPolicy) == has(oldSelf.retryPolicy) && (!has(self.retryPolicy) || self.retryPolicy == oldSelf.retryPolicy) && has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="runtime, source, mode, artifactInputs, env, timeout, retryPolicy, and resources are immutable after Run creation"
 // +kubebuilder:validation:XValidation:rule="has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity) && (!has(self.affinity) || self.affinity == oldSelf.affinity)",message="workspace and affinity are immutable after Run creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested || (has(self.cancelRequested) && self.cancelRequested)",message="cancelRequested may not transition from true to false"
 type RunSpec struct {
@@ -385,6 +404,12 @@ type RunSpec struct {
 	// Mode contains execution-mode-specific configuration.
 	// +kubebuilder:validation:Required
 	Mode RunMode `json:"mode"`
+
+	// ArtifactInputs are materialized from the configured ArtifactStore into the
+	// Run working directory before execution.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	ArtifactInputs []ArtifactInput `json:"artifactInputs,omitempty"`
 
 	// Workspace references a namespace-local PersistentWorkspace used by this Run.
 	// +optional

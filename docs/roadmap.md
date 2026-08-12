@@ -235,7 +235,7 @@ wiring from accumulating avoidable conflicts.
   agent platforms can safely hand a sandbox handle to sub-agents.
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those
   examples to identify missing product and API capabilities.
-- [ ] Workflow data sharing: design and implement first-class cross-Run storage
+- [x] Workflow data sharing: design and implement first-class cross-Run storage
   semantics discovered from the workflow demo. Target model:
   - job-to-job data moves through ArtifactStore-backed step outputs and inputs;
   - Run-to-Run data inside one Workflow job can share a `PersistentWorkspace`;
@@ -261,20 +261,54 @@ wiring from accumulating avoidable conflicts.
   - [x] implement required/preferred Run affinity through the reviewed
     [scheduler framework](design/scheduler-framework.md), while keeping
     no-capacity Runs Pending;
-  - [ ] review and define `RuntimePodLocal` binding semantics: deterministic
+  - [x] review and define `RuntimePodLocal` binding semantics: deterministic
     ready-Pod selection without capacity reservation, planned path ownership,
     and sticky `Lost` status after bound-Pod deletion:
-    - [ ] review the `status.boundPodUID` fencing amendment so same-name Pod
+    - [x] review the `status.boundPodUID` fencing amendment so same-name Pod
       recreation cannot silently replace a RuntimePodLocal workspace;
-    - [ ] add the status field, regenerate CRDs, then implement metadata-only
-      binding and Lost-state handling;
-  - update runtimed workspace preparation and cleanup to support referenced
-    persistent workspaces without knowing Workflow semantics;
-  - promote child Run artifact refs into Workflow status and add explicit step
-    artifact inputs;
-  - add E2E coverage for Runtime workspace volume sources, job-local workspace
-    sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
-    permission boundaries.
+    - [x] add the status field and regenerate CRDs;
+    - [x] implement metadata-only binding with stable UID-hash distribution
+      across ready Runtime Pods, with Runtime and Pod watches;
+    - [x] retain the original binding while the Pod is merely unavailable, and
+      transition permanently to `Lost` when the name disappears or its UID
+      changes;
+    - [x] add focused controller and API validation coverage.
+  - [x] add a generic `Workspace` scheduler Filter plugin without introducing
+    Workflow concepts: require `Run.spec.workspace` to match its Runtime and a
+    Bound RuntimePodLocal workspace, and filter candidates to its fenced bound
+    Pod while keeping unresolved or Lost workspaces Pending with a clear
+    message; wake matching Pending Runs when the referenced workspace changes.
+  - [x] update runtimed workspace preparation and cleanup to support referenced
+    persistent workspaces without knowing Workflow semantics; create only the
+    bound workspace directory, preserve its contents, and clean only Run-local
+    temporary state.
+  - [x] compose the generic primitives in the Workflow controller: create and
+    own a job-local PersistentWorkspace, add the workspace reference and
+    bound-Pod placement to each child Run, and surface workspace loss without
+    exposing workspace controls in Workflow APIs.
+  - [x] add explicit step artifact inputs and job-scoped artifact references;
+    stage `jobs.<job>.artifacts.<name>` into downstream child Runs and promote
+    compact child Run artifact refs into Workflow status.
+  - [x] complete E2E coverage for Runtime workspace volume sources, job-local
+    workspace sharing, job-to-job artifact passing, Runtime Pod loss, cleanup,
+    and permission boundaries:
+    - [x] Runtime workspace sources, job-local sharing, job-to-job artifact
+      passing, and Runtime Pod loss;
+    - [x] explicit-deletion cleanup;
+    - [x] automatic-TTL cleanup;
+    - [x] permission boundaries:
+      - [x] review the `persistentworkspaces/use` authorization contract and
+        direct-Run missing-reference behavior;
+      - [x] add a validating admission webhook with SubjectAccessReview,
+        reviewed failure policy, and Helm/TLS installation support;
+      - [x] prove controller-created Workflow child Runs cannot bypass the
+        workspace authorization boundary;
+      - [x] add impersonation-focused integration and E2E coverage for allow,
+        deny, named-resource, and controller-owned cases.
+  - [x] implement PersistentWorkspace cleanup as a separately reviewed lifecycle
+    slice: active Run tracking, `Released` scheduling fence, finalizer-based
+    deletion, runtimed-only Pod-local directory removal, deletion/TTL E2E
+    coverage, and focused loss controller coverage.
 - [x] Workflow reuse model: split execution instances from reusable
   definitions before Workflow APIs stabilize. Target model:
   - replace the current execution-instance `Workflow` API with `WorkflowRun`;
@@ -385,6 +419,11 @@ wiring from accumulating avoidable conflicts.
 ### Toward v1.0
 
 - Stabilize CRD APIs.
+- [ ] Restore the Python runtime base image to a supported Python 3.15 release
+  only after its final image is available and every locked native dependency,
+  including `grpcio`, publishes compatible `cp315` wheels. Keep the image build
+  and runtime test coverage as the upgrade gate; do not rely on an implicit
+  source build in the slim production image.
 - [ ] Add `Run.spec.priority` as a scheduler API. First review the priority,
   fairness, aging/starvation, namespace isolation, authorization, retry/backoff,
   and non-preemption semantics, then replace controller-runtime event ordering
@@ -398,6 +437,13 @@ wiring from accumulating avoidable conflicts.
   Python invocation startup overhead. Review worker lifecycle, module state,
   cancellation, concurrency, output limits, and isolation before replacing the
   current per-invocation subprocess model.
+- [ ] Reduce local and CI E2E suite duration without weakening coverage:
+  identify avoidable serial waits, safely parallelize isolated cases, and split
+  fast feedback from slower lifecycle coverage while preserving a complete
+  release gate.
+- [ ] Clean up a Runtime's runtime maintainer when the Runtime is deleted.
+  Define ownership and finalization so orphaned maintainers do not accumulate,
+  while preserving artifact cleanup for Runs that still require it.
 - Define compatibility and migration guarantees.
 - Document deprecation policy.
 - Clarify multi-tenant isolation strategy for production environments.

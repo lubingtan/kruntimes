@@ -87,9 +87,10 @@ func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
 
-	hostname := os.Getenv("HOSTNAME")
-	if hostname == "" {
-		hostname, _ = os.Hostname()
+	podName := os.Getenv("POD_NAME")
+	if podName == "" {
+		setupLog.Error(errors.New("POD_NAME is required"), "unable to identify runtimed Pod")
+		os.Exit(1)
 	}
 	runtimeNamespace := os.Getenv("POD_NAMESPACE")
 	if runtimeNamespace == "" {
@@ -213,7 +214,7 @@ func main() {
 		PodReader:         mgr.GetAPIReader(),
 		RunReader:         mgr.GetAPIReader(),
 		Log:               ctrl.Log.WithName("controllers").WithName("Runtimed"),
-		Hostname:          hostname,
+		PodName:           podName,
 		RuntimeName:       runtimeName,
 		RuntimeNamespace:  runtimeNamespace,
 		RuntimeEndpoint:   runtimeEndpoint,
@@ -229,8 +230,18 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Runtimed")
 		os.Exit(1)
 	}
+	workspaceCleanupCtrl := &runtimed.PersistentWorkspaceCleanupReconciler{
+		Client:    mgr.GetClient(),
+		PodReader: mgr.GetAPIReader(),
+		PodName:   podName,
+		Namespace: runtimeNamespace,
+	}
+	if err := workspaceCleanupCtrl.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PersistentWorkspaceCleanup")
+		os.Exit(1)
+	}
 
-	setupLog.Info("starting runtimed", "hostname", hostname, "runtime", runtimeEndpoint)
+	setupLog.Info("starting runtimed", "pod", podName, "runtime", runtimeEndpoint)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)

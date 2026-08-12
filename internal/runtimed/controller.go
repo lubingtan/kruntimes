@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -34,7 +32,6 @@ import (
 	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	"github.com/kruntimes/kruntimes/internal/artifact"
-	"github.com/kruntimes/kruntimes/internal/execpath"
 	runretry "github.com/kruntimes/kruntimes/internal/retry"
 	"github.com/kruntimes/kruntimes/internal/runstatus"
 	rlegpkg "github.com/kruntimes/kruntimes/internal/runtimed/rleg"
@@ -96,21 +93,13 @@ var (
 	)
 )
 
-type activeRun struct {
-	run      *v1alpha1.Run
-	workDir  string
-	deadline time.Time
-	start    time.Time
-	started  atomic.Bool
-}
-
 // Controller reconciles Runs assigned to this pod.
 type Controller struct {
 	client.Client
 	PodReader         client.Reader
 	RunReader         client.Reader
 	Log               logr.Logger
-	Hostname          string
+	PodName           string
 	RuntimeName       string
 	RuntimeNamespace  string
 	RuntimeEndpoint   string
@@ -164,7 +153,7 @@ func (c *Controller) Start(ctx context.Context) error {
 	go c.heartbeat(ctx)
 	go c.recoverActiveRuns(ctx)
 
-	klog.Infof("runtimed controller started, hostname=%s, runtime=%s, workers=%d", c.Hostname, c.RuntimeEndpoint, c.capacity())
+	klog.Infof("runtimed controller started, pod=%s, runtime=%s, workers=%d", c.PodName, c.RuntimeEndpoint, c.capacity())
 	return nil
 }
 
@@ -191,16 +180,16 @@ func (c *Controller) runFilter() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
 			run, ok := e.Object.(*v1alpha1.Run)
-			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.Hostname
+			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.PodName
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			run, ok := e.ObjectNew.(*v1alpha1.Run)
-			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.Hostname
+			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.PodName
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool { return false },
 		GenericFunc: func(e event.GenericEvent) bool {
 			run, ok := e.Object.(*v1alpha1.Run)
-			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.Hostname
+			return ok && c.matchesRuntimeNamespace(run) && run.Status.AssignedPod == c.PodName
 		},
 	}
 }
@@ -220,7 +209,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !run.DeletionTimestamp.IsZero() {
-		c.releaseActiveRun(ctx, &run)
+		c.releaseActiveRun(ctx, c.buildActiveRun(&run))
 		return ctrl.Result{}, nil
 	}
 
@@ -265,23 +254,14 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	c.observeDispatchDuration(run, startedAt.Time)
 	klog.Infof("Claimed run %s", run.Name)
 
-	ar := &activeRun{
-		run:     run,
-		start:   time.Now(),
-		workDir: filepath.Join(workspacePath, uid),
-	}
-	if run.Spec.Timeout != nil {
-		ar.deadline = run.Status.StartTime.Add(run.Spec.Timeout.Duration)
-	}
+	ar := newActiveRun(run, time.Now())
 
 	c.activeRuns.Store(uid, ar)
 	c.recordActiveRuns(run.Spec.Runtime)
 
-	workDir, err := prepareSource(run)
-	if err != nil {
+	if err := prepareSource(ar); err != nil {
 		return c.applyFailure(ctx, ar, runretry.ReasonPrepareSource, fmt.Sprintf("prepare source: %v", err))
 	}
-	ar.workDir = workDir
 	c.startExecutionAsync(ar)
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
@@ -307,12 +287,12 @@ func (c *Controller) heartbeat(ctx context.Context) {
 }
 
 func (c *Controller) patchRuntimedReady(ctx context.Context) {
-	if c.Hostname == "" {
+	if c.PodName == "" {
 		return
 	}
 
 	var pod corev1.Pod
-	key := types.NamespacedName{Name: c.Hostname, Namespace: podNamespace()}
+	key := types.NamespacedName{Name: c.PodName, Namespace: podNamespace()}
 	reader := c.PodReader
 	if reader == nil {
 		reader = c.Client
@@ -508,7 +488,7 @@ func (c *Controller) reconcileRetryBackoff(ctx context.Context, ar *activeRun) (
 
 func (c *Controller) applySuccess(ctx context.Context, ar *activeRun, resp *pb.StatusResponse) (ctrl.Result, error) {
 	run := ar.run
-	outputs, err := readOutputs(outputsPath(ar.workDir))
+	outputs, err := readOutputs(ar.outputPath)
 	if err != nil {
 		reason := reasonOutputsInvalid
 		if isOutputsTooLarge(err) {
@@ -517,7 +497,7 @@ func (c *Controller) applySuccess(ctx context.Context, ar *activeRun, resp *pb.S
 		return c.applyTerminalWithOutput(ctx, ar, v1alpha1.RunFailed, reason, err.Error(), outputFromStatus(resp))
 	}
 
-	artifactRefs, err := c.collectArtifacts(ctx, run)
+	artifactRefs, err := c.collectArtifacts(ctx, ar)
 	if err != nil {
 		if isArtifactInvalid(err) {
 			return c.applyTerminalWithOutput(
@@ -662,15 +642,16 @@ func (c *Controller) applyTerminalWithOutput(
 // ===========================================================================
 
 func (c *Controller) cleanup(ctx context.Context, ar *activeRun, phase v1alpha1.RunPhase) {
-	c.releaseActiveRun(ctx, ar.run)
+	c.releaseActiveRun(ctx, ar)
 	runDuration.WithLabelValues(ar.run.Spec.Runtime).Observe(time.Since(ar.start).Seconds())
 	runsCompleted.WithLabelValues(ar.run.Spec.Runtime, string(phase)).Inc()
 }
 
-func (c *Controller) releaseActiveRun(ctx context.Context, run *v1alpha1.Run) {
-	if run == nil || run.UID == "" {
+func (c *Controller) releaseActiveRun(ctx context.Context, ar *activeRun) {
+	if ar == nil || ar.run == nil || ar.run.UID == "" {
 		return
 	}
+	run := ar.run
 	uid := string(run.UID)
 	if c.rleg != nil {
 		c.rleg.RemoveRun(uid)
@@ -678,8 +659,8 @@ func (c *Controller) releaseActiveRun(ctx context.Context, run *v1alpha1.Run) {
 	c.activeRuns.Delete(uid)
 	c.recordActiveRuns(run.Spec.Runtime)
 	c.releaseExecution(ctx, uid)
-	if err := os.RemoveAll(workspaceForRun(run)); err != nil {
-		c.Log.Error(err, "failed to remove Run workspace", "run", client.ObjectKeyFromObject(run))
+	if err := cleanupRunFiles(ar); err != nil {
+		c.Log.Error(err, "failed to clean Run files", "run", client.ObjectKeyFromObject(run))
 	}
 }
 
@@ -687,7 +668,7 @@ func (c *Controller) cleanupDeletedRun(ctx context.Context, key types.Namespaced
 	c.activeRuns.Range(func(_, value any) bool {
 		ar := value.(*activeRun)
 		if ar.run.Namespace == key.Namespace && ar.run.Name == key.Name {
-			c.releaseActiveRun(ctx, ar.run)
+			c.releaseActiveRun(ctx, ar)
 			return false
 		}
 		return true
@@ -749,7 +730,7 @@ func (c *Controller) applyStartExecutionFailure(ctx context.Context, ar *activeR
 		c.Log.Error(err, "failed to get Run after runtime Execute error", "run", client.ObjectKeyFromObject(ar.run))
 		return
 	}
-	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.Hostname {
+	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
 		return
 	}
 	ar.run = &run
@@ -764,12 +745,14 @@ func (c *Controller) startExecution(ctx context.Context, ar *activeRun) error {
 	for _, e := range run.Spec.Env {
 		env[e.Name] = e.Value
 	}
-	outputPath := outputsPath(ar.workDir)
-	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(ar.outputPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reset outputs file: %w", err)
 	}
-	env[artifact.OutputsEnv] = outputPath
-	artifactsDir, err := c.prepareArtifactStaging(run)
+	if err := c.stageArtifactInputs(ctx, ar); err != nil {
+		return err
+	}
+	env[artifact.OutputsEnv] = ar.outputPath
+	artifactsDir, err := c.prepareArtifactStaging(ar)
 	if err != nil {
 		return err
 	}
@@ -780,7 +763,7 @@ func (c *Controller) startExecution(ctx context.Context, ar *activeRun) error {
 	if run.Spec.Timeout != nil {
 		timeoutSec = int64(run.Spec.Timeout.Duration.Seconds())
 	}
-	entrypoint, args, err := runtimeExecutionInput(run)
+	entrypoint, args, err := runtimeExecutionInput(ar)
 	if err != nil {
 		return err
 	}
@@ -860,7 +843,7 @@ func (c *Controller) recoverActiveRunsOnce(ctx context.Context) {
 	recovered := 0
 	for i := range runs.Items {
 		run := &runs.Items[i]
-		if run.Status.AssignedPod != c.Hostname || run.Status.Phase != v1alpha1.RunRunning {
+		if run.Status.AssignedPod != c.PodName || run.Status.Phase != v1alpha1.RunRunning {
 			continue
 		}
 		if _, ok := entries[string(run.UID)]; !ok {
@@ -967,80 +950,7 @@ func (c *Controller) buildActiveRun(run *v1alpha1.Run) *activeRun {
 	if run.Status.StartTime != nil {
 		start = run.Status.StartTime.Time
 	}
-	ar := &activeRun{
-		run:     run,
-		start:   start,
-		workDir: workDirForRun(run),
-	}
-	if run.Spec.Timeout != nil && run.Status.StartTime != nil {
-		ar.deadline = run.Status.StartTime.Add(run.Spec.Timeout.Duration)
-	}
-	return ar
-}
-
-// ===========================================================================
-// Helper functions
-// ===========================================================================
-
-func prepareSource(run *v1alpha1.Run) (string, error) {
-	runDir := filepath.Join(workspacePath, string(run.UID))
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		return "", fmt.Errorf("mkdir %s: %w", runDir, err)
-	}
-	if run.Spec.Source == nil {
-		if _, err := execpath.ResolveEntrypoint(run.Spec.EffectiveEntrypoint(), "script"); err != nil {
-			return "", err
-		}
-		return runDir, nil
-	}
-	if run.Spec.Source.Inline != nil {
-		scriptPath := "script"
-		if run.Spec.Mode.Function != nil {
-			var err error
-			scriptPath, err = execpath.ResolveEntrypoint(run.Spec.Source.InlinePath, "")
-			if err != nil {
-				return "", fmt.Errorf("resolve inline function source path: %w", err)
-			}
-		}
-		scriptPath = filepath.Join(runDir, scriptPath)
-		if err := os.MkdirAll(filepath.Dir(scriptPath), 0o755); err != nil {
-			return "", fmt.Errorf("mkdir inline source parent: %w", err)
-		}
-		if err := os.WriteFile(scriptPath, []byte(*run.Spec.Source.Inline), 0o644); err != nil {
-			return "", fmt.Errorf("write inline: %w", err)
-		}
-		return runDir, nil
-	}
-	if _, err := execpath.ResolveEntrypoint(run.Spec.EffectiveEntrypoint(), "script"); err != nil {
-		return "", err
-	}
-	if run.Spec.Source.RepoURL != "" {
-		return prepareGitSource(runDir, run.Spec.Source.RepoURL, run.Spec.Source.CommitSHA)
-	}
-	return "", nil
-}
-
-func runtimeExecutionInput(run *v1alpha1.Run) (string, []string, error) {
-	if run.Spec.Source != nil && run.Spec.Source.Inline != nil {
-		return "script", nil, nil
-	}
-	entrypoint, err := execpath.ResolveEntrypoint(run.Spec.EffectiveEntrypoint(), "script")
-	if err != nil {
-		return "", nil, err
-	}
-	return entrypoint, run.Spec.EffectiveArgs(), nil
-}
-
-func workDirForRun(run *v1alpha1.Run) string {
-	runDir := filepath.Join(workspacePath, string(run.UID))
-	if run.Spec.Source != nil && run.Spec.Source.RepoURL != "" {
-		return filepath.Join(runDir, "repo")
-	}
-	return runDir
-}
-
-func workspaceForRun(run *v1alpha1.Run) string {
-	return filepath.Join(workspacePath, string(run.UID))
+	return newActiveRun(run, start)
 }
 
 func podNamespace() string {

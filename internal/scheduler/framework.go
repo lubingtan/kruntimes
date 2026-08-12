@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,6 +25,7 @@ type schedulingSnapshot struct {
 	usageByPod       map[string]corev1.ResourceList
 	runs             []v1alpha1.Run
 	affinityTargets  []affinityTarget
+	workspace        *v1alpha1.PersistentWorkspace
 	now              time.Time
 }
 
@@ -40,7 +42,25 @@ const (
 	schedulingPlanBind schedulingPlanAction = "Bind"
 )
 
-func waitingMessageForFilterRejections(runtime string, rejections map[filterReason]int) string {
+func waitingMessageForFilterRejections(run *v1alpha1.Run, rejections map[filterReason]int) string {
+	runtime := run.Spec.Runtime
+	if run.Spec.Workspace != nil {
+		workspace := run.Spec.Workspace.Name
+		switch {
+		case rejections[filterReasonWorkspaceNotFound] > 0:
+			return fmt.Sprintf("waiting for referenced PersistentWorkspace %q to exist", workspace)
+		case rejections[filterReasonWorkspaceRuntimeMismatch] > 0:
+			return fmt.Sprintf("waiting for referenced PersistentWorkspace %q to match runtime %q", workspace, runtime)
+		case rejections[filterReasonWorkspaceUnbound] > 0:
+			return fmt.Sprintf("waiting for referenced PersistentWorkspace %q to bind", workspace)
+		case rejections[filterReasonWorkspaceLost] > 0:
+			return fmt.Sprintf("waiting for referenced PersistentWorkspace %q to be replaced after it was lost", workspace)
+		case rejections[filterReasonWorkspaceReleased] > 0:
+			return fmt.Sprintf("referenced PersistentWorkspace %q is being deleted", workspace)
+		case rejections[filterReasonWorkspaceBoundPodMismatch] > 0:
+			return fmt.Sprintf("waiting for bound Runtime Pod of PersistentWorkspace %q", workspace)
+		}
+	}
 	message := fmt.Sprintf("waiting for available runtime pods for runtime %q", runtime)
 	if rejections[filterReasonRunAffinity] > 0 {
 		return fmt.Sprintf("waiting for available runtime pods satisfying required Run affinity for runtime %q", runtime)
@@ -56,9 +76,15 @@ func waitingMessageForFilterRejections(runtime string, rejections map[filterReas
 type filterReason string
 
 const (
-	filterReasonRuntimePodUnavailable filterReason = "RuntimePodUnavailable"
-	filterReasonRunAffinity           filterReason = "UnsatisfiedRunAffinity"
-	filterReasonRunAntiAffinity       filterReason = "UnsatisfiedRunAntiAffinity"
+	filterReasonRuntimePodUnavailable     filterReason = "RuntimePodUnavailable"
+	filterReasonWorkspaceNotFound         filterReason = "WorkspaceNotFound"
+	filterReasonWorkspaceRuntimeMismatch  filterReason = "WorkspaceRuntimeMismatch"
+	filterReasonWorkspaceUnbound          filterReason = "WorkspaceUnbound"
+	filterReasonWorkspaceLost             filterReason = "WorkspaceLost"
+	filterReasonWorkspaceReleased         filterReason = "WorkspaceReleased"
+	filterReasonWorkspaceBoundPodMismatch filterReason = "WorkspaceBoundPodMismatch"
+	filterReasonRunAffinity               filterReason = "UnsatisfiedRunAffinity"
+	filterReasonRunAntiAffinity           filterReason = "UnsatisfiedRunAntiAffinity"
 )
 
 type filterResult struct {
@@ -89,6 +115,7 @@ type filterPluginRegistration struct {
 }
 
 var defaultFilterPluginRegistrations = []filterPluginRegistration{
+	{factory: newWorkspaceFilter},
 	{factory: newRuntimePodAvailabilityFilter},
 	{factory: newRunAffinityFilter},
 }
@@ -109,6 +136,17 @@ func (r *RunReconciler) loadSchedulingSnapshot(ctx context.Context, run *v1alpha
 	}); err != nil {
 		return nil, fmt.Errorf("snapshot runtime pods: %w", err)
 	}
+	var workspace *v1alpha1.PersistentWorkspace
+	if run.Spec.Workspace != nil {
+		workspace = &v1alpha1.PersistentWorkspace{}
+		key := client.ObjectKey{Namespace: run.Namespace, Name: run.Spec.Workspace.Name}
+		if err := r.Get(ctx, key, workspace); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return nil, fmt.Errorf("snapshot PersistentWorkspace %s: %w", key, err)
+			}
+			workspace = nil
+		}
+	}
 
 	runs, actualUsageByPod, err := r.assignedRunUsage(ctx, run.Namespace)
 	if err != nil {
@@ -124,6 +162,7 @@ func (r *RunReconciler) loadSchedulingSnapshot(ctx context.Context, run *v1alpha
 		usageByPod:       usageByPod,
 		runs:             runs,
 		affinityTargets:  affinityTargets,
+		workspace:        workspace,
 		now:              time.Now(),
 	}, nil
 }
@@ -164,7 +203,7 @@ func (r *RunReconciler) planSchedulingCycle(snapshot *schedulingSnapshot) (sched
 	if len(candidates) == 0 {
 		return schedulingPlan{
 			action:  schedulingPlanWait,
-			message: waitingMessageForFilterRejections(snapshot.run.Spec.Runtime, rejections),
+			message: waitingMessageForFilterRejections(snapshot.run, rejections),
 		}, nil
 	}
 

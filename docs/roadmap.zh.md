@@ -201,7 +201,7 @@ controller wiring 累积不必要的冲突。
   交给 sub-agents。
 - [ ] v0.x examples：增加 LLM agent 示例和 workflow 示例，并用这些示例反推缺失的
   产品和 API 能力。
-- [ ] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run
+- [x] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run
   storage 语义。目标模型：
   - job 之间通过 ArtifactStore-backed step outputs 和 inputs 传递数据；
   - 同一个 Workflow job 内的 Run-to-Run 数据可以共享 `PersistentWorkspace`；
@@ -223,16 +223,46 @@ controller wiring 累积不必要的冲突。
   - [x] 为 Run 增加 workspace reference 和 Kubernetes-style Run affinity 字段；
   - [x] 通过经过 review 的 [scheduler framework](design/scheduler-framework.md) 实现
     required/preferred Run affinity，同时在无 capacity 时继续保持 Run Pending；
-  - [ ] review 并定义 `RuntimePodLocal` binding semantics：不预留 capacity 的 deterministic
+  - [x] review 并定义 `RuntimePodLocal` binding semantics：不预留 capacity 的 deterministic
     ready-Pod selection、planned path ownership，以及 bound-Pod deletion 后 sticky `Lost` status：
-    - [ ] review `status.boundPodUID` fencing 修订，避免同名 Pod 重建时静默替换
+    - [x] review `status.boundPodUID` fencing 修订，避免同名 Pod 重建时静默替换
       RuntimePodLocal workspace；
-    - [ ] 增加该 status field、重新生成 CRD，然后实现 metadata-only binding 与 Lost-state handling；
-  - 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent workspace，
-    但不感知 Workflow 语义；
-  - 将 child Run artifact refs 提升到 Workflow status，并增加显式 step artifact inputs；
-  - 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
-    job-to-job artifact passing、Runtime Pod loss、cleanup 和权限边界。
+    - [x] 增加该 status field 并重新生成 CRD；
+    - [x] 实现 metadata-only binding：通过稳定 UID 哈希将绑定分散到 ready Runtime Pods，并增加
+      Runtime 和 Pod watches；
+    - [x] Pod 仅暂时 unavailable 时保留原 binding；当 Pod 名称消失或 UID 改变时，永久转为
+      `Lost`；
+    - [x] 增加 focused controller 和 API validation coverage。
+  - [x] 在不引入 Workflow 概念的前提下增加通用 `Workspace` scheduler Filter plugin：要求
+    `Run.spec.workspace` 匹配其 Runtime 和 Bound RuntimePodLocal workspace，并仅保留其
+    fenced bound Pod 作为 candidate；unresolved 或 Lost workspace 保持 Pending 并给出清晰信息，
+    并在 referenced workspace 变更时唤醒匹配的 Pending Runs。
+  - [x] 更新 runtimed workspace preparation 和 cleanup，使其支持被引用的 persistent
+    workspace 但不感知 Workflow 语义：只创建 bound workspace directory、保留其内容，并只
+    清理 Run-local temporary state。
+  - [x] 在 Workflow controller 中组合这些 generic primitives：创建并 owner job-local
+    PersistentWorkspace、为每个 child Run 添加 workspace reference 和 bound-Pod placement，并在
+    不向 Workflow API 暴露 workspace controls 的情况下呈现 workspace loss。
+  - [x] 增加显式 step artifact inputs 和 job-scoped artifact references：将
+    `jobs.<job>.artifacts.<name>` stage 到 downstream child Runs，并把 compact child Run
+    artifact refs 提升到 Workflow status。
+  - [x] 完成 Runtime workspace volume sources、job-local workspace sharing、
+    job-to-job artifact passing、Runtime Pod loss、cleanup 和权限边界的 E2E 覆盖：
+    - [x] Runtime workspace sources、job-local sharing、job-to-job artifact passing 和
+      Runtime Pod loss；
+    - [x] 显式删除 cleanup；
+    - [x] 自动 TTL cleanup；
+    - [x] 权限边界：
+      - [x] review `persistentworkspaces/use` authorization contract，以及 direct Run 对不存在
+        reference 的行为；
+      - [x] 增加带 SubjectAccessReview、已 review failure policy 以及 Helm/TLS installation support 的
+        validating admission webhook；
+      - [x] 证明 controller 创建的 Workflow child Run 不能绕过 workspace authorization boundary；
+      - [x] 增加面向 impersonation 的 integration 和 E2E coverage，覆盖 allow、deny、named-resource
+        和 controller-owned case。
+  - [x] 将 PersistentWorkspace cleanup 作为单独 review 的 lifecycle slice 实现：active Run
+    tracking、`Released` scheduling fence、finalizer-based deletion、仅 runtimed 执行的
+    Pod-local directory removal、删除/TTL E2E 覆盖，以及 focused loss controller 覆盖。
 - [x] Workflow reuse model：在 Workflow API 稳定前拆分执行实例和可复用定义。目标模型：
   - 将当前表示 execution instance 的 `Workflow` API 替换为 `WorkflowRun`；
   - `WorkflowRun.spec` 只包含 inline `jobs`；`krt workflow trigger` 将 reusable
@@ -327,6 +357,10 @@ controller wiring 累积不必要的冲突。
 ### 迈向 v1.0
 
 - 稳定 CRD API。
+- [ ] 仅在 Python 3.15 正式镜像可用、且包括 `grpcio` 在内的所有锁定 native dependency
+  都发布兼容的 `cp315` wheels 后，才将 Python Runtime base image 恢复升级至受支持的
+  Python 3.15 release。以镜像构建和 runtime test 作为升级 gate；不要依赖 slim
+  production image 中隐式发生的 source build。
 - [ ] 将 `Run.spec.priority` 作为 scheduler API 加入。先 review priority、fairness、aging/starvation、
   namespace isolation、authorization、retry/backoff 和 non-preemption semantics，再用 scheduler-owned
   queue ordering 替换 controller-runtime event ordering，并增加 unit、integration 和 E2E coverage。
@@ -336,6 +370,10 @@ controller wiring 累积不必要的冲突。
 - [ ] 设计 persistent per-registration Function worker processes，以降低 Python invocation 的启动开销。
   在替换当前每次 invocation 都启动 subprocess 的模型前，review worker lifecycle、module state、
   cancellation、concurrency、output limits 和 isolation。
+- [ ] 在不削弱覆盖的前提下缩短本地和 CI E2E suite 执行时间：识别不必要的串行等待，安全地并行
+  隔离的 case，并拆分快速反馈和较慢的 lifecycle coverage，同时保留完整 release gate。
+- [ ] Runtime 删除时清理其 runtime maintainer。定义 ownership 和 finalization，避免 orphaned
+  maintainer 累积，同时保留仍需要 artifact cleanup 的 Run 的正确性。
 - 定义兼容性和迁移保证。
 - 记录弃用策略。
 - 明确生产环境的多租户隔离策略。

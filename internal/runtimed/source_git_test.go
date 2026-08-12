@@ -88,7 +88,7 @@ func TestPrepareSourceRejectsDisallowedRepoURL(t *testing.T) {
 	workspacePath = dir
 
 	run := testRunWithRepoURL("file:///tmp/repo.git")
-	_, err := prepareSource(run)
+	_, err := prepareTestSource(run)
 	if err == nil || !strings.Contains(err.Error(), "repoURL") {
 		t.Fatalf("prepareSource error = %v, want repoURL validation", err)
 	}
@@ -102,7 +102,7 @@ func TestPrepareSourceRejectsOversizedRepository(t *testing.T) {
 	workspacePath = dir
 
 	run := testRunWithRepoURL("https://github.com/kruntimes/kruntimes.git")
-	_, err := prepareSource(run)
+	_, err := prepareTestSource(run)
 	if err == nil || !strings.Contains(err.Error(), "size limit") {
 		t.Fatalf("prepareSource error = %v, want size limit", err)
 	}

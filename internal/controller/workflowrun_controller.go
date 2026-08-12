@@ -104,6 +104,7 @@ type WorkflowRunReconciler struct {
 // +kubebuilder:rbac:groups=kruntimes.io,resources=workflowruns,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=workflowruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runs,verbs=get;list;watch;create;patch
+// +kubebuilder:rbac:groups=kruntimes.io,resources=persistentworkspaces,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
@@ -263,6 +264,9 @@ func (r *WorkflowRunReconciler) applyInitializeWorkflowRun(ctx context.Context, 
 		if err != nil {
 			return rejectWorkflowRun(workflowRun, "WorkflowValidationFailed", err.Error())
 		}
+		if err := validateWorkflowArtifactDependencies(snapshot.Spec.Jobs, snapshot.Actions); err != nil {
+			return rejectWorkflowRun(workflowRun, "WorkflowValidationFailed", err.Error())
+		}
 		persistedName, persistedSnapshot, err := r.ensureWorkflowSnapshot(ctx, workflowRun, snapshot)
 		if err != nil {
 			var snapshotErr *workflowSnapshotError
@@ -274,6 +278,9 @@ func (r *WorkflowRunReconciler) applyInitializeWorkflowRun(ctx context.Context, 
 		snapshotName = persistedName
 		snapshot = persistedSnapshot
 		resources.snapshot = snapshot
+	}
+	if err := r.createJobWorkspaces(ctx, workflowRun, snapshot.Spec.Jobs); err != nil {
+		return err
 	}
 	workflowRun.Status.Phase = v1alpha1.WorkflowPending
 	workflowRun.Status.Message = ""
@@ -301,6 +308,7 @@ func (r *WorkflowRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.WorkflowRun{}).
 		Owns(&v1alpha1.Run{}).
+		Owns(&v1alpha1.PersistentWorkspace{}).
 		Watches(&v1alpha1.WorkflowRun{}, handler.EnqueueRequestsFromMapFunc(r.parentWorkflowRunRequest)).
 		Owns(&appsv1.ControllerRevision{}).
 		Complete(r)
@@ -314,6 +322,54 @@ func (r *WorkflowRunReconciler) parentWorkflowRunRequest(_ context.Context, obje
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: client.ObjectKey{Namespace: object.GetNamespace(), Name: owner.Name}}}
+}
+
+func (r *WorkflowRunReconciler) createJobWorkspaces(ctx context.Context, workflowRun *v1alpha1.WorkflowRun, jobs map[string]v1alpha1.JobSpec) error {
+	jobNames := make([]string, 0, len(jobs))
+	for jobName := range jobs {
+		jobNames = append(jobNames, jobName)
+	}
+	sort.Strings(jobNames)
+	for _, jobName := range jobNames {
+		job := jobs[jobName]
+		if job.Uses != "" {
+			continue
+		}
+		if err := r.createOrReuseJobWorkspace(ctx, workflowRun, jobName, job); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *WorkflowRunReconciler) createOrReuseJobWorkspace(ctx context.Context, workflowRun *v1alpha1.WorkflowRun, jobName string, job v1alpha1.JobSpec) error {
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      workflowJobWorkspaceName(workflowRun.Name, jobName),
+			Namespace: workflowRun.Namespace,
+			Labels: map[string]string{
+				v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+				v1alpha1.WorkflowJobLabel:    jobName,
+			},
+		},
+		Spec: v1alpha1.PersistentWorkspaceSpec{Runtime: job.RunsOn},
+	}
+	if err := controllerutil.SetControllerReference(workflowRun, workspace, r.Scheme); err != nil {
+		return fmt.Errorf("set workflowrun owner reference on workspace %s/%s: %w", workspace.Namespace, workspace.Name, err)
+	}
+	if err := r.Create(ctx, workspace); err == nil {
+		return nil
+	} else if !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("create job workspace %s/%s: %w", workspace.Namespace, workspace.Name, err)
+	}
+	var existing v1alpha1.PersistentWorkspace
+	if err := r.Get(ctx, client.ObjectKeyFromObject(workspace), &existing); err != nil {
+		return fmt.Errorf("get existing job workspace %s/%s: %w", workspace.Namespace, workspace.Name, err)
+	}
+	if !metav1.IsControlledBy(&existing, workflowRun) || existing.Labels[v1alpha1.WorkflowRunUIDLabel] != string(workflowRun.UID) || existing.Labels[v1alpha1.WorkflowJobLabel] != jobName {
+		return fmt.Errorf("job workspace %s/%s is not owned by workflowrun %s/%s", existing.Namespace, existing.Name, workflowRun.Namespace, workflowRun.Name)
+	}
+	return nil
 }
 
 func validateWorkflowRunJobs(jobs map[string]v1alpha1.JobSpec) error {
@@ -633,7 +689,11 @@ func (r *WorkflowRunReconciler) createOrReuseStepRun(ctx context.Context, resour
 	if err != nil {
 		return nil, &workflowStepValidationError{err: err}
 	}
-	run = buildStepRun(workflowRun, target.jobName, step.Name, actionStepName, job, resolved, workflowStepLabels(workflowRun, target.jobName, step.Name, actionStepName))
+	artifactInputs, err := resolveWorkflowArtifactInputs(resolved.Artifacts, workflowRun.Status.Jobs)
+	if err != nil {
+		return nil, &workflowStepValidationError{err: err}
+	}
+	run = buildStepRun(workflowRun, target.jobName, step.Name, actionStepName, job, resolved, artifactInputs, workflowStepLabels(workflowRun, target.jobName, step.Name, actionStepName))
 	if err := controllerutil.SetControllerReference(workflowRun, run, r.Scheme); err != nil {
 		return nil, fmt.Errorf("set workflowrun owner reference on run %s/%s: %w", run.Namespace, run.Name, err)
 	}
@@ -1082,6 +1142,7 @@ func deriveJobStatuses(resources *workflowRunResources) {
 				workflowRun.Status.Message = fmt.Sprintf("resolve outputs for job %q: %v", jobName, err)
 			} else {
 				status.Outputs = outputs
+				status.Artifacts = resolveJobArtifactRefs(status, resources.childRuns)
 			}
 		}
 		workflowRun.Status.Jobs[jobName] = status
@@ -1364,7 +1425,7 @@ func terminalRunStepPhase(phase v1alpha1.RunPhase) (v1alpha1.StepPhase, bool) {
 	}
 }
 
-func buildStepRun(workflowRun *v1alpha1.WorkflowRun, jobName, stepName, actionStepName string, job v1alpha1.JobSpec, step v1alpha1.StepSpec, labels map[string]string) *v1alpha1.Run {
+func buildStepRun(workflowRun *v1alpha1.WorkflowRun, jobName, stepName, actionStepName string, job v1alpha1.JobSpec, step v1alpha1.StepSpec, artifactInputs []v1alpha1.ArtifactInput, labels map[string]string) *v1alpha1.Run {
 	inline := step.Run
 	env := make([]corev1.EnvVar, 0, len(step.Env))
 	envNames := make([]string, 0, len(step.Env))
@@ -1382,12 +1443,16 @@ func buildStepRun(workflowRun *v1alpha1.WorkflowRun, jobName, stepName, actionSt
 			Labels:    labels,
 		},
 		Spec: v1alpha1.RunSpec{
-			Runtime: job.RunsOn,
-			Source:  &v1alpha1.CodeSource{Inline: &inline},
+			Runtime:        job.RunsOn,
+			Source:         &v1alpha1.CodeSource{Inline: &inline},
+			ArtifactInputs: artifactInputs,
 			Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{
 				Args: slices.Clone(step.Args),
 			}},
 			Env: env,
+			Workspace: &v1alpha1.RunWorkspaceReference{
+				Name: workflowJobWorkspaceName(workflowRun.Name, jobName),
+			},
 		},
 	}
 }
@@ -1430,6 +1495,22 @@ func workflowStepRunName(workflowRunName, jobName, stepName, actionStepName stri
 		return suffix
 	}
 	return prefix + "-" + suffix
+}
+
+func workflowJobWorkspaceName(workflowRunName, jobName string) string {
+	sum := sha256.Sum256([]byte(jobName))
+	suffix := hex.EncodeToString(sum[:])[:10]
+	const separator = "-workspace-"
+	const maxNameLength = 253
+	maxPrefixLength := maxNameLength - len(separator) - len(suffix)
+	prefix := workflowRunName
+	if len(prefix) > maxPrefixLength {
+		prefix = strings.TrimRight(prefix[:maxPrefixLength], "-.")
+	}
+	if prefix == "" {
+		return "workspace-" + suffix
+	}
+	return prefix + separator + suffix
 }
 
 func workflowActionSnapshotKey(jobName, stepName string) string {

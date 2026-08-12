@@ -42,11 +42,13 @@ rules:
     resources:
       - persistentworkspaces
     verbs:
+      - create
       - get
       - list
       - watch
       - update
       - patch
+      - delete
   - apiGroups:
       - kruntimes.io
     resources:
@@ -199,6 +201,12 @@ rules:
       - create
       - get
       - update
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
