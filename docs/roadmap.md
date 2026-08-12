@@ -299,9 +299,9 @@ wiring from accumulating avoidable conflicts.
     - [ ] permission boundaries:
       - [x] review the `persistentworkspaces/use` authorization contract and
         direct-Run missing-reference behavior;
-      - [ ] add a validating admission webhook with SubjectAccessReview,
+      - [x] add a validating admission webhook with SubjectAccessReview,
         reviewed failure policy, and Helm/TLS installation support;
-      - [ ] prove controller-created Workflow child Runs cannot bypass the
+      - [x] prove controller-created Workflow child Runs cannot bypass the
         workspace authorization boundary;
       - [ ] add impersonation-focused integration and E2E coverage for allow,
         deny, named-resource, and controller-owned cases.

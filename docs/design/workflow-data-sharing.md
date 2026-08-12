@@ -30,10 +30,9 @@ The current experimental Workflow API supports:
 - workspace-aware scheduler filtering and Pending Run wakeups on workspace
   changes;
 - controller-managed workspace lifecycle and cleanup, including explicit
-  deletion and unused-TTL E2E coverage.
-
-It does not yet provide identity-based permission boundaries for shared
-job-local workspaces.
+  deletion and unused-TTL E2E coverage;
+- identity-based workspace authorization through admission-time `use` reviews
+  and a fenced controller ServiceAccount path for verified Workflow child Runs.
 
 ## Goals
 
@@ -275,10 +274,15 @@ The implemented v1.0 model uses a Kubernetes-native `use` permission on the
 2. Namespace administrators grant this permission through ordinary Role or
    RoleBinding rules. `resourceNames` can restrict a principal to named
    workspaces without adding a kruntimes-specific ACL to the CRD.
-3. The Workflow controller remains a trusted internal producer of job-local
-   workspaces and child Runs. Its generated Runs must be provably owned by the
-   same WorkflowRun as the referenced workspace; it must not become a general
-   authorization bypass for user-authored Runs.
+3. The chart-configured controller ServiceAccount has a narrow internal path
+   for Workflow child Runs. The webhook permits that identity without a second
+   `SubjectAccessReview` only when it proves that the Run and referenced
+   workspace have controller owner references to the same live `WorkflowRun`
+   UID, their `WorkflowRunUIDLabel` values match that UID, and their workflow
+   job labels match. A malformed, stale, or cross-job reference is denied. A
+   user cannot obtain this path by copying labels or owner references because
+   only the configured ServiceAccount identity enters it; every other caller
+   follows the ordinary `use` review.
 4. Scheduler and runtimed remain workflow-agnostic and authorization-agnostic.
    They continue to enforce only workspace existence, Runtime compatibility,
    binding, lifecycle, and Pod placement.
@@ -289,10 +293,12 @@ Workflow-controlled child Runs are created only after their owned workspace
 exists, so they retain their normal asynchronous binding behavior.
 
 The Helm chart deploys the webhook Service, a chart-managed TLS Secret, and a
-`ValidatingWebhookConfiguration` with `failurePolicy: Fail`. The controller
-ServiceAccount may create `SubjectAccessReview` objects and use workspace
-references for its internally generated Workflow child Runs. Controller-owned
-Run fencing and impersonation coverage remain follow-up work.
+`ValidatingWebhookConfiguration` with `failurePolicy: Fail`. It configures the
+controller ServiceAccount identity explicitly on the webhook process. That
+ServiceAccount may create `SubjectAccessReview` objects, but receives no
+generic `persistentworkspaces/use` permission: workspace references are allowed
+only through the verified Workflow child-Run path above.
+Impersonation-focused integration and E2E coverage remain follow-up work.
 
 ## Run Workspace Reference
 
@@ -532,8 +538,10 @@ Required safeguards:
 13. Add E2E coverage for Runtime workspace volume sources, job-local workspace
     sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
     permission boundaries. **Partially implemented:** the Runtime workspace,
-    job-local sharing, Run artifact staging, and job-to-job transfer paths are
-    covered. Cleanup and permission-boundary coverage remain.
+    job-local sharing, Run artifact staging, job-to-job transfer, and cleanup
+    paths are covered. Admission authorization and controller ownership have
+    focused unit coverage, and the webhook endpoint has integration coverage;
+    caller impersonation coverage remains.
 14. Implement the cleanup protocol: active-Run tracking, Released admission
     fencing, a workspace finalizer, runtimed local-path cleanup, and E2E
     coverage for TTL, explicit deletion, retained workspaces, and bound-Pod

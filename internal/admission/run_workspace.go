@@ -9,6 +9,7 @@ import (
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -42,24 +43,38 @@ func (r KubernetesSubjectAccessReviewer) Review(ctx context.Context, review auth
 	return review.Status, nil
 }
 
+// ServiceAccountIdentity identifies a Kubernetes ServiceAccount admission
+// caller. The controller ServiceAccount is allowed to create only verified
+// WorkflowRun-owned child Runs without a separate workspace use grant.
+type ServiceAccountIdentity struct {
+	Namespace string
+	Name      string
+}
+
+func (identity ServiceAccountIdentity) matches(username string) bool {
+	return identity.Namespace != "" && identity.Name != "" && username == fmt.Sprintf("system:serviceaccount:%s:%s", identity.Namespace, identity.Name)
+}
+
 // RunWorkspaceValidator authorizes direct Run references to PersistentWorkspace
 // objects before the Run is persisted. It deliberately keeps authorization out
 // of the scheduler and runtimed, which do not have the original caller identity.
 type RunWorkspaceValidator struct {
-	Reader               client.Reader
-	Reviewer             SubjectAccessReviewer
-	Decoder              admissionwebhook.Decoder
-	AuthorizationTimeout time.Duration
+	Reader                           client.Reader
+	Reviewer                         SubjectAccessReviewer
+	Decoder                          admissionwebhook.Decoder
+	WorkflowControllerServiceAccount ServiceAccountIdentity
+	AuthorizationTimeout             time.Duration
 }
 
 // RegisterRunWorkspaceValidator installs the Run workspace admission handler
 // on a controller-runtime webhook server.
-func RegisterRunWorkspaceValidator(server webhookserver.Server, reader client.Reader, reviewer SubjectAccessReviewer, scheme *runtime.Scheme) {
+func RegisterRunWorkspaceValidator(server webhookserver.Server, reader client.Reader, reviewer SubjectAccessReviewer, workflowControllerServiceAccount ServiceAccountIdentity, scheme *runtime.Scheme) {
 	server.Register(RunWorkspaceValidationPath, &admissionwebhook.Webhook{
 		Handler: &RunWorkspaceValidator{
-			Reader:   reader,
-			Reviewer: reviewer,
-			Decoder:  admissionwebhook.NewDecoder(scheme),
+			Reader:                           reader,
+			Reviewer:                         reviewer,
+			Decoder:                          admissionwebhook.NewDecoder(scheme),
+			WorkflowControllerServiceAccount: workflowControllerServiceAccount,
 		},
 	})
 }
@@ -85,6 +100,12 @@ func (v *RunWorkspaceValidator) Handle(ctx context.Context, request admissionweb
 	if workspace.Spec.Runtime != run.Spec.Runtime {
 		return admissionwebhook.Denied(fmt.Sprintf("referenced PersistentWorkspace %q uses Runtime %q, not %q", workspace.Name, workspace.Spec.Runtime, run.Spec.Runtime))
 	}
+	if v.WorkflowControllerServiceAccount.matches(request.UserInfo.Username) {
+		if err := v.validateWorkflowChildRun(ctx, request.Namespace, run, workspace); err != nil {
+			return admissionwebhook.Denied(fmt.Sprintf("controller-created Run may not use PersistentWorkspace %q: %v", workspace.Name, err))
+		}
+		return admissionwebhook.Allowed("verified WorkflowRun-owned child Run")
+	}
 
 	authorizationCtx, cancel := context.WithTimeout(ctx, v.authorizationTimeout())
 	defer cancel()
@@ -96,6 +117,38 @@ func (v *RunWorkspaceValidator) Handle(ctx context.Context, request admissionweb
 		return admissionwebhook.Denied(fmt.Sprintf("not authorized to use PersistentWorkspace %q", workspace.Name))
 	}
 	return admissionwebhook.Allowed("authorized to use referenced PersistentWorkspace")
+}
+
+func (v *RunWorkspaceValidator) validateWorkflowChildRun(ctx context.Context, namespace string, run *v1alpha1.Run, workspace *v1alpha1.PersistentWorkspace) error {
+	owner := metav1.GetControllerOf(run)
+	if owner == nil || owner.APIVersion != v1alpha1.GroupVersion.String() || owner.Kind != "WorkflowRun" || owner.Name == "" || owner.UID == "" {
+		return fmt.Errorf("Run is not controlled by a WorkflowRun")
+	}
+	if run.Labels[v1alpha1.WorkflowRunUIDLabel] != string(owner.UID) {
+		return fmt.Errorf("Run workflow UID label does not match its WorkflowRun owner")
+	}
+	jobName := run.Labels[v1alpha1.WorkflowJobLabel]
+	if jobName == "" {
+		return fmt.Errorf("Run does not identify its Workflow job")
+	}
+
+	workflowRun := &v1alpha1.WorkflowRun{}
+	if err := v.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: owner.Name}, workflowRun); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("owning WorkflowRun %q does not exist", owner.Name)
+		}
+		return fmt.Errorf("read owning WorkflowRun %q: %w", owner.Name, err)
+	}
+	if workflowRun.UID != owner.UID {
+		return fmt.Errorf("owning WorkflowRun %q has a different UID", owner.Name)
+	}
+	if !metav1.IsControlledBy(workspace, workflowRun) {
+		return fmt.Errorf("workspace is not controlled by the owning WorkflowRun")
+	}
+	if workspace.Labels[v1alpha1.WorkflowRunUIDLabel] != string(workflowRun.UID) || workspace.Labels[v1alpha1.WorkflowJobLabel] != jobName {
+		return fmt.Errorf("workspace does not belong to the same Workflow job")
+	}
+	return nil
 }
 
 func (v *RunWorkspaceValidator) authorizationTimeout() time.Duration {

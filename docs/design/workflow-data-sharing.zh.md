@@ -24,9 +24,9 @@ artifacts 传递，而同一个 job 内的 Runs 应在 Workflow controller 请�
 - `PersistentWorkspace` API types、CRD validation、status，以及带 UID fencing 的 binding lifecycle；
 - 通用 Run workspace references 和 Kubernetes-style Run affinity fields。
 - workspace-aware scheduler filtering，以及 workspace 变更触发的 Pending Run wakeup；
-- controller-managed workspace lifecycle 和 cleanup，包括显式删除和 unused-TTL 的 E2E 覆盖。
-
-当前尚不支持 shared job-local workspace 的 identity-based 权限边界。
+- controller-managed workspace lifecycle 和 cleanup，包括显式删除和 unused-TTL 的 E2E 覆盖；
+- 通过 admission-time `use` review 和针对已验证 Workflow child Run 的 fenced controller
+  ServiceAccount path 实现 identity-based workspace authorization。
 
 ## 目标
 
@@ -223,8 +223,12 @@ workspace 转为 `Lost`，并解除 finalizer 阻塞。
    webhook 不可达或超时时也会 fail closed。
 2. namespace administrator 通过普通 Role 或 RoleBinding 授予该 permission。`resourceNames` 可以将主体限制到
    指定 workspace，而无需在 CRD 中增加 kruntimes-specific ACL。
-3. Workflow controller 仍是 job-local workspace 和 child Run 的 trusted internal producer。它生成的 Run 必须
-   可证明与被引用 workspace 属于同一个 WorkflowRun；它不能成为用户自定义 Run 的通用 authorization bypass。
+3. chart 配置的 controller ServiceAccount 对 Workflow child Run 有一条受限的 internal path。仅当 webhook
+   能证明 Run 和被引用 workspace 的 controller owner reference 指向同一个 live `WorkflowRun` UID、两者的
+   `WorkflowRunUIDLabel` 都匹配该 UID、且 workflow job label 相同，才允许该身份绕过第二次
+   `SubjectAccessReview`。malformed、stale 或 cross-job reference 会被拒绝。用户即使复制 labels 或
+   owner references 也无法获得该路径，因为只有配置的 ServiceAccount identity 会进入它；其它所有调用方
+   都走普通 `use` review。
 4. scheduler 和 runtimed 保持 workflow-agnostic 和 authorization-agnostic。它们继续只负责 workspace existence、
    Runtime compatibility、binding、lifecycle 和 Pod placement。
 
@@ -232,8 +236,10 @@ workspace 转为 `Lost`，并解除 finalizer 阻塞。
 Workflow controller 仅在其 owned workspace 已存在后创建 child Run，因此仍保留正常的 asynchronous binding 行为。
 
 Helm chart 部署 webhook Service、由 chart 管理的 TLS Secret，以及配置了 `failurePolicy: Fail` 的
-`ValidatingWebhookConfiguration`。controller ServiceAccount 可以创建 `SubjectAccessReview`，并能为其内部生成的
-Workflow child Run 使用 workspace reference。controller-owned Run fencing 与 impersonation coverage 仍属于后续工作。
+`ValidatingWebhookConfiguration`，并将 controller ServiceAccount identity 显式配置给 webhook process。
+该 ServiceAccount 可以创建 `SubjectAccessReview`，但没有泛化的 `persistentworkspaces/use` permission；仅能通过
+上面已验证的 Workflow child-Run path 使用 workspace reference。面向 impersonation 的 integration 和 E2E coverage
+仍属于后续工作。
 
 ## Run Workspace Reference
 
@@ -454,8 +460,9 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
     `status.jobs.<job-id>.artifacts` 中暴露每个 artifact name 最后一次成功的 ref。
 13. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。
-   **部分实现：**已覆盖 Runtime workspace、job-local sharing、Run artifact staging 和
-   job-to-job transfer；cleanup 与 permission boundary 覆盖仍未完成。
+   **部分实现：**已覆盖 Runtime workspace、job-local sharing、Run artifact staging、
+   job-to-job transfer 和 cleanup；admission authorization 与 controller ownership 已有 focused
+   unit coverage，webhook endpoint 已有 integration coverage，caller impersonation coverage 仍未完成。
 14. 实现 cleanup protocol：active-Run tracking、Released admission fencing、workspace finalizer、
     runtimed local-path cleanup，以及 TTL、explicit deletion、retained workspace 和 cleanup 中
     bound-Pod loss 的 E2E 覆盖。

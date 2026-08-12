@@ -60,12 +60,6 @@ rules:
   - apiGroups:
       - kruntimes.io
     resources:
-      - persistentworkspaces/use
-    verbs:
-      - use
-  - apiGroups:
-      - kruntimes.io
-    resources:
       - actions
     verbs:
       - get

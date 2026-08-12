@@ -255,9 +255,9 @@ controller wiring 累积不必要的冲突。
     - [ ] 权限边界：
       - [x] review `persistentworkspaces/use` authorization contract，以及 direct Run 对不存在
         reference 的行为；
-      - [ ] 增加带 SubjectAccessReview、已 review failure policy 以及 Helm/TLS installation support 的
+      - [x] 增加带 SubjectAccessReview、已 review failure policy 以及 Helm/TLS installation support 的
         validating admission webhook；
-      - [ ] 证明 controller 创建的 Workflow child Run 不能绕过 workspace authorization boundary；
+      - [x] 证明 controller 创建的 Workflow child Run 不能绕过 workspace authorization boundary；
       - [ ] 增加面向 impersonation 的 integration 和 E2E coverage，覆盖 allow、deny、named-resource
         和 controller-owned case。
   - [x] 将 PersistentWorkspace cleanup 作为单独 review 的 lifecycle slice 实现：active Run

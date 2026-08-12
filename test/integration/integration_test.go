@@ -78,6 +78,7 @@ func TestMain(m *testing.M) {
 		testMgr.GetWebhookServer(),
 		testMgr.GetAPIReader(),
 		allowSubjectAccessReviewer{},
+		workspaceadmission.ServiceAccountIdentity{},
 		scheme,
 	)
 

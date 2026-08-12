@@ -15,6 +15,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1918,6 +1919,141 @@ func TestPersistentWorkspaceBindingFencesRuntimePodReplacement(t *testing.T) {
 		t.Fatalf("create lost workspace run: %v", err)
 	}
 	waitForPendingRunMessage(t, lostRun, 30*time.Second, "was lost")
+}
+
+func TestPersistentWorkspaceAdmissionAuthorization(t *testing.T) {
+	ensureRuntime(t, "bash", bashRuntimeImage(), 9091)
+
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	workspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-admission-" + suffix, Namespace: testNamespace},
+		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(ctx, workspace); err != nil {
+		t.Fatalf("create authorization workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, workspace) })
+
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workspace-user-" + suffix, Namespace: testNamespace}}
+	if err := k8sClient.Create(ctx, serviceAccount); err != nil {
+		t.Fatalf("create workspace test ServiceAccount: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, serviceAccount) })
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-user-" + suffix, Namespace: testNamespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{v1alpha1.GroupVersion.Group},
+			Resources: []string{"runs"},
+			Verbs:     []string{"create"},
+		}},
+	}
+	if err := k8sClient.Create(ctx, role); err != nil {
+		t.Fatalf("create workspace test Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccount.Name, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(ctx, binding); err != nil {
+		t.Fatalf("create workspace test RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, binding) })
+
+	workspaceUser := impersonatedClient(t, "system:serviceaccount:"+testNamespace+":"+serviceAccount.Name)
+	deniedRun := workspaceAuthorizationRun("workspace-denied-"+suffix, workspace.Name)
+	if err := workspaceUser.Create(ctx, deniedRun); !apierrors.IsForbidden(err) {
+		t.Fatalf("create Run without workspace use permission = %v, want forbidden", err)
+	}
+
+	role.Rules = append(role.Rules, rbacv1.PolicyRule{
+		APIGroups:     []string{v1alpha1.GroupVersion.Group},
+		Resources:     []string{"persistentworkspaces/use"},
+		ResourceNames: []string{workspace.Name},
+		Verbs:         []string{"use"},
+	})
+	if err := k8sClient.Update(ctx, role); err != nil {
+		t.Fatalf("grant named workspace use permission: %v", err)
+	}
+	allowedRun := workspaceAuthorizationRun("workspace-allowed-"+suffix, workspace.Name)
+	if err := workspaceUser.Create(ctx, allowedRun); err != nil {
+		t.Fatalf("create Run with named workspace use permission: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, allowedRun) })
+
+	workflowRun := &v1alpha1.WorkflowRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "workspace-workflow-" + suffix, Namespace: testNamespace},
+		Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{
+			"build": {RunsOn: "bash", Steps: []v1alpha1.StepSpec{{Name: "run", Run: "echo authorized"}}},
+		}},
+	}
+	if err := k8sClient.Create(ctx, workflowRun); err != nil {
+		t.Fatalf("create WorkflowRun for controller authorization: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, workflowRun) })
+	waitForWorkflowRunPhase(t, workflowRun, 45*time.Second, v1alpha1.WorkflowSucceeded)
+
+	workflowWorkspace := &v1alpha1.PersistentWorkspace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "workspace-controller-" + suffix,
+			Namespace:       testNamespace,
+			Labels:          map[string]string{v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID), v1alpha1.WorkflowJobLabel: "build"},
+			OwnerReferences: []metav1.OwnerReference{workflowRunOwnerReference(workflowRun)},
+		},
+		Spec: v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
+	}
+	if err := k8sClient.Create(ctx, workflowWorkspace); err != nil {
+		t.Fatalf("create WorkflowRun-owned workspace: %v", err)
+	}
+	controllerClient := impersonatedClient(t, "system:serviceaccount:"+testNamespace+":kruntimes-controller")
+	crossJobRun := workspaceAuthorizationRun("workspace-controller-cross-job-"+suffix, workflowWorkspace.Name)
+	crossJobRun.Labels = map[string]string{
+		v1alpha1.WorkflowRunUIDLabel: string(workflowRun.UID),
+		v1alpha1.WorkflowJobLabel:    "other",
+	}
+	crossJobRun.OwnerReferences = []metav1.OwnerReference{workflowRunOwnerReference(workflowRun)}
+	if err := controllerClient.Create(ctx, crossJobRun); !apierrors.IsForbidden(err) {
+		t.Fatalf("controller create cross-job workspace Run = %v, want forbidden", err)
+	}
+}
+
+func workspaceAuthorizationRun(name, workspaceName string) *v1alpha1.Run {
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime:   "bash",
+			Mode:      v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{Args: []string{"echo authorization"}}},
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: workspaceName},
+		},
+	}
+}
+
+func impersonatedClient(t *testing.T, username string) client.Client {
+	t.Helper()
+	config := rest.CopyConfig(restConfig)
+	config.Impersonate = rest.ImpersonationConfig{UserName: username}
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+	impersonated, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatalf("create impersonated Kubernetes client: %v", err)
+	}
+	return impersonated
+}
+
+func workflowRunOwnerReference(workflowRun *v1alpha1.WorkflowRun) metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: v1alpha1.GroupVersion.String(),
+		Kind:       "WorkflowRun",
+		Name:       workflowRun.Name,
+		UID:        workflowRun.UID,
+		Controller: &controller,
+	}
 }
 
 func TestPersistentWorkspaceExplicitDeletionCleansRetainedData(t *testing.T) {
