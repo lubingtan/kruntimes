@@ -2113,8 +2113,8 @@ func TestPersistentWorkspaceTTLDeletionCleansData(t *testing.T) {
 	workspace := &v1alpha1.PersistentWorkspace{
 		ObjectMeta: metav1.ObjectMeta{Name: "workspace-ttl-cleanup-" + nameSuffix, Namespace: testNamespace},
 		Spec: v1alpha1.PersistentWorkspaceSpec{
-			Runtime:                runtimeName,
-			CleanupPolicy:          v1alpha1.PersistentWorkspaceDeleteAfterTTL,
+			Runtime:               runtimeName,
+			CleanupPolicy:         v1alpha1.PersistentWorkspaceDeleteAfterTTL,
 			TTLSecondsAfterUnused: &ttlSeconds,
 		},
 	}
