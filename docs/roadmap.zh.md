@@ -201,7 +201,7 @@ controller wiring 累积不必要的冲突。
   交给 sub-agents。
 - [ ] v0.x examples：增加 LLM agent 示例和 workflow 示例，并用这些示例反推缺失的
   产品和 API 能力。
-- [ ] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run
+- [x] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run
   storage 语义。目标模型：
   - job 之间通过 ArtifactStore-backed step outputs 和 inputs 传递数据；
   - 同一个 Workflow job 内的 Run-to-Run 数据可以共享 `PersistentWorkspace`；

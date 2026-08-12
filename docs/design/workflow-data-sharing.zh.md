@@ -460,10 +460,9 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
     `status.jobs.<job-id>.artifacts` 中暴露每个 artifact name 最后一次成功的 ref。
 13. 增加 E2E 覆盖 Runtime workspace volume sources、job-local workspace sharing、
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。
-   **部分实现：**已覆盖 Runtime workspace、job-local sharing、Run artifact staging、
-   job-to-job transfer 和 cleanup；admission authorization 与 controller ownership 已有 focused
-   unit 和 integration coverage，E2E caller impersonation 覆盖 denied、named-resource-authorized
-   和 controller-owned Run creation。
+   **已实现：**E2E 覆盖 Runtime workspace sources、job-local sharing、Run artifact staging、
+   job-to-job transfer、Runtime Pod loss、cleanup 和 permission boundaries。admission authorization
+   与 controller ownership 另有 focused unit 和 integration coverage。
 14. 实现 cleanup protocol：active-Run tracking、Released admission fencing、workspace finalizer、
     runtimed local-path cleanup，以及 TTL、explicit deletion、retained workspace 和 cleanup 中
     bound-Pod loss 的 E2E 覆盖。

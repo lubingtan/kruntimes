@@ -235,7 +235,7 @@ wiring from accumulating avoidable conflicts.
   agent platforms can safely hand a sandbox handle to sub-agents.
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those
   examples to identify missing product and API capabilities.
-- [ ] Workflow data sharing: design and implement first-class cross-Run storage
+- [x] Workflow data sharing: design and implement first-class cross-Run storage
   semantics discovered from the workflow demo. Target model:
   - job-to-job data moves through ArtifactStore-backed step outputs and inputs;
   - Run-to-Run data inside one Workflow job can share a `PersistentWorkspace`;

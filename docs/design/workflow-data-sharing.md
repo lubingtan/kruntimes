@@ -537,11 +537,11 @@ Required safeguards:
     `status.jobs.<job-id>.artifacts`.
 13. Add E2E coverage for Runtime workspace volume sources, job-local workspace
     sharing, job-to-job artifact passing, Runtime Pod loss, cleanup, and
-    permission boundaries. **Partially implemented:** the Runtime workspace,
-    job-local sharing, Run artifact staging, job-to-job transfer, and cleanup
-    paths are covered. Admission authorization and controller ownership have
-    focused unit and integration coverage, and E2E caller impersonation covers
-    denied, named-resource-authorized, and controller-owned Run creation.
+    permission boundaries. **Implemented:** E2E covers Runtime workspace
+    sources, job-local sharing, Run artifact staging, job-to-job transfer,
+    Runtime Pod loss, cleanup, and permission boundaries. Admission
+    authorization and controller ownership also have focused unit and
+    integration coverage.
 14. Implement the cleanup protocol: active-Run tracking, Released admission
     fencing, a workspace finalizer, runtimed local-path cleanup, and E2E
     coverage for TTL, explicit deletion, retained workspaces, and bound-Pod
