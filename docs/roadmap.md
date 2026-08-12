@@ -289,21 +289,21 @@ wiring from accumulating avoidable conflicts.
   - [x] add explicit step artifact inputs and job-scoped artifact references;
     stage `jobs.<job>.artifacts.<name>` into downstream child Runs and promote
     compact child Run artifact refs into Workflow status.
-  - [ ] complete E2E coverage for Runtime workspace volume sources, job-local
+  - [x] complete E2E coverage for Runtime workspace volume sources, job-local
     workspace sharing, job-to-job artifact passing, Runtime Pod loss, cleanup,
     and permission boundaries:
     - [x] Runtime workspace sources, job-local sharing, job-to-job artifact
       passing, and Runtime Pod loss;
     - [x] explicit-deletion cleanup;
     - [x] automatic-TTL cleanup;
-    - [ ] permission boundaries:
+    - [x] permission boundaries:
       - [x] review the `persistentworkspaces/use` authorization contract and
         direct-Run missing-reference behavior;
       - [x] add a validating admission webhook with SubjectAccessReview,
         reviewed failure policy, and Helm/TLS installation support;
       - [x] prove controller-created Workflow child Runs cannot bypass the
         workspace authorization boundary;
-      - [ ] add impersonation-focused integration and E2E coverage for allow,
+      - [x] add impersonation-focused integration and E2E coverage for allow,
         deny, named-resource, and controller-owned cases.
   - [x] implement PersistentWorkspace cleanup as a separately reviewed lifecycle
     slice: active Run tracking, `Released` scheduling fence, finalizer-based

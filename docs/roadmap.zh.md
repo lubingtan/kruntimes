@@ -246,19 +246,19 @@ controller wiring 累积不必要的冲突。
   - [x] 增加显式 step artifact inputs 和 job-scoped artifact references：将
     `jobs.<job>.artifacts.<name>` stage 到 downstream child Runs，并把 compact child Run
     artifact refs 提升到 Workflow status。
-  - [ ] 完成 Runtime workspace volume sources、job-local workspace sharing、
+  - [x] 完成 Runtime workspace volume sources、job-local workspace sharing、
     job-to-job artifact passing、Runtime Pod loss、cleanup 和权限边界的 E2E 覆盖：
     - [x] Runtime workspace sources、job-local sharing、job-to-job artifact passing 和
       Runtime Pod loss；
     - [x] 显式删除 cleanup；
     - [x] 自动 TTL cleanup；
-    - [ ] 权限边界：
+    - [x] 权限边界：
       - [x] review `persistentworkspaces/use` authorization contract，以及 direct Run 对不存在
         reference 的行为；
       - [x] 增加带 SubjectAccessReview、已 review failure policy 以及 Helm/TLS installation support 的
         validating admission webhook；
       - [x] 证明 controller 创建的 Workflow child Run 不能绕过 workspace authorization boundary；
-      - [ ] 增加面向 impersonation 的 integration 和 E2E coverage，覆盖 allow、deny、named-resource
+      - [x] 增加面向 impersonation 的 integration 和 E2E coverage，覆盖 allow、deny、named-resource
         和 controller-owned case。
   - [x] 将 PersistentWorkspace cleanup 作为单独 review 的 lifecycle slice 实现：active Run
     tracking、`Released` scheduling fence、finalizer-based deletion、仅 runtimed 执行的

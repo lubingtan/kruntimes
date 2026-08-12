@@ -462,7 +462,8 @@ job 正在等待本地 workspace capacity，或者因为 controller-owned worksp
    job-to-job artifact passing、Runtime Pod loss、cleanup 和 permission boundaries。
    **部分实现：**已覆盖 Runtime workspace、job-local sharing、Run artifact staging、
    job-to-job transfer 和 cleanup；admission authorization 与 controller ownership 已有 focused
-   unit coverage，webhook endpoint 已有 integration coverage，caller impersonation coverage 仍未完成。
+   unit 和 integration coverage，E2E caller impersonation 覆盖 denied、named-resource-authorized
+   和 controller-owned Run creation。
 14. 实现 cleanup protocol：active-Run tracking、Released admission fencing、workspace finalizer、
     runtimed local-path cleanup，以及 TTL、explicit deletion、retained workspace 和 cleanup 中
     bound-Pod loss 的 E2E 覆盖。
