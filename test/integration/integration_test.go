@@ -74,7 +74,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("failed to create manager: " + err.Error())
 	}
-	workspaceadmission.RegisterRunWorkspaceValidator(
+	workspaceadmission.RegisterRunAdmissionValidator(
 		testMgr.GetWebhookServer(),
 		testMgr.GetAPIReader(),
 		allowSubjectAccessReviewer{},
@@ -185,7 +185,7 @@ func runWorkspaceValidatingWebhookConfiguration() *admissionregistrationv1.Valid
 	matchPolicy := admissionregistrationv1.Equivalent
 	sideEffects := admissionregistrationv1.SideEffectClassNone
 	timeoutSeconds := int32(5)
-	path := workspaceadmission.RunWorkspaceValidationPath
+	path := workspaceadmission.RunValidationPath
 	return &admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "run-workspace.integration.kruntimes.io"},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
@@ -683,22 +683,47 @@ func TestCRDValidationRejectsRunWithoutMode(t *testing.T) {
 	}
 }
 
-func TestCRDValidationRejectsRunModeWithBothTaskAndFunction(t *testing.T) {
+func TestCRDValidationRejectsRunModeWithMultipleModes(t *testing.T) {
+	ctx := context.Background()
+	ns := testNamespace(t, "test-run-validation-")
+
+	for _, mode := range []v1alpha1.RunMode{
+		{
+			Task:    &v1alpha1.RunTaskMode{Args: []string{"echo hello"}},
+			Session: &v1alpha1.RunSessionMode{},
+		},
+		{
+			Function: &v1alpha1.RunFunctionMode{Handler: "main.invoke"},
+			Session:  &v1alpha1.RunSessionMode{},
+		},
+	} {
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "mixed-mode-", Namespace: ns.Name},
+			Spec: v1alpha1.RunSpec{
+				Runtime: "bash",
+				Mode:    mode,
+			},
+		}
+		if err := k8sClient.Create(ctx, run); !apierrors.IsInvalid(err) {
+			t.Fatalf("mixed run mode error = %v, want Invalid", err)
+		}
+	}
+}
+
+func TestCRDValidationRejectsSessionRunWorkspace(t *testing.T) {
 	ctx := context.Background()
 	ns := testNamespace(t, "test-run-validation-")
 
 	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{Name: "mixed-mode", Namespace: ns.Name},
+		ObjectMeta: metav1.ObjectMeta{Name: "session-workspace", Namespace: ns.Name},
 		Spec: v1alpha1.RunSpec{
-			Runtime: "bash",
-			Mode: v1alpha1.RunMode{
-				Task:     &v1alpha1.RunTaskMode{Args: []string{"echo hello"}},
-				Function: &v1alpha1.RunFunctionMode{Handler: "main.invoke"},
-			},
+			Runtime:   "bash",
+			Mode:      v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "workspace"},
 		},
 	}
 	if err := k8sClient.Create(ctx, run); !apierrors.IsInvalid(err) {
-		t.Fatalf("mixed run mode error = %v, want Invalid", err)
+		t.Fatalf("session Run workspace error = %v, want Invalid", err)
 	}
 }
 

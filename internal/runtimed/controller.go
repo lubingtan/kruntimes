@@ -113,10 +113,14 @@ type Controller struct {
 	ExecutionLogWriter io.Writer
 
 	activeRuns sync.Map // uid → *activeRun
-	rlegCh     chan event.GenericEvent
-	logMu      sync.Mutex
+	// activeRunsMu makes the local claim decision atomic. In particular, a
+	// Session Run must not race a normal Run into the same Runtime Pod.
+	activeRunsMu sync.Mutex
+	rlegCh       chan event.GenericEvent
+	logMu        sync.Mutex
 
 	runtimeCli pb.RuntimeClient
+	sessionCli pb.SessionRuntimeClient
 	rleg       rlegpkg.RunLifecycleEventGenerator
 	Recorder   record.EventRecorder
 }
@@ -145,6 +149,7 @@ func (c *Controller) Start(ctx context.Context) error {
 		return fmt.Errorf("dial runtime %s: %w", c.RuntimeEndpoint, err)
 	}
 	c.runtimeCli = pb.NewRuntimeClient(conn)
+	c.sessionCli = pb.NewSessionRuntimeClient(conn)
 	go func() { <-ctx.Done(); conn.Close() }()
 
 	c.rleg = rlegpkg.NewGenericRLEG(&statusAdapter{cli: c.runtimeCli}, rlegpkg.DefaultRelistInterval)
@@ -218,6 +223,8 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return c.reconcileScheduled(ctx, &run)
 	case v1alpha1.RunRunning:
 		return c.reconcileRunning(ctx, &run)
+	case v1alpha1.RunReady:
+		return c.reconcileReady(ctx, &run)
 	}
 	return ctrl.Result{}, nil
 }
@@ -227,20 +234,23 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // ---------------------------------------------------------------------------
 
 func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
-	uid := string(run.UID)
-	if _, exists := c.activeRuns.Load(uid); exists {
+	if _, exists := c.activeRuns.Load(string(run.UID)); exists {
 		return ctrl.Result{}, nil
 	}
 	if run.Spec.CancelRequested {
 		return c.applyTerminal(ctx, c.buildActiveRun(run), v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
-	if c.activeRunCount() >= c.capacity() {
+	ar := newActiveRun(run, time.Now())
+	if !c.tryClaimActiveRun(ar) {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-
 	startedAt := metav1.Now()
 	run.Status.Phase = v1alpha1.RunRunning
 	run.Status.StartTime = &startedAt
+	ar.start = startedAt.Time
+	if run.Spec.Timeout != nil {
+		ar.deadline = startedAt.Add(run.Spec.Timeout.Duration)
+	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type:               runstatus.ConditionRunning,
 		Status:             metav1.ConditionTrue,
@@ -249,16 +259,17 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 		LastTransitionTime: startedAt,
 	})
 	if err := c.Status().Update(ctx, run); err != nil {
+		c.unclaimActiveRun(ar)
 		return ctrl.Result{}, err
 	}
 	c.observeDispatchDuration(run, startedAt.Time)
 	klog.Infof("Claimed run %s", run.Name)
-
-	ar := newActiveRun(run, time.Now())
-
-	c.activeRuns.Store(uid, ar)
 	c.recordActiveRuns(run.Spec.Runtime)
 
+	if run.Spec.Mode.Session != nil {
+		c.startSessionRegistrationAsync(ar)
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	}
 	if err := prepareSource(ar); err != nil {
 		return c.applyFailure(ctx, ar, runretry.ReasonPrepareSource, fmt.Sprintf("prepare source: %v", err))
 	}
@@ -317,6 +328,12 @@ func (c *Controller) capacity() int {
 }
 
 func (c *Controller) activeRunCount() int {
+	c.activeRunsMu.Lock()
+	defer c.activeRunsMu.Unlock()
+	return c.activeRunCountLocked()
+}
+
+func (c *Controller) activeRunCountLocked() int {
 	count := 0
 	c.activeRuns.Range(func(_, _ any) bool {
 		count++
@@ -325,11 +342,70 @@ func (c *Controller) activeRunCount() int {
 	return count
 }
 
+// tryClaimActiveRun reserves local Runtime Pod capacity for a Run. A Session
+// is an exclusive reservation: it cannot coexist with a normal Run, and a
+// normal Run cannot start while a Session is active. This is a runtimed
+// invariant; scheduler capacity accounting remains mode-agnostic.
+func (c *Controller) tryClaimActiveRun(ar *activeRun) bool {
+	if ar == nil || ar.run == nil || ar.run.UID == "" {
+		return false
+	}
+	c.activeRunsMu.Lock()
+	defer c.activeRunsMu.Unlock()
+
+	uid := string(ar.run.UID)
+	if _, exists := c.activeRuns.Load(uid); exists {
+		return false
+	}
+
+	isSession := ar.run.Spec.Mode.Session != nil
+	hasSession := false
+	c.activeRuns.Range(func(_, value any) bool {
+		active, ok := value.(*activeRun)
+		if ok && active.run != nil && active.run.Spec.Mode.Session != nil {
+			hasSession = true
+			return false
+		}
+		return true
+	})
+	activeCount := c.activeRunCountLocked()
+	if (isSession && activeCount > 0) || (!isSession && hasSession) || activeCount >= c.capacity() {
+		return false
+	}
+
+	c.activeRuns.Store(uid, ar)
+	return true
+}
+
+func (c *Controller) unclaimActiveRun(ar *activeRun) {
+	if ar == nil || ar.run == nil || ar.run.UID == "" {
+		return
+	}
+	c.activeRunsMu.Lock()
+	defer c.activeRunsMu.Unlock()
+	uid := string(ar.run.UID)
+	if current, exists := c.activeRuns.Load(uid); exists && current == ar {
+		c.activeRuns.Delete(uid)
+	}
+}
+
+func (c *Controller) removeActiveRunClaim(uid string) {
+	if uid == "" {
+		return
+	}
+	c.activeRunsMu.Lock()
+	defer c.activeRunsMu.Unlock()
+	c.activeRuns.Delete(uid)
+}
+
 // ---------------------------------------------------------------------------
 // Running — dispatch by sub-state (cancel / backoff / active)
 // ---------------------------------------------------------------------------
 
 func (c *Controller) reconcileRunning(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	if run.Spec.Mode.Session != nil {
+		return c.reconcileRunningSession(ctx, run)
+	}
 	uid := string(run.UID)
 	val, exists := c.activeRuns.Load(uid)
 	if !exists {
@@ -349,6 +425,48 @@ func (c *Controller) reconcileRunning(ctx context.Context, run *v1alpha1.Run) (c
 		return c.reconcileRetryBackoff(ctx, ar)
 	}
 	return c.reconcileRunningActive(ctx, ar)
+}
+
+// reconcileRunningSession waits for the asynchronous local registration. A
+// retry-backoff condition is handled by the same retry engine as task Runs.
+func (c *Controller) reconcileRunningSession(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	uid := string(run.UID)
+	value, exists := c.activeRuns.Load(uid)
+	if !exists {
+		return c.reconcileSessionRecovery(ctx, run)
+	}
+	ar := value.(*activeRun)
+	ar.run = run
+	if run.Spec.CancelRequested {
+		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
+	condition := meta.FindStatusCondition(run.Status.Conditions, runstatus.ConditionRunning)
+	if condition != nil && condition.Status == metav1.ConditionFalse {
+		return c.reconcileRetryBackoff(ctx, ar)
+	}
+	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+}
+
+// reconcileReady handles the long-lived Session Run reservation. Task Runs
+// never enter Ready.
+func (c *Controller) reconcileReady(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	if run.Spec.Mode.Session == nil {
+		return ctrl.Result{}, nil
+	}
+	uid := string(run.UID)
+	value, exists := c.activeRuns.Load(uid)
+	if !exists {
+		return c.reconcileSessionRecovery(ctx, run)
+	}
+	ar := value.(*activeRun)
+	ar.run = run
+	if run.Spec.CancelRequested {
+		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
+	if !ar.deadline.IsZero() && time.Now().After(ar.deadline) {
+		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, fmt.Sprintf("timeout after %s", run.Spec.Timeout.Duration))
+	}
+	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
 
 func (c *Controller) reconcileRunningRecovered(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
@@ -478,6 +596,10 @@ func (c *Controller) reconcileRetryBackoff(ctx context.Context, ar *activeRun) (
 	}
 	c.recordEvent(run, corev1.EventTypeNormal, "RunRetrying",
 		"Retry attempt %d/%d starting", run.Status.Attempt+1, policy.MaxAttempts)
+	if run.Spec.Mode.Session != nil {
+		c.startSessionRegistrationAsync(ar)
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	}
 	c.startExecutionAsync(ar)
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
@@ -590,7 +712,9 @@ func (c *Controller) scheduleRetry(ctx context.Context, ar *activeRun, curAttemp
 		return ctrl.Result{}, err
 	}
 
-	c.rleg.RemoveRun(string(run.UID))
+	if c.rleg != nil {
+		c.rleg.RemoveRun(string(run.UID))
+	}
 	runRetries.WithLabelValues(run.Spec.Runtime, reason).Inc()
 	c.recordEvent(run, corev1.EventTypeWarning, "RunFailedRetrying",
 		"Run failed (attempt %d/%d), retrying in %s. Reason: %s: %s",
@@ -656,9 +780,13 @@ func (c *Controller) releaseActiveRun(ctx context.Context, ar *activeRun) {
 	if c.rleg != nil {
 		c.rleg.RemoveRun(uid)
 	}
-	c.activeRuns.Delete(uid)
+	c.removeActiveRunClaim(uid)
 	c.recordActiveRuns(run.Spec.Runtime)
-	c.releaseExecution(ctx, uid)
+	if run.Spec.Mode.Session != nil {
+		c.closeRuntimeSession(ctx, run)
+	} else {
+		c.releaseExecution(ctx, uid)
+	}
 	if err := cleanupRunFiles(ar); err != nil {
 		c.Log.Error(err, "failed to clean Run files", "run", client.ObjectKeyFromObject(run))
 	}

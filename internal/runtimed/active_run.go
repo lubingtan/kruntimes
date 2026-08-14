@@ -25,6 +25,7 @@ type activeRun struct {
 	deadline               time.Time
 	start                  time.Time
 	started                atomic.Bool
+	prepared               atomic.Bool
 }
 
 func newActiveRun(run *v1alpha1.Run, start time.Time) *activeRun {

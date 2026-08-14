@@ -178,12 +178,12 @@ controller wiring 累积不必要的冲突。
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
   [Session Mode 设计](design/session-mode.zh.md) 使用 `Run.spec.mode.session`、由共享 gateway
-  转换为内部 `SessionGateway` gRPC service 的 HTTP API 与 v0 trusted container backend。Session Run 必须独占（`runs: 1`）、
-  ephemeral；assigned Pod 丢失时终止，而不是在新 Pod 上静默恢复。
+  转换为内部 `SessionGateway` gRPC service 的 HTTP API 与 v0 trusted container backend。Session Run 通过专用 `runs: 1` Runtime 与
+  runtimed 本地 claim 门控实现独占，ephemeral；assigned Pod 丢失时终止，而不是在新 Pod 上静默恢复。
   初始实现 TODO：
   - [x] review 并确认 API、lifecycle、queue、data-plane、security 和 future-backend 设计；
   - [ ] 增加 `Run.spec.mode.session`、validation、generated CRDs 和 status conditions；拒绝
-    声明 `spec.workspace` 的 Session Run，并拒绝目标 Runtime 的有效 `runs` capacity 不为一；
+    声明 `spec.workspace` 的 Session Run；
   - [ ] 将 source 与 artifact inputs 初始化到 Run-UID-scoped ephemeral workspace，在本地注册
     session，并将 Run transition 到 `Ready`；
   - [ ] 实现内部 `SessionRuntime` contract，覆盖 lifecycle、workspace-constrained commands、

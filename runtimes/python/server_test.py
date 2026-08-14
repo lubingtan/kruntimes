@@ -22,11 +22,16 @@ class TestPythonRuntime(unittest.TestCase):
             self.servicer,
             self.server,
         )
+        runtime_pb2_grpc.add_SessionRuntimeServicer_to_server(
+            self.servicer,
+            self.server,
+        )
         port = self.server.add_insecure_port("localhost:0")
         self.server.start()
         self.channel = grpc.insecure_channel(f"localhost:{port}")
         self.stub = runtime_pb2_grpc.RuntimeStub(self.channel)
         self.function_stub = runtime_pb2_grpc.FunctionRuntimeStub(self.channel)
+        self.session_stub = runtime_pb2_grpc.SessionRuntimeStub(self.channel)
 
     def tearDown(self):
         self.server.stop(0)
@@ -66,6 +71,50 @@ class TestPythonRuntime(unittest.TestCase):
             runtime_pb2.FUNCTION_REGISTRATION_STATE_READY,
         )
         return response.registration
+
+    def _register_session(self, working_dir, run_uid="session-run", pod_uid="pod-a"):
+        return self.session_stub.RegisterSession(
+            runtime_pb2.RegisterSessionRequest(
+                identity=runtime_pb2.SessionIdentity(
+                    run_uid=run_uid,
+                    assigned_pod_uid=pod_uid,
+                ),
+                working_dir=working_dir,
+            )
+        )
+
+    def test_session_registration_status_close_and_assignment_fencing(self):
+        session_dir = self._prepare_inline("# session")
+        registered = self._register_session(session_dir)
+        self.assertEqual(registered.state, runtime_pb2.SESSION_STATE_READY)
+        self.assertGreater(registered.last_activity_unix_nano, 0)
+
+        # The same Run assignment may be retried without creating new state.
+        self._register_session(session_dir)
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self._register_session(session_dir, pod_uid="pod-b")
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+        identity = runtime_pb2.SessionIdentity(
+            run_uid="session-run",
+            assigned_pod_uid="pod-a",
+        )
+        current = self.session_stub.GetSessionStatus(
+            runtime_pb2.GetSessionStatusRequest(identity=identity)
+        )
+        self.assertEqual(current.state, runtime_pb2.SESSION_STATE_READY)
+        self.session_stub.CloseSession(runtime_pb2.CloseSessionRequest(identity=identity))
+        self.session_stub.CloseSession(runtime_pb2.CloseSessionRequest(identity=identity))
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.session_stub.GetSessionStatus(
+                runtime_pb2.GetSessionStatusRequest(identity=identity)
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.NOT_FOUND)
+
+    def test_session_registration_rejects_escaping_workspace(self):
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self._register_session(tempfile.mkdtemp())
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
     def _wait_for_function_in_flight(self, registration, timeout=5):
         deadline = time.time() + timeout

@@ -33,8 +33,10 @@ Session 使用已有的 `Pending -> Scheduled -> Running -> Ready` lifecycle。`
 runtimed 已在本地 Runtime Server 注册 session 并接受 operation；它是 active phase 并持续占用
 Runtime capacity。
 
-v0 中目标 Runtime 必须具有有效 `runs: 1` capacity。controller 应拒绝其他 capacity 的 session
-Run，而不是只在 SDK 中建议隔离。
+v0 中用于 session 的 Runtime 应配置为有效 `runs: 1` capacity。scheduler 仍只执行通用资源
+capacity 计算；runtimed 是本地独占的权威门控：它原子地拒绝在其他 Run active 时 claim
+Session，并在 Session active 时拒绝 claim 其他任何 Run。这在本地竞争或 Runtime 配置错误时也能
+防止混合执行；被该门控拒绝的 Run 保持 `Scheduled`，直至 Runtime Pod 可用。
 
 `source` 与 `artifactInputs` 在 session Ready 前初始化 workspace，不是 command 定义。session
 Run 不得设置 `spec.workspace`：v0 为其在 assigned Runtime Pod 创建按 Run UID 隔离的 ephemeral

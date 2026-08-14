@@ -35,6 +35,7 @@ func main() {
 	runtimeServer := bash.NewServer(workDir)
 	pb.RegisterRuntimeServer(srv, runtimeServer)
 	pb.RegisterFunctionRuntimeServer(srv, runtimeServer)
+	pb.RegisterSessionRuntimeServer(srv, runtimeServer)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

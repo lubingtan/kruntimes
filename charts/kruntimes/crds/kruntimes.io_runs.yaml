@@ -696,6 +696,30 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  session:
+                    description: Session configures a stateful agent sandbox session.
+                    properties:
+                      idleTimeoutSeconds:
+                        description: |-
+                          IdleTimeoutSeconds is the duration after the last accepted command or file
+                          mutation before the session is closed.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      operationTimeout:
+                        description: |-
+                          OperationTimeout limits one command or file-mutation operation. runtimed
+                          rejects values above its administrator-configured maximum.
+                        type: string
+                      queueSize:
+                        description: |-
+                          QueueSize limits queued command and file-mutation operations for this
+                          session. runtimed also applies its administrator-configured global limit.
+                        format: int32
+                        maximum: 32
+                        minimum: 1
+                        type: integer
+                    type: object
                   task:
                     description: Task configures one-shot process execution.
                     properties:
@@ -718,8 +742,10 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: exactly one of task or function must be set
-                  rule: has(self.task) != has(self.function)
+                - message: exactly one of task, function, or session must be set
+                  rule: (has(self.task) && !has(self.function) && !has(self.session))
+                    || (!has(self.task) && has(self.function) && !has(self.session))
+                    || (!has(self.task) && !has(self.function) && has(self.session))
               resources:
                 description: |-
                   Resources declares logical Runtime capacity reserved by this Run.
@@ -787,9 +813,9 @@ spec:
                     type: string
                   inline:
                     description: |-
-                      Inline is a standalone script. In task mode, runtimed writes it to the
-                      default script file and does not pass Entrypoint or Args to the Runtime
-                      Server. In function mode, InlinePath identifies the file to materialize.
+                      Inline is a standalone script. In task and session modes, runtimed writes
+                      it to the default script file. In function mode, InlinePath identifies the
+                      file to materialize.
                       Mutually exclusive with RepoURL.
                       256 KiB keeps simple scripts well below the Kubernetes object size limit.
                     maxLength: 262144
@@ -877,6 +903,8 @@ spec:
             - message: function mode inline source requires source.inlinePath
               rule: '!has(self.mode.function) || !has(self.source) || !has(self.source.inline)
                 || has(self.source.inlinePath)'
+            - message: session mode does not support spec.workspace
+              rule: '!has(self.mode.session) || !has(self.workspace)'
             - message: runtime, source, mode, artifactInputs, env, timeout, retryPolicy,
                 and resources are immutable after Run creation
               rule: self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source)
@@ -1163,8 +1191,8 @@ spec:
                 x-kubernetes-list-type: map
               endpoint:
                 description: |-
-                  Endpoint is the stable gateway endpoint for a ready function Run.
-                  It is absent for one-shot task Runs.
+                  Endpoint is the stable gateway endpoint for a ready function or session
+                  Run. It is absent for one-shot task Runs.
                 properties:
                   caBundle:
                     description: |-

@@ -228,7 +228,7 @@ func (s *Server) validateFunctionRegistration(req *pb.RegisterFunctionRequest) (
 	if len(req.RegistrationDigest) > 128 {
 		return "", "", "", fmt.Errorf("registration digest must be no larger than 128 bytes")
 	}
-	workingDir, err := s.functionWorkingDir(req.WorkingDir)
+	workingDir, err := s.runtimeWorkingDir(req.WorkingDir)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -246,7 +246,9 @@ func (s *Server) validateFunctionRegistration(req *pb.RegisterFunctionRequest) (
 	return workingDir, handlerFile, handlerName, nil
 }
 
-func (s *Server) functionWorkingDir(workingDir string) (string, error) {
+// runtimeWorkingDir resolves a directory confined to this Runtime Server's
+// workspace. Function and session registration both use this boundary.
+func (s *Server) runtimeWorkingDir(workingDir string) (string, error) {
 	if workingDir == "" {
 		return "", fmt.Errorf("working directory is required")
 	}

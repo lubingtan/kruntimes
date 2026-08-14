@@ -77,6 +77,30 @@ func startFunctionTestServer(t *testing.T, outputLimit int) (pb.FunctionRuntimeC
 	}
 }
 
+func startSessionTestServer(t *testing.T) (pb.SessionRuntimeClient, string, func()) {
+	t.Helper()
+
+	workDir := t.TempDir()
+	srv := grpc.NewServer()
+	runtimeServer := NewServer(workDir)
+	pb.RegisterSessionRuntimeServer(srv, runtimeServer)
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return pb.NewSessionRuntimeClient(conn), workDir, func() {
+		conn.Close()
+		srv.Stop()
+	}
+}
+
 func writeFunctionHandler(t *testing.T, workDir, name, script string) string {
 	t.Helper()
 	functionDir := filepath.Join(workDir, name)
@@ -154,6 +178,62 @@ func TestFunctionRuntimeRegisterInvokeAndUnregister(t *testing.T) {
 	}
 	if _, err := client.FunctionStatus(context.Background(), &pb.FunctionStatusRequest{Registration: registration}); status.Code(err) != codes.NotFound {
 		t.Fatalf("FunctionStatus after unregister = %v, want NotFound", err)
+	}
+}
+
+func TestSessionRuntimeRegisterStatusCloseAndAssignmentFencing(t *testing.T) {
+	client, workDir, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	identity := &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"}
+	request := &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}
+	registered, err := client.RegisterSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	if registered.State != pb.SessionState_SESSION_STATE_READY || registered.LastActivityUnixNano == 0 {
+		t.Fatalf("registration status = %#v, want ready with activity", registered)
+	}
+
+	// Re-registering the same Run assignment is idempotent.
+	if _, err := client.RegisterSession(context.Background(), request); err != nil {
+		t.Fatalf("idempotent RegisterSession: %v", err)
+	}
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{
+		Identity:   &pb.SessionIdentity{RunUid: identity.RunUid, AssignedPodUid: "pod-b"},
+		WorkingDir: workDir,
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("RegisterSession stale assignment = %v, want FailedPrecondition", err)
+	}
+
+	current, err := client.GetSessionStatus(context.Background(), &pb.GetSessionStatusRequest{Identity: identity})
+	if err != nil {
+		t.Fatalf("GetSessionStatus: %v", err)
+	}
+	if current.State != pb.SessionState_SESSION_STATE_READY {
+		t.Fatalf("session state = %v, want ready", current.State)
+	}
+	if _, err := client.CloseSession(context.Background(), &pb.CloseSessionRequest{Identity: identity}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	if _, err := client.CloseSession(context.Background(), &pb.CloseSessionRequest{Identity: identity}); err != nil {
+		t.Fatalf("idempotent CloseSession: %v", err)
+	}
+	if _, err := client.GetSessionStatus(context.Background(), &pb.GetSessionStatusRequest{Identity: identity}); status.Code(err) != codes.NotFound {
+		t.Fatalf("GetSessionStatus after close = %v, want NotFound", err)
+	}
+}
+
+func TestSessionRuntimeRejectsEscapingWorkspace(t *testing.T) {
+	client, _, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	_, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{
+		Identity:   &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"},
+		WorkingDir: t.TempDir(),
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("RegisterSession escaping workspace = %v, want InvalidArgument", err)
 	}
 }
 

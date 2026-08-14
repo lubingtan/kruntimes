@@ -122,11 +122,13 @@ func (e *executionEntry) snapshot(id string) *pb.StatusResponse {
 type Server struct {
 	pb.UnimplementedRuntimeServer
 	pb.UnimplementedFunctionRuntimeServer
+	pb.UnimplementedSessionRuntimeServer
 
 	operationMu sync.RWMutex
 	mu          sync.RWMutex
 	executions  map[string]*executionEntry
 	functions   map[string]*functionEntry
+	sessions    map[string]*sessionEntry
 	workDir     string
 	outputLimit int
 }
@@ -142,6 +144,7 @@ func NewServerWithOutputLimit(workDir string, outputLimit int) *Server {
 	return &Server{
 		executions:  make(map[string]*executionEntry),
 		functions:   make(map[string]*functionEntry),
+		sessions:    make(map[string]*sessionEntry),
 		workDir:     workDir,
 		outputLimit: outputLimit,
 	}

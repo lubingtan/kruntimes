@@ -532,3 +532,176 @@ class FunctionRuntime(object):
             timeout,
             metadata,
             _registered_method=True)
+
+
+class SessionRuntimeStub(object):
+    """SessionRuntime is an optional Runtime Server extension for stateful session
+    Runs. It is reachable only from the colocated owner runtimed. runtimed owns
+    queue admission and operation lifecycle; the Runtime Server owns local
+    workspace confinement and process execution.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.RegisterSession = channel.unary_unary(
+                '/executor.v1.SessionRuntime/RegisterSession',
+                request_serializer=runtime__pb2.RegisterSessionRequest.SerializeToString,
+                response_deserializer=runtime__pb2.SessionStatus.FromString,
+                _registered_method=True)
+        self.GetSessionStatus = channel.unary_unary(
+                '/executor.v1.SessionRuntime/GetSessionStatus',
+                request_serializer=runtime__pb2.GetSessionStatusRequest.SerializeToString,
+                response_deserializer=runtime__pb2.SessionStatus.FromString,
+                _registered_method=True)
+        self.CloseSession = channel.unary_unary(
+                '/executor.v1.SessionRuntime/CloseSession',
+                request_serializer=runtime__pb2.CloseSessionRequest.SerializeToString,
+                response_deserializer=runtime__pb2.CloseSessionResponse.FromString,
+                _registered_method=True)
+
+
+class SessionRuntimeServicer(object):
+    """SessionRuntime is an optional Runtime Server extension for stateful session
+    Runs. It is reachable only from the colocated owner runtimed. runtimed owns
+    queue admission and operation lifecycle; the Runtime Server owns local
+    workspace confinement and process execution.
+    """
+
+    def RegisterSession(self, request, context):
+        """RegisterSession creates or resumes one local Session Run workspace.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetSessionStatus(self, request, context):
+        """GetSessionStatus returns local session state for recovery and idle checks.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CloseSession(self, request, context):
+        """CloseSession removes local state after runtimed has fenced new operations.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_SessionRuntimeServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'RegisterSession': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterSession,
+                    request_deserializer=runtime__pb2.RegisterSessionRequest.FromString,
+                    response_serializer=runtime__pb2.SessionStatus.SerializeToString,
+            ),
+            'GetSessionStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSessionStatus,
+                    request_deserializer=runtime__pb2.GetSessionStatusRequest.FromString,
+                    response_serializer=runtime__pb2.SessionStatus.SerializeToString,
+            ),
+            'CloseSession': grpc.unary_unary_rpc_method_handler(
+                    servicer.CloseSession,
+                    request_deserializer=runtime__pb2.CloseSessionRequest.FromString,
+                    response_serializer=runtime__pb2.CloseSessionResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'executor.v1.SessionRuntime', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('executor.v1.SessionRuntime', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class SessionRuntime(object):
+    """SessionRuntime is an optional Runtime Server extension for stateful session
+    Runs. It is reachable only from the colocated owner runtimed. runtimed owns
+    queue admission and operation lifecycle; the Runtime Server owns local
+    workspace confinement and process execution.
+    """
+
+    @staticmethod
+    def RegisterSession(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/executor.v1.SessionRuntime/RegisterSession',
+            runtime__pb2.RegisterSessionRequest.SerializeToString,
+            runtime__pb2.SessionStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSessionStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/executor.v1.SessionRuntime/GetSessionStatus',
+            runtime__pb2.GetSessionStatusRequest.SerializeToString,
+            runtime__pb2.SessionStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CloseSession(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/executor.v1.SessionRuntime/CloseSession',
+            runtime__pb2.CloseSessionRequest.SerializeToString,
+            runtime__pb2.CloseSessionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

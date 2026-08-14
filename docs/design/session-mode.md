@@ -37,9 +37,13 @@ lifecycle. `Ready` means the owning runtimed has registered a session with the
 local Runtime Server and accepts session operations. It remains active and
 holds Runtime capacity.
 
-The selected v0 Runtime must have effective `runs: 1` capacity. The controller
-rejects a session Run targeting a Runtime with a different capacity instead of
-leaving isolation as an SDK recommendation.
+For v0, configure a Runtime used for sessions with effective `runs: 1`
+capacity. The scheduler continues to apply only generic resource capacity
+accounting. runtimed is the authoritative local gate: it atomically refuses to
+claim a Session while any Run is active, and refuses to claim any Run while a
+Session is active. This prevents mixed execution even during local races or a
+misconfigured Runtime; a Run rejected by that gate remains `Scheduled` until
+the Runtime Pod becomes available.
 
 `source` and `artifactInputs` initialize the session before it becomes Ready.
 They are not command definitions. Session Runs must not set `spec.workspace`:

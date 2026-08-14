@@ -563,6 +563,36 @@ func TestReconcileScheduledRespectsLocalCapacity(t *testing.T) {
 	}
 }
 
+func TestTryClaimActiveRunKeepsSessionExclusive(t *testing.T) {
+	newRun := func(uid string, session bool) *activeRun {
+		run := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{UID: types.UID(uid)}}
+		if session {
+			run.Spec.Mode.Session = &v1alpha1.RunSessionMode{}
+		}
+		return newActiveRun(run, time.Now())
+	}
+
+	t.Run("Session waits for an active Run", func(t *testing.T) {
+		c := &Controller{Workers: 2}
+		if !c.tryClaimActiveRun(newRun("task", false)) {
+			t.Fatal("claim normal Run")
+		}
+		if c.tryClaimActiveRun(newRun("session", true)) {
+			t.Fatal("Session claimed alongside a normal Run")
+		}
+	})
+
+	t.Run("normal Run waits for an active Session", func(t *testing.T) {
+		c := &Controller{Workers: 2}
+		if !c.tryClaimActiveRun(newRun("session", true)) {
+			t.Fatal("claim Session Run")
+		}
+		if c.tryClaimActiveRun(newRun("task", false)) {
+			t.Fatal("normal Run claimed alongside a Session")
+		}
+	})
+}
+
 func TestRunFilterAllowsRLEGGenericEventsForAssignedRuns(t *testing.T) {
 	c := &Controller{PodName: "runtime-pod", RuntimeNamespace: "default"}
 	filter := c.runFilter()
@@ -1059,6 +1089,133 @@ func TestActiveRunRequeueAfterUsesSoonerDeadline(t *testing.T) {
 	}
 }
 
+func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunRunning,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if err := c.prepareSession(t.Context(), ar); err != nil {
+		t.Fatalf("prepareSession: %v", err)
+	}
+	if err := c.registerSession(t.Context(), ar); err != nil {
+		t.Fatalf("registerSession: %v", err)
+	}
+	if err := c.markSessionReady(t.Context(), ar); err != nil {
+		t.Fatalf("markSessionReady: %v", err)
+	}
+	if sessionClient.registerRequest == nil {
+		t.Fatal("RegisterSession was not called")
+	}
+	if got := sessionClient.registerRequest.Identity.GetAssignedPodUid(); got != "runtime-pod-uid" {
+		t.Fatalf("assigned Pod UID = %q, want runtime-pod-uid", got)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunReady {
+		t.Fatalf("phase = %s, want Ready", updated.Status.Phase)
+	}
+	if condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
+		t.Fatalf("Ready condition = %#v, want true", condition)
+	}
+}
+
+func TestReadySessionCancellationClosesRuntimeSession(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:         "bash",
+			CancelRequested: true,
+			Mode:            v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunReady,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient}
+	c.activeRuns.Store(string(run.UID), newActiveRun(run, time.Now()))
+
+	if _, err := c.reconcileReady(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReady: %v", err)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunCancelled {
+		t.Fatalf("phase = %s, want Cancelled", updated.Status.Phase)
+	}
+}
+
+func TestReadySessionRecoveryFailsWhenRuntimeSessionIsNotReady(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunReady,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	c := &Controller{
+		Client:     k8sClient,
+		PodName:    "runtime-pod",
+		sessionCli: &fakeSessionRuntimeClient{status: &pb.SessionStatus{State: pb.SessionState_SESSION_STATE_CLOSED}},
+	}
+
+	if _, err := c.reconcileReady(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReady: %v", err)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+}
+
 func TestRecoverActiveRunsOnceAddsRuntimeExecutions(t *testing.T) {
 	t.Setenv("POD_NAMESPACE", "default")
 
@@ -1405,6 +1562,38 @@ type fakeRuntimeClient struct {
 	forgetRequests []*pb.ForgetRequest
 	executeOptions int
 	executeRequest *pb.ExecuteRequest
+}
+
+type fakeSessionRuntimeClient struct {
+	pb.SessionRuntimeClient
+	registerRequest *pb.RegisterSessionRequest
+	registerErr     error
+	status          *pb.SessionStatus
+	statusErr       error
+	closeRequests   []*pb.CloseSessionRequest
+}
+
+func (f *fakeSessionRuntimeClient) RegisterSession(_ context.Context, request *pb.RegisterSessionRequest, _ ...grpc.CallOption) (*pb.SessionStatus, error) {
+	f.registerRequest = request
+	if f.registerErr != nil {
+		return nil, f.registerErr
+	}
+	return &pb.SessionStatus{Identity: request.Identity, State: pb.SessionState_SESSION_STATE_READY}, nil
+}
+
+func (f *fakeSessionRuntimeClient) GetSessionStatus(context.Context, *pb.GetSessionStatusRequest, ...grpc.CallOption) (*pb.SessionStatus, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.status != nil {
+		return f.status, nil
+	}
+	return &pb.SessionStatus{State: pb.SessionState_SESSION_STATE_READY}, nil
+}
+
+func (f *fakeSessionRuntimeClient) CloseSession(_ context.Context, request *pb.CloseSessionRequest, _ ...grpc.CallOption) (*pb.CloseSessionResponse, error) {
+	f.closeRequests = append(f.closeRequests, request)
+	return &pb.CloseSessionResponse{Identity: request.Identity}, nil
 }
 
 func (f *fakeRuntimeClient) Execute(_ context.Context, req *pb.ExecuteRequest, opts ...grpc.CallOption) (*pb.ExecuteResponse, error) {

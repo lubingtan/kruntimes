@@ -208,14 +208,14 @@ wiring from accumulating avoidable conflicts.
   The accepted [Session Mode design](design/session-mode.md) uses
   `Run.spec.mode.session`, an HTTP API translated by the shared gateway to the
   internal `SessionGateway` gRPC service, and a v0 trusted container backend.
-  A Session Run is exclusive (`runs: 1`), ephemeral, and
+  A Session Run is exclusive through its dedicated `runs: 1` Runtime and the
+  runtimed local claim gate, ephemeral, and
   terminates on assigned Pod loss rather than silently resuming on a new Pod.
   Initial implementation TODO:
   - [x] review and approve the API, lifecycle, queue, data-plane, security, and
     future-backend design;
   - [ ] add `Run.spec.mode.session`, validation, generated CRDs, and status
-    conditions; reject a Session Run that declares `spec.workspace`, and reject
-    a selected Runtime whose effective `runs` capacity is not one;
+    conditions; reject a Session Run that declares `spec.workspace`;
   - [ ] initialize source and artifact inputs into a Run-UID-scoped ephemeral
     workspace, register the session locally, and transition the Run to `Ready`;
   - [ ] implement the internal `SessionRuntime` contract for lifecycle,

@@ -31,6 +31,19 @@ service FunctionRuntime {
     rpc UnregisterFunction(UnregisterFunctionRequest) returns (UnregisterFunctionResponse);
 }
 
+// SessionRuntime is an optional Runtime Server extension for stateful session
+// Runs. It is reachable only from the colocated owner runtimed. runtimed owns
+// queue admission and operation lifecycle; the Runtime Server owns local
+// workspace confinement and process execution.
+service SessionRuntime {
+    // RegisterSession creates or resumes one local Session Run workspace.
+    rpc RegisterSession(RegisterSessionRequest) returns (SessionStatus);
+    // GetSessionStatus returns local session state for recovery and idle checks.
+    rpc GetSessionStatus(GetSessionStatusRequest) returns (SessionStatus);
+    // CloseSession removes local state after runtimed has fenced new operations.
+    rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}
+
 message ExecuteRequest {
     string id = 1;
     repeated string args = 2;
@@ -161,4 +174,48 @@ message UnregisterFunctionRequest {
 
 message UnregisterFunctionResponse {
     FunctionRegistration registration = 1;
+}
+
+// SessionIdentity fences a Runtime Server-local session to one Run assignment.
+message SessionIdentity {
+    // Kubernetes Run UID, not its mutable name.
+    string run_uid = 1;
+    // UID of the Runtime Pod to which the Run is assigned.
+    string assigned_pod_uid = 2;
+}
+
+enum SessionState {
+    SESSION_STATE_UNSPECIFIED = 0;
+    SESSION_STATE_REGISTERING = 1;
+    SESSION_STATE_READY = 2;
+    SESSION_STATE_CLOSING = 3;
+    SESSION_STATE_CLOSED = 4;
+    SESSION_STATE_FAILED = 5;
+}
+
+message RegisterSessionRequest {
+    SessionIdentity identity = 1;
+    // Absolute path prepared by the owner runtimed below this Runtime's workspace.
+    string working_dir = 2;
+    map<string, string> env = 3;
+    int64 idle_timeout_seconds = 4;
+}
+
+message GetSessionStatusRequest {
+    SessionIdentity identity = 1;
+}
+
+message SessionStatus {
+    SessionIdentity identity = 1;
+    SessionState state = 2;
+    int64 last_activity_unix_nano = 3;
+    string fatal_error = 4;
+}
+
+message CloseSessionRequest {
+    SessionIdentity identity = 1;
+}
+
+message CloseSessionResponse {
+    SessionIdentity identity = 1;
 }

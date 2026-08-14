@@ -20,9 +20,8 @@ import (
 
 const defaultAuthorizationTimeout = 2 * time.Second
 
-// RunWorkspaceValidationPath is the HTTPS endpoint for Run workspace
-// authorization requests.
-const RunWorkspaceValidationPath = "/validate-kruntimes-io-v1alpha1-run"
+// RunValidationPath is the HTTPS endpoint for Run admission requests.
+const RunValidationPath = "/validate-kruntimes-io-v1alpha1-run"
 
 // SubjectAccessReviewer evaluates a Kubernetes authorization request for the
 // original admission caller.
@@ -55,10 +54,10 @@ func (identity ServiceAccountIdentity) matches(username string) bool {
 	return identity.Namespace != "" && identity.Name != "" && username == fmt.Sprintf("system:serviceaccount:%s:%s", identity.Namespace, identity.Name)
 }
 
-// RunWorkspaceValidator authorizes direct Run references to PersistentWorkspace
-// objects before the Run is persisted. It deliberately keeps authorization out
-// of the scheduler and runtimed, which do not have the original caller identity.
-type RunWorkspaceValidator struct {
+// RunAdmissionValidator validates Run references that require cluster state
+// before the Run is persisted. It deliberately keeps authorization out of the
+// scheduler and runtimed, which do not have the original caller identity.
+type RunAdmissionValidator struct {
 	Reader                           client.Reader
 	Reviewer                         SubjectAccessReviewer
 	Decoder                          admissionwebhook.Decoder
@@ -66,11 +65,11 @@ type RunWorkspaceValidator struct {
 	AuthorizationTimeout             time.Duration
 }
 
-// RegisterRunWorkspaceValidator installs the Run workspace admission handler
-// on a controller-runtime webhook server.
-func RegisterRunWorkspaceValidator(server webhookserver.Server, reader client.Reader, reviewer SubjectAccessReviewer, workflowControllerServiceAccount ServiceAccountIdentity, scheme *runtime.Scheme) {
-	server.Register(RunWorkspaceValidationPath, &admissionwebhook.Webhook{
-		Handler: &RunWorkspaceValidator{
+// RegisterRunAdmissionValidator installs the Run admission handler on a
+// controller-runtime webhook server.
+func RegisterRunAdmissionValidator(server webhookserver.Server, reader client.Reader, reviewer SubjectAccessReviewer, workflowControllerServiceAccount ServiceAccountIdentity, scheme *runtime.Scheme) {
+	server.Register(RunValidationPath, &admissionwebhook.Webhook{
+		Handler: &RunAdmissionValidator{
 			Reader:                           reader,
 			Reviewer:                         reviewer,
 			Decoder:                          admissionwebhook.NewDecoder(scheme),
@@ -80,13 +79,13 @@ func RegisterRunWorkspaceValidator(server webhookserver.Server, reader client.Re
 }
 
 // Handle validates an admission request for a Run.
-func (v *RunWorkspaceValidator) Handle(ctx context.Context, request admissionwebhook.Request) admissionwebhook.Response {
+func (v *RunAdmissionValidator) Handle(ctx context.Context, request admissionwebhook.Request) admissionwebhook.Response {
 	run := &v1alpha1.Run{}
 	if err := v.Decoder.Decode(request, run); err != nil {
 		return admissionwebhook.Errored(http.StatusBadRequest, fmt.Errorf("decode Run: %w", err))
 	}
 	if run.Spec.Workspace == nil {
-		return admissionwebhook.Allowed("Run does not reference a PersistentWorkspace")
+		return admissionwebhook.Allowed("Run has no PersistentWorkspace reference")
 	}
 
 	workspace := &v1alpha1.PersistentWorkspace{}
@@ -119,7 +118,7 @@ func (v *RunWorkspaceValidator) Handle(ctx context.Context, request admissionweb
 	return admissionwebhook.Allowed("authorized to use referenced PersistentWorkspace")
 }
 
-func (v *RunWorkspaceValidator) validateWorkflowChildRun(ctx context.Context, namespace string, run *v1alpha1.Run, workspace *v1alpha1.PersistentWorkspace) error {
+func (v *RunAdmissionValidator) validateWorkflowChildRun(ctx context.Context, namespace string, run *v1alpha1.Run, workspace *v1alpha1.PersistentWorkspace) error {
 	owner := metav1.GetControllerOf(run)
 	if owner == nil || owner.APIVersion != v1alpha1.GroupVersion.String() || owner.Kind != "WorkflowRun" || owner.Name == "" || owner.UID == "" {
 		return fmt.Errorf("Run is not controlled by a WorkflowRun")
@@ -151,7 +150,7 @@ func (v *RunWorkspaceValidator) validateWorkflowChildRun(ctx context.Context, na
 	return nil
 }
 
-func (v *RunWorkspaceValidator) authorizationTimeout() time.Duration {
+func (v *RunAdmissionValidator) authorizationTimeout() time.Duration {
 	if v.AuthorizationTimeout > 0 {
 		return v.AuthorizationTimeout
 	}
@@ -182,4 +181,4 @@ func subjectAccessReviewFor(request admissionwebhook.Request, workspaceName stri
 	}
 }
 
-var _ admissionwebhook.Handler = (*RunWorkspaceValidator)(nil)
+var _ admissionwebhook.Handler = (*RunAdmissionValidator)(nil)

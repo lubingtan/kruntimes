@@ -83,6 +83,7 @@ class BoundedBuffer:
 class PythonRuntime(
     runtime_pb2_grpc.RuntimeServicer,
     runtime_pb2_grpc.FunctionRuntimeServicer,
+    runtime_pb2_grpc.SessionRuntimeServicer,
 ):
     def __init__(self, work_dir="/workspace", output_limit=DEFAULT_OUTPUT_LIMIT_BYTES):
         self.base_dir = Path(work_dir)
@@ -92,6 +93,8 @@ class PythonRuntime(
         self._lock = threading.Lock()
         self._functions = {}
         self._functions_lock = threading.Lock()
+        self._sessions = {}
+        self._sessions_lock = threading.Lock()
 
     def Execute(self, request, context):
         task_id = request.id
@@ -351,6 +354,56 @@ class PythonRuntime(
                     registration=clone_registration(registration),
                 )
 
+    def RegisterSession(self, request, context):
+        try:
+            identity = self._validate_session_identity(request.identity)
+            working_dir = self._runtime_working_dir(request.working_dir)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+
+        with self._sessions_lock:
+            current = self._sessions.get(identity.run_uid)
+            if current is not None:
+                if not self._session_identity_matches(current["identity"], identity):
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "session assignment is stale",
+                    )
+                return self._session_status(current)
+            entry = {
+                "identity": self._clone_session_identity(identity),
+                "working_dir": working_dir,
+                "state": runtime_pb2.SESSION_STATE_READY,
+                "last_activity_unix_nano": time.time_ns(),
+            }
+            self._sessions[identity.run_uid] = entry
+            return self._session_status(entry)
+
+    def GetSessionStatus(self, request, context):
+        entry = self._match_session(request.identity, context)
+        return self._session_status(entry)
+
+    def CloseSession(self, request, context):
+        try:
+            identity = self._validate_session_identity(request.identity)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+
+        with self._sessions_lock:
+            entry = self._sessions.get(identity.run_uid)
+            if entry is not None:
+                if not self._session_identity_matches(entry["identity"], identity):
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "session assignment is stale",
+                    )
+                entry["state"] = runtime_pb2.SESSION_STATE_CLOSED
+                entry["last_activity_unix_nano"] = time.time_ns()
+                del self._sessions[identity.run_uid]
+        return runtime_pb2.CloseSessionResponse(
+            identity=self._clone_session_identity(identity),
+        )
+
     @staticmethod
     def _status_response(task_id, task):
         return runtime_pb2.StatusResponse(
@@ -419,12 +472,12 @@ class PythonRuntime(
             )
         if len(request.registration_digest) > 128:
             raise ValueError("registration digest must be no larger than 128 bytes")
-        working_dir = self._function_working_dir(request.working_dir)
+        working_dir = self._runtime_working_dir(request.working_dir)
         handler = self._parse_python_handler(request.handler)
         self._validate_python_handler(working_dir, handler, request.env)
         return working_dir, handler
 
-    def _function_working_dir(self, working_dir):
+    def _runtime_working_dir(self, working_dir):
         if not working_dir:
             raise ValueError("working directory is required")
         try:
@@ -436,6 +489,49 @@ class PythonRuntime(
         if not candidate.is_dir():
             raise ValueError("working directory must be a directory")
         return candidate
+
+    @staticmethod
+    def _validate_session_identity(identity):
+        if identity is None or not identity.run_uid or not identity.assigned_pod_uid:
+            raise ValueError("session run uid and assigned pod uid are required")
+        return identity
+
+    @staticmethod
+    def _clone_session_identity(identity):
+        return runtime_pb2.SessionIdentity(
+            run_uid=identity.run_uid,
+            assigned_pod_uid=identity.assigned_pod_uid,
+        )
+
+    @staticmethod
+    def _session_identity_matches(left, right):
+        return (
+            left.run_uid == right.run_uid
+            and left.assigned_pod_uid == right.assigned_pod_uid
+        )
+
+    def _match_session(self, identity, context):
+        try:
+            identity = self._validate_session_identity(identity)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        with self._sessions_lock:
+            entry = self._sessions.get(identity.run_uid)
+            if entry is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "session not found")
+            if not self._session_identity_matches(entry["identity"], identity):
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "session assignment is stale",
+                )
+            return entry
+
+    def _session_status(self, entry):
+        return runtime_pb2.SessionStatus(
+            identity=self._clone_session_identity(entry["identity"]),
+            state=entry["state"],
+            last_activity_unix_nano=entry["last_activity_unix_nano"],
+        )
 
     @staticmethod
     def _parse_python_handler(handler):

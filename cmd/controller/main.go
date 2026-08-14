@@ -105,7 +105,7 @@ func main() {
 		setupLog.Error(err, "unable to register readiness check", "check", "admission-webhook")
 		os.Exit(1)
 	}
-	workspaceadmission.RegisterRunWorkspaceValidator(
+	workspaceadmission.RegisterRunAdmissionValidator(
 		mgr.GetWebhookServer(),
 		mgr.GetAPIReader(),
 		workspaceadmission.KubernetesSubjectAccessReviewer{Client: mgr.GetClient()},
