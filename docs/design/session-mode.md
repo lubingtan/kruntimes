@@ -145,10 +145,9 @@ Queued -> Running -> Succeeded | Failed | Cancelled | TimedOut
 
 Only one mutation runs at a time. Read/list/status requests do not enter the
 queue. The effective queue size is the minimum of `mode.session.queueSize`
-and a runtimed-configured global maximum. The initial global maximum is 32;
-the initial operation default and maximum are five minutes, and graceful
-termination waits ten seconds. Administrators may configure lower or higher
-global limits; a Run may only reduce its queue size or operation timeout.
+and the runtimed global maximum. The v0 defaults are 32 queued mutations and a
+five-minute operation limit. A Run can only reduce either limit. Exposing
+administrator configuration for those global limits is tracked separately.
 
 When a session closes, owner runtimed rejects new operations, cancels queued work,
 sends termination to the running process group, waits the grace period, then

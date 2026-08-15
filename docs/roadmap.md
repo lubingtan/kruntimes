@@ -228,6 +228,11 @@ wiring from accumulating avoidable conflicts.
   - [ ] implement the per-session FIFO mutation queue: one active command or
     file mutation, global and per-Run bounds, default/max operation timeout,
     cancellation, and graceful termination;
+    - [x] serialize owner-runtimed mutations with per-Session FIFO queues,
+      Run-scoped queue/timeout limits, queue-full rejection, and cancellation
+      on Session close;
+    - [ ] expose administrator configuration for the global queue and operation
+      timeout limits, including graceful-termination settings;
   - [ ] keep operation history and audit events in structured external logs,
     retain only bounded readiness/endpoint data in Run status, and export large
     outputs through ArtifactStore;

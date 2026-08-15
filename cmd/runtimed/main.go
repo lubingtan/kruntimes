@@ -204,6 +204,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	sessionOperations := runtimed.NewSessionOperationQueue(0, 0)
+
 	// Start gRPC proxies for logs, artifacts, and SessionRuntime requests.
 	go func() {
 		if err := runtimed.StartRuntimeProxyServer(
@@ -213,6 +215,7 @@ func main() {
 			mgr.GetAPIReader(),
 			mgr.GetCache(),
 			artifactStore,
+			sessionOperations,
 			runtimeNamespace,
 			runtimeName,
 			podName,
@@ -235,6 +238,7 @@ func main() {
 		ArtifactStoreSpec: artifactStoreSpec,
 		MaxArtifactBytes:  maxArtifactBytes,
 		MaxArtifactsBytes: maxArtifactsBytes,
+		SessionOperations: sessionOperations,
 		Recorder:          mgr.GetEventRecorderFor("runtimed"),
 	}
 

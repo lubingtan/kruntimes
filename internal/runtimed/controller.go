@@ -119,10 +119,11 @@ type Controller struct {
 	rlegCh       chan event.GenericEvent
 	logMu        sync.Mutex
 
-	runtimeCli pb.RuntimeClient
-	sessionCli pb.SessionRuntimeClient
-	rleg       rlegpkg.RunLifecycleEventGenerator
-	Recorder   record.EventRecorder
+	runtimeCli        pb.RuntimeClient
+	sessionCli        pb.SessionRuntimeClient
+	SessionOperations *SessionOperationQueue
+	rleg              rlegpkg.RunLifecycleEventGenerator
+	Recorder          record.EventRecorder
 }
 
 // SetupWithManager registers the controller with controller-runtime.

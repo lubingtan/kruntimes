@@ -177,7 +177,13 @@ func (c *Controller) closeSessionAndApplyTerminal(ctx context.Context, ar *activ
 }
 
 func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run) {
-	if c.sessionCli == nil || run == nil {
+	if run == nil {
+		return
+	}
+	if c.SessionOperations != nil {
+		c.SessionOperations.Close(string(run.UID))
+	}
+	if c.sessionCli == nil {
 		return
 	}
 	identity, err := sessionIdentityForRun(run)

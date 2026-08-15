@@ -24,6 +24,7 @@ func StartRuntimeProxyServer(
 	runtimeEndpoint, addr string,
 	apiReader, sessionReader client.Reader,
 	store artifact.Store,
+	operations *SessionOperationQueue,
 	runtimeNamespace,
 	runtimeName,
 	podName string,
@@ -42,14 +43,18 @@ func StartRuntimeProxyServer(
 
 	srv := grpc.NewServer()
 	pb.RegisterRuntimeServer(srv, &runtimeStatusProxy{runtimeCli: pb.NewRuntimeClient(conn)})
-	pb.RegisterSessionRuntimeServer(srv, newSessionRuntimeProxy(
+	sessionProxy := newSessionRuntimeProxy(
 		sessionReader,
 		pb.NewSessionRuntimeClient(conn),
 		runtimeNamespace,
 		runtimeName,
 		podName,
 		statusPort,
-	))
+	)
+	if operations != nil {
+		sessionProxy.operations = operations
+	}
+	pb.RegisterSessionRuntimeServer(srv, sessionProxy)
 	if store != nil {
 		RegisterArtifactService(srv, apiReader, store, runtimeNamespace, runtimeName)
 	}

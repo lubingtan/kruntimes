@@ -36,7 +36,16 @@ type sessionRuntimeProxy struct {
 	runtimeName string
 	podName     string
 	statusPort  string
+	operations  *SessionOperationQueue
 	dialPeer    func(context.Context, string) (pb.SessionRuntimeClient, io.Closer, error)
+}
+
+type sessionRoute struct {
+	run    *v1alpha1.Run
+	ctx    context.Context
+	client pb.SessionRuntimeClient
+	closer io.Closer
+	owner  bool
 }
 
 func newSessionRuntimeProxy(
@@ -51,78 +60,84 @@ func newSessionRuntimeProxy(
 		runtimeName: runtimeName,
 		podName:     podName,
 		statusPort:  statusPort,
+		operations:  NewSessionOperationQueue(0, 0),
 		dialPeer:    dialSessionRuntimePeer,
 	}
 }
 
 func (s *sessionRuntimeProxy) GetSessionStatus(ctx context.Context, req *pb.GetSessionStatusRequest) (*pb.SessionStatus, error) {
-	callCtx, client, closer, err := s.ownerClient(ctx, req.GetIdentity())
+	route, err := s.route(ctx, req.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	return client.GetSessionStatus(callCtx, req)
+	defer route.closer.Close()
+	return route.client.GetSessionStatus(route.ctx, req)
 }
 
 func (s *sessionRuntimeProxy) ExecuteSessionOperation(ctx context.Context, req *pb.ExecuteSessionOperationRequest) (*pb.ExecuteSessionOperationResponse, error) {
-	callCtx, client, closer, err := s.ownerClient(ctx, req.GetIdentity())
+	route, err := s.route(ctx, req.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	return client.ExecuteSessionOperation(callCtx, req)
+	defer route.closer.Close()
+	if !route.owner {
+		return route.client.ExecuteSessionOperation(route.ctx, req)
+	}
+	return s.operations.Execute(route.ctx, route.run, func(operationCtx context.Context) (*pb.ExecuteSessionOperationResponse, error) {
+		return route.client.ExecuteSessionOperation(operationCtx, req)
+	})
 }
 
 func (s *sessionRuntimeProxy) ReadSessionFile(ctx context.Context, req *pb.ReadSessionFileRequest) (*pb.ReadSessionFileResponse, error) {
-	callCtx, client, closer, err := s.ownerClient(ctx, req.GetIdentity())
+	route, err := s.route(ctx, req.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	return client.ReadSessionFile(callCtx, req)
+	defer route.closer.Close()
+	return route.client.ReadSessionFile(route.ctx, req)
 }
 
 func (s *sessionRuntimeProxy) ListSessionFiles(ctx context.Context, req *pb.ListSessionFilesRequest) (*pb.ListSessionFilesResponse, error) {
-	callCtx, client, closer, err := s.ownerClient(ctx, req.GetIdentity())
+	route, err := s.route(ctx, req.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
-	defer closer.Close()
-	return client.ListSessionFiles(callCtx, req)
+	defer route.closer.Close()
+	return route.client.ListSessionFiles(route.ctx, req)
 }
 
-func (s *sessionRuntimeProxy) ownerClient(ctx context.Context, identity *pb.SessionIdentity) (context.Context, pb.SessionRuntimeClient, io.Closer, error) {
+func (s *sessionRuntimeProxy) route(ctx context.Context, identity *pb.SessionIdentity) (sessionRoute, error) {
 	run, err := s.sessionRun(ctx, identity)
 	if err != nil {
-		return nil, nil, nil, err
+		return sessionRoute{}, err
 	}
 	if run.Status.AssignedPod == s.podName {
-		return ctx, s.local, nopCloser{}, nil
+		return sessionRoute{run: run, ctx: ctx, client: s.local, closer: nopCloser{}, owner: true}, nil
 	}
 	if forwarded(ctx) {
-		return nil, nil, nil, status.Error(codes.FailedPrecondition, "forwarded session request did not reach its assigned Runtime Pod")
+		return sessionRoute{}, status.Error(codes.FailedPrecondition, "forwarded session request did not reach its assigned Runtime Pod")
 	}
 
 	owner := &corev1.Pod{}
 	ownerKey := client.ObjectKey{Namespace: run.Namespace, Name: run.Status.AssignedPod}
 	if err := s.reader.Get(ctx, ownerKey, owner); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil, nil, status.Error(codes.Unavailable, "assigned Runtime Pod is not available")
+			return sessionRoute{}, status.Error(codes.Unavailable, "assigned Runtime Pod is not available")
 		}
-		return nil, nil, nil, status.Errorf(codes.Internal, "get assigned Runtime Pod: %v", err)
+		return sessionRoute{}, status.Errorf(codes.Internal, "get assigned Runtime Pod: %v", err)
 	}
 	if string(owner.UID) != identity.GetAssignedPodUid() ||
 		owner.Labels["runtime"] != s.runtimeName ||
 		owner.Status.PodIP == "" {
-		return nil, nil, nil, status.Error(codes.Unavailable, "assigned Runtime Pod is not available")
+		return sessionRoute{}, status.Error(codes.Unavailable, "assigned Runtime Pod is not available")
 	}
 
 	forwardedCtx := withForwardedMarker(ctx)
 	peer, closer, err := s.dialPeer(forwardedCtx, net.JoinHostPort(owner.Status.PodIP, s.statusPort))
 	if err != nil {
-		return nil, nil, nil, status.Errorf(codes.Unavailable, "dial assigned Runtime Pod: %v", err)
+		return sessionRoute{}, status.Errorf(codes.Unavailable, "dial assigned Runtime Pod: %v", err)
 	}
-	return forwardedCtx, peer, closer, nil
+	return sessionRoute{run: run, ctx: forwardedCtx, client: peer, closer: closer}, nil
 }
 
 func (s *sessionRuntimeProxy) sessionRun(ctx context.Context, identity *pb.SessionIdentity) (*v1alpha1.Run, error) {
