@@ -317,13 +317,13 @@ protoc: ## Install protoc compiler if not present.
 
 .PHONY: protoc-gen-go
 protoc-gen-go: ## Install protoc-gen-go if not present.
-	@if ! test -x $(PROTOC_GEN_GO) || ! $(PROTOC_GEN_GO) --version | grep -q "$(PROTOC_GEN_GO_VERSION)"; then \
+	@if ! test -x $(PROTOC_GEN_GO) || test "$$($(PROTOC_GEN_GO) --version | awk '{print $$NF}' | sed 's/^v//')" != "$(patsubst v%,%,$(PROTOC_GEN_GO_VERSION))"; then \
 		go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION); \
 	fi
 
 .PHONY: protoc-gen-go-grpc
 protoc-gen-go-grpc: ## Install protoc-gen-go-grpc if not present.
-	@if ! test -x $(PROTOC_GEN_GO_GRPC) || ! $(PROTOC_GEN_GO_GRPC) --version | grep -q "$(PROTOC_GEN_GO_GRPC_VERSION)"; then \
+	@if ! test -x $(PROTOC_GEN_GO_GRPC) || test "$$($(PROTOC_GEN_GO_GRPC) --version | awk '{print $$NF}' | sed 's/^v//')" != "$(patsubst v%,%,$(PROTOC_GEN_GO_GRPC_VERSION))"; then \
 		go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION); \
 	fi
 

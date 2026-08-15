@@ -553,9 +553,12 @@ var FunctionRuntime_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SessionRuntime_RegisterSession_FullMethodName  = "/executor.v1.SessionRuntime/RegisterSession"
-	SessionRuntime_GetSessionStatus_FullMethodName = "/executor.v1.SessionRuntime/GetSessionStatus"
-	SessionRuntime_CloseSession_FullMethodName     = "/executor.v1.SessionRuntime/CloseSession"
+	SessionRuntime_RegisterSession_FullMethodName         = "/executor.v1.SessionRuntime/RegisterSession"
+	SessionRuntime_GetSessionStatus_FullMethodName        = "/executor.v1.SessionRuntime/GetSessionStatus"
+	SessionRuntime_ExecuteSessionOperation_FullMethodName = "/executor.v1.SessionRuntime/ExecuteSessionOperation"
+	SessionRuntime_ReadSessionFile_FullMethodName         = "/executor.v1.SessionRuntime/ReadSessionFile"
+	SessionRuntime_ListSessionFiles_FullMethodName        = "/executor.v1.SessionRuntime/ListSessionFiles"
+	SessionRuntime_CloseSession_FullMethodName            = "/executor.v1.SessionRuntime/CloseSession"
 )
 
 // SessionRuntimeClient is the client API for SessionRuntime service.
@@ -571,6 +574,12 @@ type SessionRuntimeClient interface {
 	RegisterSession(ctx context.Context, in *RegisterSessionRequest, opts ...grpc.CallOption) (*SessionStatus, error)
 	// GetSessionStatus returns local session state for recovery and idle checks.
 	GetSessionStatus(ctx context.Context, in *GetSessionStatusRequest, opts ...grpc.CallOption) (*SessionStatus, error)
+	// ExecuteSessionOperation executes one mutation already admitted by runtimed.
+	ExecuteSessionOperation(ctx context.Context, in *ExecuteSessionOperationRequest, opts ...grpc.CallOption) (*ExecuteSessionOperationResponse, error)
+	// ReadSessionFile returns bounded contents of one workspace-relative file.
+	ReadSessionFile(ctx context.Context, in *ReadSessionFileRequest, opts ...grpc.CallOption) (*ReadSessionFileResponse, error)
+	// ListSessionFiles lists workspace-relative directory entries.
+	ListSessionFiles(ctx context.Context, in *ListSessionFilesRequest, opts ...grpc.CallOption) (*ListSessionFilesResponse, error)
 	// CloseSession removes local state after runtimed has fenced new operations.
 	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
 }
@@ -603,6 +612,36 @@ func (c *sessionRuntimeClient) GetSessionStatus(ctx context.Context, in *GetSess
 	return out, nil
 }
 
+func (c *sessionRuntimeClient) ExecuteSessionOperation(ctx context.Context, in *ExecuteSessionOperationRequest, opts ...grpc.CallOption) (*ExecuteSessionOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecuteSessionOperationResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_ExecuteSessionOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) ReadSessionFile(ctx context.Context, in *ReadSessionFileRequest, opts ...grpc.CallOption) (*ReadSessionFileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadSessionFileResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_ReadSessionFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) ListSessionFiles(ctx context.Context, in *ListSessionFilesRequest, opts ...grpc.CallOption) (*ListSessionFilesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSessionFilesResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_ListSessionFiles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionRuntimeClient) CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CloseSessionResponse)
@@ -626,6 +665,12 @@ type SessionRuntimeServer interface {
 	RegisterSession(context.Context, *RegisterSessionRequest) (*SessionStatus, error)
 	// GetSessionStatus returns local session state for recovery and idle checks.
 	GetSessionStatus(context.Context, *GetSessionStatusRequest) (*SessionStatus, error)
+	// ExecuteSessionOperation executes one mutation already admitted by runtimed.
+	ExecuteSessionOperation(context.Context, *ExecuteSessionOperationRequest) (*ExecuteSessionOperationResponse, error)
+	// ReadSessionFile returns bounded contents of one workspace-relative file.
+	ReadSessionFile(context.Context, *ReadSessionFileRequest) (*ReadSessionFileResponse, error)
+	// ListSessionFiles lists workspace-relative directory entries.
+	ListSessionFiles(context.Context, *ListSessionFilesRequest) (*ListSessionFilesResponse, error)
 	// CloseSession removes local state after runtimed has fenced new operations.
 	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
 	mustEmbedUnimplementedSessionRuntimeServer()
@@ -643,6 +688,15 @@ func (UnimplementedSessionRuntimeServer) RegisterSession(context.Context, *Regis
 }
 func (UnimplementedSessionRuntimeServer) GetSessionStatus(context.Context, *GetSessionStatusRequest) (*SessionStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSessionStatus not implemented")
+}
+func (UnimplementedSessionRuntimeServer) ExecuteSessionOperation(context.Context, *ExecuteSessionOperationRequest) (*ExecuteSessionOperationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecuteSessionOperation not implemented")
+}
+func (UnimplementedSessionRuntimeServer) ReadSessionFile(context.Context, *ReadSessionFileRequest) (*ReadSessionFileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadSessionFile not implemented")
+}
+func (UnimplementedSessionRuntimeServer) ListSessionFiles(context.Context, *ListSessionFilesRequest) (*ListSessionFilesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSessionFiles not implemented")
 }
 func (UnimplementedSessionRuntimeServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CloseSession not implemented")
@@ -704,6 +758,60 @@ func _SessionRuntime_GetSessionStatus_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionRuntime_ExecuteSessionOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecuteSessionOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).ExecuteSessionOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_ExecuteSessionOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).ExecuteSessionOperation(ctx, req.(*ExecuteSessionOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_ReadSessionFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadSessionFileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).ReadSessionFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_ReadSessionFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).ReadSessionFile(ctx, req.(*ReadSessionFileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_ListSessionFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSessionFilesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).ListSessionFiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_ListSessionFiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).ListSessionFiles(ctx, req.(*ListSessionFilesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionRuntime_CloseSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CloseSessionRequest)
 	if err := dec(in); err != nil {
@@ -736,6 +844,18 @@ var SessionRuntime_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSessionStatus",
 			Handler:    _SessionRuntime_GetSessionStatus_Handler,
+		},
+		{
+			MethodName: "ExecuteSessionOperation",
+			Handler:    _SessionRuntime_ExecuteSessionOperation_Handler,
+		},
+		{
+			MethodName: "ReadSessionFile",
+			Handler:    _SessionRuntime_ReadSessionFile_Handler,
+		},
+		{
+			MethodName: "ListSessionFiles",
+			Handler:    _SessionRuntime_ListSessionFiles_Handler,
 		},
 		{
 			MethodName: "CloseSession",

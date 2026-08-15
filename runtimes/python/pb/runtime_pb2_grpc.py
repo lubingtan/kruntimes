@@ -557,6 +557,21 @@ class SessionRuntimeStub(object):
                 request_serializer=runtime__pb2.GetSessionStatusRequest.SerializeToString,
                 response_deserializer=runtime__pb2.SessionStatus.FromString,
                 _registered_method=True)
+        self.ExecuteSessionOperation = channel.unary_unary(
+                '/executor.v1.SessionRuntime/ExecuteSessionOperation',
+                request_serializer=runtime__pb2.ExecuteSessionOperationRequest.SerializeToString,
+                response_deserializer=runtime__pb2.ExecuteSessionOperationResponse.FromString,
+                _registered_method=True)
+        self.ReadSessionFile = channel.unary_unary(
+                '/executor.v1.SessionRuntime/ReadSessionFile',
+                request_serializer=runtime__pb2.ReadSessionFileRequest.SerializeToString,
+                response_deserializer=runtime__pb2.ReadSessionFileResponse.FromString,
+                _registered_method=True)
+        self.ListSessionFiles = channel.unary_unary(
+                '/executor.v1.SessionRuntime/ListSessionFiles',
+                request_serializer=runtime__pb2.ListSessionFilesRequest.SerializeToString,
+                response_deserializer=runtime__pb2.ListSessionFilesResponse.FromString,
+                _registered_method=True)
         self.CloseSession = channel.unary_unary(
                 '/executor.v1.SessionRuntime/CloseSession',
                 request_serializer=runtime__pb2.CloseSessionRequest.SerializeToString,
@@ -585,6 +600,27 @@ class SessionRuntimeServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExecuteSessionOperation(self, request, context):
+        """ExecuteSessionOperation executes one mutation already admitted by runtimed.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReadSessionFile(self, request, context):
+        """ReadSessionFile returns bounded contents of one workspace-relative file.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListSessionFiles(self, request, context):
+        """ListSessionFiles lists workspace-relative directory entries.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def CloseSession(self, request, context):
         """CloseSession removes local state after runtimed has fenced new operations.
         """
@@ -604,6 +640,21 @@ def add_SessionRuntimeServicer_to_server(servicer, server):
                     servicer.GetSessionStatus,
                     request_deserializer=runtime__pb2.GetSessionStatusRequest.FromString,
                     response_serializer=runtime__pb2.SessionStatus.SerializeToString,
+            ),
+            'ExecuteSessionOperation': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteSessionOperation,
+                    request_deserializer=runtime__pb2.ExecuteSessionOperationRequest.FromString,
+                    response_serializer=runtime__pb2.ExecuteSessionOperationResponse.SerializeToString,
+            ),
+            'ReadSessionFile': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReadSessionFile,
+                    request_deserializer=runtime__pb2.ReadSessionFileRequest.FromString,
+                    response_serializer=runtime__pb2.ReadSessionFileResponse.SerializeToString,
+            ),
+            'ListSessionFiles': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListSessionFiles,
+                    request_deserializer=runtime__pb2.ListSessionFilesRequest.FromString,
+                    response_serializer=runtime__pb2.ListSessionFilesResponse.SerializeToString,
             ),
             'CloseSession': grpc.unary_unary_rpc_method_handler(
                     servicer.CloseSession,
@@ -669,6 +720,87 @@ class SessionRuntime(object):
             '/executor.v1.SessionRuntime/GetSessionStatus',
             runtime__pb2.GetSessionStatusRequest.SerializeToString,
             runtime__pb2.SessionStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteSessionOperation(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/executor.v1.SessionRuntime/ExecuteSessionOperation',
+            runtime__pb2.ExecuteSessionOperationRequest.SerializeToString,
+            runtime__pb2.ExecuteSessionOperationResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReadSessionFile(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/executor.v1.SessionRuntime/ReadSessionFile',
+            runtime__pb2.ReadSessionFileRequest.SerializeToString,
+            runtime__pb2.ReadSessionFileResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListSessionFiles(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/executor.v1.SessionRuntime/ListSessionFiles',
+            runtime__pb2.ListSessionFilesRequest.SerializeToString,
+            runtime__pb2.ListSessionFilesResponse.FromString,
             options,
             channel_credentials,
             insecure,

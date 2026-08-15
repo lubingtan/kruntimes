@@ -1,6 +1,6 @@
 # Session Mode for Agent Sandboxes
 
-Status: **Accepted; not implemented**
+Status: **Accepted; implementation in progress**
 
 ## Problem
 
@@ -171,10 +171,10 @@ The contract is local to a Runtime Pod and is not exposed through the gateway:
 service SessionRuntime {
   rpc RegisterSession(RegisterSessionRequest) returns (SessionStatus);
   rpc ExecuteSessionOperation(ExecuteSessionOperationRequest)
-      returns (SessionOperationResult);
+      returns (ExecuteSessionOperationResponse);
   rpc ReadSessionFile(ReadSessionFileRequest) returns (ReadSessionFileResponse);
   rpc ListSessionFiles(ListSessionFilesRequest) returns (ListSessionFilesResponse);
-  rpc CloseSession(CloseSessionRequest) returns (google.protobuf.Empty);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
   rpc GetSessionStatus(GetSessionStatusRequest) returns (SessionStatus);
 }
 ```
@@ -182,12 +182,14 @@ service SessionRuntime {
 Every request includes the immutable Run UID and assignment identity. Only the
 owning local runtimed may call this contract. `RegisterSession` receives the
 prepared workspace path and immutable source inputs; it is idempotent for the
-same identity. `ExecuteSessionOperation` receives one already-admitted exec,
-write, delete, or rename operation. Its request context carries the operation
-timeout; cancellation terminates the matching process group or file mutation.
-The read and list RPCs are synchronous, bounded, and do not enter the mutation
-queue. `CloseSession` is idempotent and removes local session state after
-runtimed has rejected new gateway operations.
+same identity. `ExecuteSessionOperation` contains exactly one `oneof` payload:
+a command, file write, directory creation, delete, or rename. runtimed assigns
+the operation ID and admits that mutation to its session queue before making
+this local call. Its request context carries the command timeout; cancellation
+terminates the matching process group. The read and list RPCs are synchronous,
+bounded, and do not enter the mutation queue. Runtime Server methods do not
+allocate operation IDs or queue requests. `CloseSession` is idempotent and
+removes local session state after runtimed has rejected new gateway operations.
 
 This preserves the current architecture: external clients invoke HTTP through
 the shared Runtime gateway Service and never reach either internal gRPC service

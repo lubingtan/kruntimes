@@ -116,6 +116,91 @@ class TestPythonRuntime(unittest.TestCase):
             self._register_session(tempfile.mkdtemp())
         self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
+    def test_session_executes_commands_and_confines_files(self):
+        session_dir = self._prepare_inline("# session")
+        self._register_session(session_dir)
+        identity = runtime_pb2.SessionIdentity(
+            run_uid="session-run",
+            assigned_pod_uid="pod-a",
+        )
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.session_stub.ExecuteSessionOperation(
+                runtime_pb2.ExecuteSessionOperationRequest(identity=identity)
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                create_directory=runtime_pb2.SessionDirectoryCreate(
+                    path="scratch/nested",
+                ),
+            )
+        )
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                write_file=runtime_pb2.SessionFileWrite(
+                    path="notes/hello.txt",
+                    contents=b"hello\n",
+                    create_parents=True,
+                ),
+            )
+        )
+        read = self.session_stub.ReadSessionFile(
+            runtime_pb2.ReadSessionFileRequest(
+                identity=identity,
+                path="notes/hello.txt",
+                max_bytes=1024,
+            )
+        )
+        self.assertEqual(read.contents, b"hello\n")
+        self.assertFalse(read.truncated)
+        listed = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(identity=identity)
+        )
+        notes = next((entry for entry in listed.entries if entry.path == "notes"), None)
+        self.assertIsNotNone(notes)
+        self.assertTrue(notes.directory)
+        operation = self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                command=runtime_pb2.SessionCommand(
+                    argv=["bash", "-c", "printf '%s:' \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"],
+                    env={"KRUNTIMES_SESSION_TEST": "environment"},
+                ),
+            )
+        )
+        self.assertEqual(operation.command.exit_code, 0)
+        self.assertEqual(operation.command.stdout, b"environment:hello\n")
+        self.assertFalse(operation.command.timed_out)
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                rename_file=runtime_pb2.SessionFileRename(
+                    source_path="notes/hello.txt",
+                    destination_path="notes/greeting.txt",
+                ),
+            )
+        )
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                delete_file=runtime_pb2.SessionFileDelete(
+                    path="notes",
+                    recursive=True,
+                ),
+            )
+        )
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.session_stub.ReadSessionFile(
+                runtime_pb2.ReadSessionFileRequest(
+                    identity=identity,
+                    path="../outside",
+                    max_bytes=1,
+                )
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
     def _wait_for_function_in_flight(self, registration, timeout=5):
         deadline = time.time() + timeout
         while time.time() < deadline:

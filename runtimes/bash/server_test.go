@@ -237,6 +237,88 @@ func TestSessionRuntimeRejectsEscapingWorkspace(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeExecutesCommandsAndConfinesFiles(t *testing.T) {
+	client, workDir, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	identity := &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"}
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}); err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{Identity: identity}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ExecuteSessionOperation without operation = %v, want InvalidArgument", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_CreateDirectory{CreateDirectory: &pb.SessionDirectoryCreate{
+			Path: "scratch/nested",
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation create directory: %v", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_WriteFile{WriteFile: &pb.SessionFileWrite{
+			Path: "notes/hello.txt", Contents: []byte("hello\n"), CreateParents: true,
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation write: %v", err)
+	}
+	read, err := client.ReadSessionFile(context.Background(), &pb.ReadSessionFileRequest{Identity: identity, Path: "notes/hello.txt", MaxBytes: 1024})
+	if err != nil {
+		t.Fatalf("ReadSessionFile: %v", err)
+	}
+	if got := string(read.Contents); got != "hello\n" || read.Truncated {
+		t.Fatalf("read = %#v, want hello without truncation", read)
+	}
+	listed, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity})
+	if err != nil {
+		t.Fatalf("ListSessionFiles: %v", err)
+	}
+	var notes *pb.SessionFileInfo
+	for _, entry := range listed.Entries {
+		if entry.Path == "notes" {
+			notes = entry
+			break
+		}
+	}
+	if notes == nil || !notes.Directory {
+		t.Fatalf("directory entries = %#v, want notes directory", listed.Entries)
+	}
+	operation, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_Command{Command: &pb.SessionCommand{
+			Argv: []string{"bash", "-c", "printf '%s:' \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"},
+			Env:  map[string]string{"KRUNTIMES_SESSION_TEST": "environment"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteSessionOperation command: %v", err)
+	}
+	if operation.Command == nil || operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "environment:hello\n" || operation.Command.TimedOut {
+		t.Fatalf("command result = %#v", operation)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_RenameFile{RenameFile: &pb.SessionFileRename{
+			SourcePath: "notes/hello.txt", DestinationPath: "notes/greeting.txt",
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation rename: %v", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_DeleteFile{DeleteFile: &pb.SessionFileDelete{
+			Path: "notes", Recursive: true,
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation delete: %v", err)
+	}
+	if _, err := client.ReadSessionFile(context.Background(), &pb.ReadSessionFileRequest{Identity: identity, Path: "../outside", MaxBytes: 1}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ReadSessionFile escaping path = %v, want InvalidArgument", err)
+	}
+}
+
 func TestFunctionRuntimeRegistrationFencing(t *testing.T) {
 	client, workDir, cleanup := startFunctionTestServer(t, defaultOutputLimitBytes)
 	defer cleanup()

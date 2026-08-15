@@ -1,6 +1,6 @@
 # Agent Sandbox 的 Session Mode
 
-状态：**已接受；尚未实现**
+状态：**已接受；正在实现**
 
 ## 问题
 
@@ -141,20 +141,20 @@ confinement、process groups 和 local session state。session queue 与 operati
 service SessionRuntime {
   rpc RegisterSession(RegisterSessionRequest) returns (SessionStatus);
   rpc ExecuteSessionOperation(ExecuteSessionOperationRequest)
-      returns (SessionOperationResult);
+      returns (ExecuteSessionOperationResponse);
   rpc ReadSessionFile(ReadSessionFileRequest) returns (ReadSessionFileResponse);
   rpc ListSessionFiles(ListSessionFilesRequest) returns (ListSessionFilesResponse);
-  rpc CloseSession(CloseSessionRequest) returns (google.protobuf.Empty);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
   rpc GetSessionStatus(GetSessionStatusRequest) returns (SessionStatus);
 }
 ```
 
 每个请求携带 immutable Run UID 和 assignment identity，只有 owning local runtimed 可以调用。
 `RegisterSession` 接收已准备的 workspace path 和 immutable source inputs；同一 identity 下调用是
-幂等的。`ExecuteSessionOperation` 接收一个已经 admission 的 exec、write、delete 或 rename
-operation；其 request context 携带 operation timeout，cancellation 会终止匹配的 process group 或
-file mutation。read/list RPC 是 synchronous、有界的，不进入 mutation queue。`CloseSession` 是幂等
-操作：runtimed 拒绝新的 gateway operation 后，它清理 local session state。
+幂等的。`ExecuteSessionOperation` 包含恰好一个 `oneof` payload：command、file write、directory creation、delete
+或 rename。runtimed 在作出这个 local call 前分配 operation ID，并将该 mutation admission 到 session queue。它的 request context 携带 command timeout；
+cancellation 终止匹配的 process group。read/list RPC 是 synchronous、有界的，不进入 mutation queue。Runtime Server method 不分配 operation ID，也不 queue request。
+`CloseSession` 是幂等操作：runtimed 拒绝新的 gateway operation 后，它清理 local session state。
 
 这保持当前 architecture：external client 通过共享的 Runtime gateway Service 调用 HTTP，绝不直接访问
 任一内部 gRPC service。gateway server 将 HTTP 转换为 `SessionGateway`；owner runtimed 再将已接受的
