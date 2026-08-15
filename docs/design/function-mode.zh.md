@@ -177,20 +177,21 @@ Top-level `handler`、`entrypoint` 和 `args` 不属于目标 Run API。Task mod
 
 所有 Runtime 共享一个 `runtime-gateway` Deployment 及其 ClusterIP Service。Helm chart 在
 `gateway.enabled` 为 true 时安装它们。gateway Deployment 运行 stateless HTTP server。Run endpoint
-标识 namespace、Runtime 和 Run UID；gateway 会从该 Runtime 选择一个 ready runtimed，之后 runtimed
-ownership cache 再选择 owner：
+标识 namespace、Runtime 和 Run UID；gateway 会调用该 Runtime 的 Kubernetes Service，由其选择一个
+ready Runtime Pod，之后 runtimed 再解析 owner：
 
 ```text
 client
   -> shared runtime-gateway Service
      -> runtime-gateway Pod
-        -> Runtime=python 的 ready runtimed
-           -> owning runtimed（若不同）
-              -> local Runtime Server
+        -> Runtime=python 的 Kubernetes Service
+           -> ready Runtime Pod 的 runtimed
+              -> owning runtimed（若不同）
+                 -> local Runtime Server
 ```
 
-gateway Service 地址稳定。Gateway Pod 使用 Runtime 的 ready Pod set 选择 ingress runtimed；每个
-runtimed 都需要 ownership cache：
+gateway Service 地址稳定。Runtime controller 创建的每个 Runtime Service 会选择其 ready Pod；每个
+runtimed 只为自身 Runtime 的 Run 解析 ownership：
 
 ```text
 Run namespace/name/UID -> assigned Runtime Pod UID -> attempt -> readiness

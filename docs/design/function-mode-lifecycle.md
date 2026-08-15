@@ -229,9 +229,9 @@ The Helm chart optionally installs one shared `runtime-gateway` Deployment and
 ClusterIP Service for all Runtimes. `gateway.enabled` controls installation.
 The Deployment runs stateless HTTP gateway servers. The Service forwards client
 traffic only to gateway Pods, never directly to Runtime Pods. A gateway server
-reads the namespace, Runtime, and Run UID from the endpoint path, selects a
-ready runtimed for that Runtime on a dedicated gRPC port, and translates the
-HTTP invoke request to the internal runtimed gRPC request.
+reads the namespace, Runtime, and Run UID from the endpoint path, calls the
+Kubernetes Service for that Runtime on its dedicated gRPC port, and translates
+the HTTP invoke request to the internal runtimed gRPC request.
 
 Chart values configure replicas, RBAC, and the serving certificate Secret
 mounted into gateway Pods. The certificate covers the shared gateway Service DNS
@@ -243,13 +243,14 @@ Runtime controller does not manage gateway resources or certificates.
 client
   -> shared runtime-gateway Service
      -> runtime-gateway Pod
-        -> ready runtimed for the requested Runtime
-           -> owning runtimed, directly or through one peer proxy hop
-              -> local Runtime Server
+        -> Kubernetes Service for the requested Runtime
+           -> ready Runtime Pod's runtimed
+              -> owning runtimed, directly or through one peer proxy hop
+                 -> local Runtime Server
 ```
 
-Every runtimed maintains a watch-backed cache for all function Runs assigned to
-its Runtime and namespace:
+Every runtimed maintains a watch-backed cache for function Runs in its Runtime
+and namespace:
 
 ```text
 Run namespace/name/UID -> assigned Pod address -> lifecycle readiness

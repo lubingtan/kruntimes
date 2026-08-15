@@ -189,20 +189,22 @@ The detailed gateway routing and authorization contract is defined in
 All Runtimes share one `runtime-gateway` Deployment and its ClusterIP Service.
 The Helm chart installs them when `gateway.enabled` is true. The gateway
 Deployment runs stateless HTTP servers. A Run endpoint identifies the namespace,
-Runtime, and Run UID; the gateway selects a ready runtimed from that Runtime
-before the runtimed ownership cache selects the owner:
+Runtime, and Run UID; the gateway calls the Kubernetes Service for that Runtime,
+which selects a ready Runtime Pod before runtimed resolves the owner:
 
 ```text
 client
   -> shared runtime-gateway Service
      -> runtime-gateway Pod
-        -> ready runtimed for Runtime=python
-           -> owning runtimed when different
-              -> local Runtime Server
+        -> Kubernetes Service for Runtime=python
+           -> ready Runtime Pod's runtimed
+              -> owning runtimed when different
+                 -> local Runtime Server
 ```
 
-The gateway Service address is stable. Gateway Pods use a Runtime's ready Pod
-set to select ingress runtimed, and each runtimed needs an ownership cache:
+The gateway Service address is stable. Each Runtime controller-created Service
+selects its ready Pods, and each runtimed resolves ownership only for Runs of
+its own Runtime:
 
 ```text
 Run namespace/name/UID -> assigned Runtime Pod UID -> attempt -> readiness

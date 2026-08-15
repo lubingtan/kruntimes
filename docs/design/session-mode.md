@@ -73,28 +73,30 @@ The following terms are distinct:
   `Run.status.endpoint`.
 - **Runtime gateway server** is the HTTP server in each Runtime gateway Pod.
   Kubernetes Services only forward traffic; they cannot translate HTTP requests
-  to gRPC. The gateway server implements the HTTP API and translates each
-  request into an internal `SessionGateway` gRPC call. It maintains only a
-  watch-backed list of ready runtimed endpoints for each Runtime; it does not
-  cache Session ownership or operation state.
-- **runtimed** runs in every Runtime Pod. It implements the versioned
-  `SessionGateway` gRPC service and maintains a watch-backed ownership cache.
-- **Ingress runtimed** is the ready runtimed for the Runtime named in the HTTP
-  request that the gateway server selects for one request. It may or may not
-  own the requested session.
+  to gRPC. The gateway server resolves the current Session Run assignment and
+  sends each request through that Runtime's Kubernetes Service to
+  `SessionRuntime` gRPC. It does not own a session, select Runtime Pods, or
+  queue operations.
+- **Runtime Service** is a ClusterIP Service created for every Runtime by the
+  Runtime controller. It selects that Runtime's ready Pods and exposes the
+  runtimed `session-runtime` port. It is the only Service the gateway uses to
+  reach a Runtime Pod.
+- **runtimed** runs in every Runtime Pod and implements `SessionRuntime` for
+  gateway traffic. A runtimed may receive a request for a session assigned to
+  another Runtime Pod.
 - **Owner runtimed** is the runtimed in the Runtime Pod assigned to the target
   Session Run. It is the only component that owns that session's FIFO queue,
   operation state, idle timer, and local lifecycle.
 - **Runtime Server** is the execution backend colocated with owner runtimed.
-  It implements a separate local-only `SessionRuntime` gRPC service. It never
-  accepts client traffic, authorizes Kubernetes users, routes across Pods, or
-  owns the session queue.
+  It also implements `SessionRuntime`, but accepts calls only from its local
+  runtimed. It never accepts client traffic, authorizes Kubernetes users,
+  routes across Pods, or owns the session queue.
 
 The chart, rather than a controller, owns the gateway Deployment, Service, RBAC,
 replicas, and TLS configuration. Values control whether the component is
-installed and which serving certificate Secret it uses. The gateway watches
-Runtime Pods to discover ready runtimed endpoints, but its Kubernetes resources
-do not change when a Runtime is created, updated, or deleted.
+installed and which serving certificate Secret it uses. The Runtime controller
+creates each Runtime Service; the gateway's Kubernetes resources do not change
+when a Runtime is created, updated, or deleted.
 
 The request path is therefore:
 
@@ -102,54 +104,53 @@ The request path is therefore:
 External client / SDK
   -> Runtime gateway Service (HTTP)
      -> Runtime gateway server in the shared Runtime gateway Deployment
-        -> ingress runtimed (SessionGateway gRPC)
-           -> owner runtimed (only when the ingress runtimed is not the owner)
-           -> local Runtime Server (SessionRuntime gRPC)
+        -> Kubernetes Service for the Session's Runtime
+           -> a ready Runtime Pod's runtimed (SessionRuntime gRPC)
+              -> owner runtimed (only when the first runtimed is not the owner)
+              -> local Runtime Server (SessionRuntime gRPC)
 ```
 
 The Runtime gateway server exposes a versioned TLS HTTP API and receives the
 client's Kubernetes bearer token. Every endpoint path identifies namespace,
-Runtime, and immutable Run UID. The gateway server verifies the requested
-Runtime, selects one ready runtimed from that Runtime's Pod set, and translates
-the HTTP request to a `SessionGateway` gRPC request. The ingress runtimed
-authorizes the caller and uses its ownership cache. If it is not the owner, it
-forwards the same `SessionGateway` RPC once to owner runtimed using
-authenticated Pod-to-Pod transport and a forwarding marker. The owner runtimed
-performs queue admission and invokes its colocated Runtime Server over local
-`SessionRuntime` gRPC.
+Runtime, and immutable Run UID. The gateway server verifies the requested Run,
+derives its `SessionIdentity` from the current assignment, and calls that
+Runtime's Service. Kubernetes routes the call to one ready Runtime Pod. The
+receiving runtimed only lists Runs indexed by its own Runtime name, then verifies
+that the requested Run is still a Session Run with the same assignment. If its
+Pod UID is not the assigned Pod UID, it forwards the same call once to the owner
+runtimed in the same Runtime. A forwarding marker prevents loops. The owner
+runtimed performs queue admission and invokes its colocated Runtime Server over
+local `SessionRuntime` gRPC.
 
-The gateway server maps the following HTTP API operations to `SessionGateway`
+The gateway server maps the following HTTP API operations to `SessionRuntime`
 gRPC methods:
 
-| HTTP API | `SessionGateway` method | Behavior |
+| HTTP API | `SessionRuntime` method | Behavior |
 | --- | --- |
-| `GET /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}` | `GetSession` | return readiness, identity, queue state, and bounded metadata |
-| `POST /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/operations:execute` | `Execute` | enqueue one command operation |
-| `GET /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/operations/{operationID}` | `GetOperation` | return operation state and bounded result |
-| `DELETE /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/operations/{operationID}` | `CancelOperation` | cancel a queued or running operation |
-| `/v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/files` | `ListFiles`, `ReadFile`, `WriteFile`, `DeleteFile`, `RenameFile` | workspace-relative file operations with bounded transfer sizes |
-| `GET /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/logs` | `StreamLogs` | stream session and operation structured log events |
+| `GET /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}` | `GetSessionStatus` | return readiness and bounded session metadata |
+| `POST /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/operations:execute` | `ExecuteSessionOperation` | execute one command or file mutation |
+| `GET /v1/namespaces/{namespace}/runtimes/{runtime}/sessions/{runUID}/files` | `ReadSessionFile`, `ListSessionFiles` | bounded workspace-relative file access |
 
 An exec request supplies exactly one of `argv` or `shell`. `argv` directly
 executes a program. `shell` deliberately opts into the Runtime's shell. Both
 support bounded stdin, a relative working directory, bounded environment
 overrides, and an operation timeout.
 
-Each mutating request returns an operation ID. All commands and file mutations
-are ordered through one FIFO queue per session:
+Owner runtimed serializes commands and file mutations through one FIFO queue
+per session:
 
 ```text
 Queued -> Running -> Succeeded | Failed | Cancelled | TimedOut
 ```
 
-Only one mutation runs at a time. Read/list/status/log requests do not enter
-the queue. The effective queue size is the minimum of `mode.session.queueSize`
+Only one mutation runs at a time. Read/list/status requests do not enter the
+queue. The effective queue size is the minimum of `mode.session.queueSize`
 and a runtimed-configured global maximum. The initial global maximum is 32;
 the initial operation default and maximum are five minutes, and graceful
 termination waits ten seconds. Administrators may configure lower or higher
 global limits; a Run may only reduce its queue size or operation timeout.
 
-When a session closes, runtimed rejects new operations, cancels queued work,
+When a session closes, owner runtimed rejects new operations, cancels queued work,
 sends termination to the running process group, waits the grace period, then
 force-kills it if necessary.
 
@@ -161,11 +162,13 @@ limited to 32 MiB; larger durable results use ArtifactStore.
 
 Owner runtimed owns queue admission, operation lifecycle, Run status updates,
 capacity release, and structured audit logs. Runtime Server owns local
-workspace confinement, process groups, and local session state through an
-internal gRPC `SessionRuntime` contract. runtimed alone owns the session queue
-and operation state, so a Runtime Server never independently reorders work.
+workspace confinement, process groups, and local session state. Both hops use
+the same gRPC `SessionRuntime` messages: runtimed implements the service for
+gateway traffic and proxies an accepted owner request to its local Runtime
+Server. runtimed alone owns the session queue and operation state, so a Runtime
+Server never independently reorders work.
 
-The contract is local to a Runtime Pod and is not exposed through the gateway:
+The `SessionRuntime` method set is:
 
 ```proto
 service SessionRuntime {
@@ -179,27 +182,29 @@ service SessionRuntime {
 }
 ```
 
-Every request includes the immutable Run UID and assignment identity. Only the
-owning local runtimed may call this contract. `RegisterSession` receives the
-prepared workspace path and immutable source inputs; it is idempotent for the
-same identity. `ExecuteSessionOperation` contains exactly one `oneof` payload:
-a command, file write, directory creation, delete, or rename. runtimed assigns
-the operation ID and admits that mutation to its session queue before making
-this local call. Its request context carries the command timeout; cancellation
-terminates the matching process group. The read and list RPCs are synchronous,
-bounded, and do not enter the mutation queue. Runtime Server methods do not
-allocate operation IDs or queue requests. `CloseSession` is idempotent and
-removes local session state after runtimed has rejected new gateway operations.
+Every request includes the immutable Run UID and assignment identity. The
+gateway server derives that identity from the current Run assignment; it is not
+client-controlled HTTP input. A receiving runtimed either forwards the request
+to the owner or, when it is the owner, applies queue admission before calling
+its local Runtime Server. `RegisterSession` receives the prepared workspace
+path and immutable source inputs; it is idempotent for the same identity.
+`ExecuteSessionOperation` contains exactly one `oneof` payload: a command,
+file write, directory creation, delete, or rename. Its request context carries
+the command timeout; cancellation terminates the matching process group. Read
+and list RPCs are synchronous, bounded, and do not enter the mutation queue.
+The local Runtime Server does not route requests or allocate operation state.
+`CloseSession` is idempotent and removes local state after owner runtimed has
+rejected new gateway operations.
 
-This preserves the current architecture: external clients invoke HTTP through
-the shared Runtime gateway Service and never reach either internal gRPC service
-directly. The gateway server translates HTTP to `SessionGateway`; owner
-runtimed translates accepted requests to local `SessionRuntime` calls.
+External clients invoke HTTP through the shared Runtime gateway Service and
+never reach a Runtime Server directly. The gateway server calls the target
+Runtime Service's `SessionRuntime` endpoint; owner runtimed proxies accepted
+requests to its local Runtime Server.
 
 The public Session API does not expose a Runtime backend choice. The v0 backend
 is one trusted container session per Runtime Pod. A future Runtime implementation
 may multiplex multiple sessions in a worker Pod through gVisor or microVM
-actors without changing the Run or `SessionGateway` API. This follows the useful
+actors without changing the Run or `SessionRuntime` API. This follows the useful
 actor-versus-worker separation demonstrated by Agent Substrate, without making
 its snapshotting or multiplexing model a v0 dependency.
 
@@ -210,8 +215,8 @@ untrusted LLM-generated code. Runtime Pod templates remain responsible for
 image pinning, ServiceAccount, resource limits, security context, and network
 policy. v1.0 must provide at least one secure session backend, initially gVisor.
 
-Every operation emits structured external logs keyed by Run UID, session ID,
-operation ID, type, timestamps, result, exit code, and truncation metadata.
+Every operation emits structured external logs keyed by Run UID, session
+identity, type, timestamps, result, exit code, and truncation metadata.
 Command history, file contents, stdout, stderr, and high-frequency events are
 not written to `Run.status`. ArtifactStore remains the durable path for large
 outputs and exports.

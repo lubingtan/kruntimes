@@ -53,7 +53,14 @@ func TestBuildDeploymentAddsCapacityAnnotationsAndWorkers(t *testing.T) {
 	if !slices.Contains(daemon.Args, "--runtime-name=bash") {
 		t.Fatalf("daemon args = %v, want runtime name", daemon.Args)
 	}
-	if len(daemon.Ports) != 1 || daemon.Ports[0].Name != "health" || daemon.Ports[0].ContainerPort != 9094 {
+	if !slices.ContainsFunc(daemon.Ports, func(port corev1.ContainerPort) bool {
+		return port.Name == "session-runtime" && port.ContainerPort == 9093 && port.Protocol == corev1.ProtocolTCP
+	}) {
+		t.Fatalf("daemon ports = %v, want session-runtime port 9093", daemon.Ports)
+	}
+	if !slices.ContainsFunc(daemon.Ports, func(port corev1.ContainerPort) bool {
+		return port.Name == "health" && port.ContainerPort == 9094 && port.Protocol == corev1.ProtocolTCP
+	}) {
 		t.Fatalf("daemon ports = %v, want health port 9094", daemon.Ports)
 	}
 	if daemon.LivenessProbe == nil ||
@@ -86,6 +93,83 @@ func TestBuildDeploymentAddsCapacityAnnotationsAndWorkers(t *testing.T) {
 		if container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != corev1.Capability("ALL") {
 			t.Fatalf("container %s capabilities = %#v, want drop ALL", container.Name, container.SecurityContext.Capabilities)
 		}
+	}
+}
+
+func TestBuildServiceRoutesToRuntimeSessionPort(t *testing.T) {
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "workloads"},
+		Spec: v1alpha1.RuntimeSpec{
+			Template: runtimePodTemplate("python-runtime:latest"),
+		},
+	}
+
+	service := (&RuntimeReconciler{}).buildService(rt)
+	if service.Name != "runtime-python" || service.Namespace != "workloads" {
+		t.Fatalf("service metadata = %s/%s, want workloads/runtime-python", service.Namespace, service.Name)
+	}
+	wantSelector := map[string]string{runtimeLabel: "python", "app": "kruntimes-python"}
+	if !maps.Equal(service.Spec.Selector, wantSelector) {
+		t.Fatalf("service selector = %v, want %v", service.Spec.Selector, wantSelector)
+	}
+	if service.Spec.Type != corev1.ServiceTypeClusterIP || len(service.Spec.Ports) != 1 {
+		t.Fatalf("service spec = %#v, want one ClusterIP port", service.Spec)
+	}
+	port := service.Spec.Ports[0]
+	if port.Name != "session-runtime" || port.Port != 9093 || port.TargetPort != intstr.FromString("session-runtime") || port.Protocol != corev1.ProtocolTCP {
+		t.Fatalf("service port = %#v, want session-runtime -> 9093", port)
+	}
+}
+
+func TestReconcileServicePreservesClusterIP(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "default", UID: "runtime-uid"},
+		Spec:       v1alpha1.RuntimeSpec{Template: runtimePodTemplate("bash-runtime:latest")},
+	}
+	reconciler := &RuntimeReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(rt).Build(),
+		Scheme: scheme,
+	}
+
+	desired := reconciler.buildService(rt)
+	changed, err := reconciler.reconcileService(t.Context(), rt, desired)
+	if err != nil || !changed {
+		t.Fatalf("create service = (%v, %v), want (true, nil)", changed, err)
+	}
+
+	var existing corev1.Service
+	key := client.ObjectKeyFromObject(desired)
+	if err := reconciler.Get(t.Context(), key, &existing); err != nil {
+		t.Fatal(err)
+	}
+	existing.Spec.ClusterIP = "10.0.0.42"
+	if err := reconciler.Update(t.Context(), &existing); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err = reconciler.reconcileService(t.Context(), rt, reconciler.buildService(rt))
+	if err != nil || changed {
+		t.Fatalf("reconcile unchanged service = (%v, %v), want (false, nil)", changed, err)
+	}
+
+	updated := reconciler.buildService(rt)
+	updated.Spec.Ports[0].Port = 9443
+	changed, err = reconciler.reconcileService(t.Context(), rt, updated)
+	if err != nil || !changed {
+		t.Fatalf("update service = (%v, %v), want (true, nil)", changed, err)
+	}
+	if err := reconciler.Get(t.Context(), key, &existing); err != nil {
+		t.Fatal(err)
+	}
+	if existing.Spec.ClusterIP != "10.0.0.42" || existing.Spec.Ports[0].Port != 9443 {
+		t.Fatalf("service = %#v, want preserved ClusterIP and updated port", existing.Spec)
 	}
 }
 

@@ -58,6 +58,7 @@ type RuntimeReconciler struct {
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch
@@ -79,6 +80,7 @@ func (r *RuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	serviceAccount := r.buildRuntimedServiceAccount(&rt, runtimedServiceAccountName)
 	role := r.buildRuntimedRole(&rt)
 	roleBinding := r.buildRuntimedRoleBinding(&rt, runtimedServiceAccountName)
+	service := r.buildService(&rt)
 	deploy := r.buildDeployment(&rt)
 	networkPolicy := r.buildNetworkPolicy(&rt)
 
@@ -98,6 +100,12 @@ func (r *RuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled runtimed RoleBinding", "roleBinding", roleBinding.Name)
+		return ctrl.Result{}, nil
+	}
+	if changed, err := r.reconcileService(ctx, &rt, service); err != nil {
+		return ctrl.Result{}, err
+	} else if changed {
+		log.Info("Reconciled Runtime Service", "service", service.Name)
 		return ctrl.Result{}, nil
 	}
 	if changed, err := r.reconcileDeployment(ctx, &rt, deploy); err != nil {
@@ -127,6 +135,30 @@ func (r *RuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func (r *RuntimeReconciler) buildService(rt *v1alpha1.Runtime) *corev1.Service {
+	selectorLabels := map[string]string{
+		runtimeLabel: rt.Name,
+		"app":        "kruntimes-" + rt.Name,
+	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "runtime-" + rt.Name,
+			Namespace: rt.Namespace,
+			Labels:    selectorLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: selectorLabels,
+			Ports: []corev1.ServicePort{{
+				Name:       "session-runtime",
+				Port:       9093,
+				TargetPort: intstr.FromString("session-runtime"),
+				Protocol:   corev1.ProtocolTCP,
+			}},
+		},
+	}
 }
 
 func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deployment {
@@ -225,6 +257,7 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 			"--status-addr=:9093",
 		},
 		Ports: []corev1.ContainerPort{
+			{Name: "session-runtime", ContainerPort: 9093, Protocol: corev1.ProtocolTCP},
 			{Name: "health", ContainerPort: 9094, Protocol: corev1.ProtocolTCP},
 		},
 		LivenessProbe: &corev1.Probe{
@@ -665,11 +698,49 @@ func (r *RuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.Runtime{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(&corev1.ServiceAccount{}, handler.EnqueueRequestsFromMapFunc(r.runtimesForRuntimedRBAC)).
 		Watches(&rbacv1.Role{}, handler.EnqueueRequestsFromMapFunc(r.runtimesForRuntimedRBAC)).
 		Watches(&rbacv1.RoleBinding{}, handler.EnqueueRequestsFromMapFunc(r.runtimesForRuntimedRBAC)).
 		Complete(r)
+}
+
+func (r *RuntimeReconciler) reconcileService(
+	ctx context.Context,
+	rt *v1alpha1.Runtime,
+	desired *corev1.Service,
+) (bool, error) {
+	var existing corev1.Service
+	if err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("get service: %w", err)
+		}
+		if err := controllerutil.SetControllerReference(rt, desired, r.Scheme); err != nil {
+			return false, fmt.Errorf("set service owner ref: %w", err)
+		}
+		if err := r.Create(ctx, desired); err != nil {
+			return false, fmt.Errorf("create service: %w", err)
+		}
+		return true, nil
+	}
+	if equality.Semantic.DeepEqual(existing.Labels, desired.Labels) &&
+		equality.Semantic.DeepEqual(existing.Spec.Selector, desired.Spec.Selector) &&
+		equality.Semantic.DeepEqual(existing.Spec.Ports, desired.Spec.Ports) &&
+		existing.Spec.Type == desired.Spec.Type {
+		return false, nil
+	}
+	existing.Labels = desired.Labels
+	existing.Spec.Selector = desired.Spec.Selector
+	existing.Spec.Ports = desired.Spec.Ports
+	existing.Spec.Type = desired.Spec.Type
+	if err := controllerutil.SetControllerReference(rt, &existing, r.Scheme); err != nil {
+		return false, fmt.Errorf("set service owner ref: %w", err)
+	}
+	if err := r.Update(ctx, &existing); err != nil {
+		return false, fmt.Errorf("update service: %w", err)
+	}
+	return true, nil
 }
 
 func (r *RuntimeReconciler) reconcileDeployment(

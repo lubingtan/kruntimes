@@ -187,17 +187,17 @@ wiring from accumulating avoidable conflicts.
     recovery, and cleanup.
 - [ ] Runtime gateway invoke path: add an optional shared `runtime-gateway`
   Deployment and ClusterIP Service to the Helm chart. The gateway exposes the
-  stable HTTP Run endpoint, selects a ready runtimed for the Runtime named in
-  the request, and relies on runtimed's in-memory ownership/readiness cache
-  instead of synchronous Kubernetes API reads on the invoke path.
+  stable HTTP Run endpoint, resolves the requested Run, and calls the
+  Kubernetes Service for its Runtime. Kubernetes selects a ready Runtime Pod;
+  runtimed resolves ownership only within that Runtime.
   Initial implementation TODO:
   - [ ] add Helm templates, `gateway.enabled`, values, RBAC, and smoke coverage
     for the shared gateway Deployment, ClusterIP Service, dedicated runtimed
     gRPC port, and HTTP-to-gRPC adapter;
   - [ ] define chart-managed TLS configuration for an existing Secret and
     optional cert-manager integration;
-  - [ ] implement watch-backed ownership/readiness caches and bounded local or
-    single-hop peer routing;
+  - [ ] implement Runtime-scoped Run lookup and bounded local or single-hop
+    peer routing;
   - [ ] fence registration epochs before stale-pod reassignment and reject
     mismatched Run UID, attempt, or assigned Pod UID;
   - [ ] authorize callers through Kubernetes SelfSubjectAccessReview with a
@@ -207,7 +207,8 @@ wiring from accumulating avoidable conflicts.
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
   The accepted [Session Mode design](design/session-mode.md) uses
   `Run.spec.mode.session`, an HTTP API translated by the shared gateway to the
-  internal `SessionGateway` gRPC service, and a v0 trusted container backend.
+  `SessionRuntime` gRPC service exposed by runtimed, and a v0 trusted container
+  backend.
   A Session Run is exclusive through its dedicated `runs: 1` Runtime and the
   runtimed local claim gate, ephemeral, and
   terminates on assigned Pod loss rather than silently resuming on a new Pod.
@@ -222,7 +223,7 @@ wiring from accumulating avoidable conflicts.
     workspace-constrained commands, file operations, process groups, and
     operation status;
   - [ ] add the authenticated versioned Session HTTP API to the shared gateway,
-    HTTP-to-`SessionGateway` translation, bounded responses, and streamed
+    HTTP-to-`SessionRuntime` translation, bounded responses, and streamed
     structured logs;
   - [ ] implement the per-session FIFO mutation queue: one active command or
     file mutation, global and per-Run bounds, default/max operation timeout,

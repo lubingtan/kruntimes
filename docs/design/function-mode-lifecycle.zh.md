@@ -196,7 +196,7 @@ finalizer path。两种操作在 controller 和 runtimed restart 后都必须保
 Helm chart 可选安装一个面向所有 Runtime 的共享 `runtime-gateway` Deployment 和 ClusterIP Service。
 `gateway.enabled` 控制是否安装。Deployment 运行 stateless HTTP gateway server。Service 只将 client
 traffic 转发给 gateway Pod，绝不直接转发到 Runtime Pod。gateway server 从 endpoint path 读取
-namespace、Runtime 和 Run UID，为该 Runtime 在专用 gRPC port 上选择一个 ready runtimed，并将 HTTP
+namespace、Runtime 和 Run UID，经该 Runtime 的 Kubernetes Service 调用其专用 gRPC port，并将 HTTP
 invoke request 转换为内部 runtimed gRPC request。
 
 Chart values 配置 replicas、RBAC 和挂载到 gateway Pod 的 serving certificate Secret。Certificate 覆盖
@@ -207,9 +207,10 @@ Secret 或 optional cert-manager chart resource；Runtime controller 不管理 g
 client
   -> shared runtime-gateway Service
      -> runtime-gateway Pod
-        -> requested Runtime 的 ready runtimed
-           -> owning runtimed（直接到达或经过一次 peer proxy）
-              -> local Runtime Server
+        -> requested Runtime 的 Kubernetes Service
+           -> ready Runtime Pod 的 runtimed
+              -> owning runtimed（直接到达或经过一次 peer proxy）
+                 -> local Runtime Server
 ```
 
 每个 runtimed 为其 Runtime 和 namespace 中所有 assigned function Runs 维护 watch-backed

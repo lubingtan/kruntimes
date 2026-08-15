@@ -161,16 +161,15 @@ controller wiring 累积不必要的冲突。
   - [ ] 覆盖 function registration、ready status、local/proxied invoke、多次 invocation、
     idle timeout、explicit release、Runtime Pod restart recovery 和 cleanup。
 - [ ] Runtime gateway invoke path：在 Helm chart 中增加可选的共享 `runtime-gateway`
-  Deployment 和 ClusterIP Service。gateway 暴露稳定的 HTTP Run endpoint，为 request 中指定的
-  Runtime 选择一个 ready runtimed，并在 invoke path 上依赖 runtimed 的内存 ownership/readiness
-  cache，而不是同步读取 Kubernetes API。
+  Deployment 和 ClusterIP Service。gateway 暴露稳定的 HTTP Run endpoint，解析目标 Run，并调用
+  其 Runtime 的 Kubernetes Service。Kubernetes 选择 ready Runtime Pod；runtimed 只在该 Runtime
+  内解析 owner。
   初始实现 TODO：
   - [ ] 为共享 gateway Deployment、ClusterIP Service、专用 runtimed gRPC port 和
     HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 和 smoke coverage；
   - [ ] 定义 chart-managed TLS configuration，支持 existing Secret 和 optional cert-manager
     integration；
-  - [ ] 实现 watch-backed ownership/readiness caches，以及有界 local 或 single-hop peer
-    routing；
+  - [ ] 实现 Runtime-scoped Run lookup，以及有界 local 或 single-hop peer routing；
   - [ ] 在 stale-pod reassignment 前 fence registration epoch，并拒绝 Run UID、attempt 或
     assigned Pod UID mismatch；
   - [ ] 通过 Kubernetes SelfSubjectAccessReview 和有界 decision cache authorize caller；
@@ -178,7 +177,7 @@ controller wiring 累积不必要的冲突。
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
   [Session Mode 设计](design/session-mode.zh.md) 使用 `Run.spec.mode.session`、由共享 gateway
-  转换为内部 `SessionGateway` gRPC service 的 HTTP API 与 v0 trusted container backend。Session Run 通过专用 `runs: 1` Runtime 与
+  转换为 runtimed 暴露的 `SessionRuntime` gRPC service 的 HTTP API 与 v0 trusted container backend。Session Run 通过专用 `runs: 1` Runtime 与
   runtimed 本地 claim 门控实现独占，ephemeral；assigned Pod 丢失时终止，而不是在新 Pod 上静默恢复。
   初始实现 TODO：
   - [x] review 并确认 API、lifecycle、queue、data-plane、security 和 future-backend 设计；
@@ -188,7 +187,7 @@ controller wiring 累积不必要的冲突。
     session，并将 Run transition 到 `Ready`；
   - [ ] 实现内部 `SessionRuntime` contract，覆盖 lifecycle、workspace-constrained commands、
     file operations、process groups 和 operation status；
-  - [ ] 在共享 gateway 增加 authenticated versioned Session HTTP API、HTTP-to-`SessionGateway`
+  - [ ] 在共享 gateway 增加 authenticated versioned Session HTTP API、HTTP-to-`SessionRuntime`
     translation、有界 response 和 streamed structured logs；
   - [ ] 实现每个 session 的 FIFO mutation queue：每次一个 active command 或 file mutation、
     global 与 per-Run bounds、默认/最大 operation timeout、cancellation 和 graceful termination；

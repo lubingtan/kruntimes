@@ -1603,9 +1603,9 @@ func (x *SessionStatus) GetFatalError() string {
 	return ""
 }
 
-// ExecuteSessionOperationRequest carries exactly one mutation. runtimed has
-// already chosen its operation ID, serialized it in the session queue, and
-// applied any policy before calling the local Runtime Server.
+// ExecuteSessionOperationRequest carries exactly one mutation. Owner runtimed
+// serializes it in the session queue and applies policy before calling the
+// local Runtime Server.
 type ExecuteSessionOperationRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Immutable assignment identity for the Session Run receiving this operation.

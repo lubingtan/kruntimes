@@ -111,6 +111,16 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Run{}, "spec.runtime", func(object client.Object) []string {
+		run, ok := object.(*v1alpha1.Run)
+		if !ok || run.Spec.Runtime == "" {
+			return nil
+		}
+		return []string{run.Spec.Runtime}
+	}); err != nil {
+		setupLog.Error(err, "unable to index Runs by Runtime")
+		os.Exit(1)
+	}
 	runtimeHealthConn, err := grpc.NewClient(
 		runtimeEndpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -194,16 +204,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start status proxy for krt logs.
+	// Start gRPC proxies for logs, artifacts, and SessionRuntime requests.
 	go func() {
-		if err := runtimed.StartRuntimeServices(
+		if err := runtimed.StartRuntimeProxyServer(
 			ctx,
 			runtimeEndpoint,
 			statusAddr,
 			mgr.GetAPIReader(),
+			mgr.GetCache(),
 			artifactStore,
 			runtimeNamespace,
 			runtimeName,
+			podName,
 		); err != nil {
 			klog.Errorf("Status proxy: %v", err)
 		}
