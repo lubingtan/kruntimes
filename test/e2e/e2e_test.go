@@ -633,6 +633,11 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	if string(file.Contents) != "gateway-file" {
 		t.Fatalf("Session file contents = %q, want gateway-file", file.Contents)
 	}
+
+	requestRunCancel(t, run)
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
+	assertCancelledRun(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
 }
 
 func containsSessionFile(entries []struct {
