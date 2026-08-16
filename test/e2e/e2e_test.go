@@ -606,6 +606,7 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "gateway-ok" {
 		t.Fatalf("Session command result = %#v, want successful gateway-ok output", operation.Command)
 	}
+	waitForSessionCommandLogs(t, run, "gateway-ok")
 
 	writePayload := []byte(`{"writeFile":{"path":"notes/result.txt","contents":"Z2F0ZXdheS1maWxl","createParents":true}}`)
 	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, writePayload, http.StatusOK)
@@ -667,6 +668,51 @@ func containsSessionFile(entries []struct {
 		}
 	}
 	return false
+}
+
+func waitForSessionCommandLogs(t *testing.T, run *v1alpha1.Run, message string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		stream, err := coreClientset.CoreV1().Pods(run.Namespace).GetLogs(run.Status.AssignedPod, &corev1.PodLogOptions{Container: "runtimed"}).Stream(ctx)
+		if err == nil {
+			contents, readErr := io.ReadAll(stream)
+			_ = stream.Close()
+			if readErr == nil && containsSessionCommandLogs(string(contents), string(run.UID), message) {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for structured Session logs for Run %s", run.Name)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func containsSessionCommandLogs(contents, runUID, message string) bool {
+	stdoutFound := false
+	auditFound := false
+	for _, raw := range strings.Split(strings.TrimSuffix(contents, "\n"), "\n") {
+		var line struct {
+			RunUID    string `json:"run_uid"`
+			Stream    string `json:"stream"`
+			Message   string `json:"message"`
+			Operation string `json:"operation"`
+			Outcome   string `json:"outcome"`
+		}
+		if json.Unmarshal([]byte(raw), &line) != nil || line.RunUID != runUID || line.Operation != "command" || line.Outcome != "succeeded" {
+			continue
+		}
+		if line.Stream == "stdout" && line.Message == message {
+			stdoutFound = true
+		}
+		if line.Stream == "audit" && line.Message == "session operation completed" {
+			auditFound = true
+		}
+	}
+	return stdoutFound && auditFound
 }
 
 func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {

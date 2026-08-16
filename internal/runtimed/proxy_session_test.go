@@ -1,9 +1,12 @@
 package runtimed
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -42,6 +45,67 @@ func TestSessionRuntimeProxyCallsLocalRuntimeServerForOwner(t *testing.T) {
 	if string(response.GetCommand().GetStdout()) != "done" {
 		t.Fatalf("stdout = %q, want done", response.GetCommand().GetStdout())
 	}
+}
+
+func TestSessionRuntimeProxyEmitsStructuredCommandAndAuditLogs(t *testing.T) {
+	run := proxySessionRun("session-run", "bash", "pod-a", "pod-a-uid")
+	reader := newSessionProxyReader(t, run)
+	local := &sessionRuntimeClient{execute: func(_ context.Context, _ *pb.ExecuteSessionOperationRequest) (*pb.ExecuteSessionOperationResponse, error) {
+		return &pb.ExecuteSessionOperationResponse{Command: &pb.SessionCommandResult{
+			ExitCode: 7,
+			Stdout:   []byte("first\nsecond\n"),
+			Stderr:   []byte("problem\n"),
+		}}, nil
+	}}
+	proxy := newSessionRuntimeProxy(reader, local, run.Namespace, "bash", "pod-a", "9093")
+	var output bytes.Buffer
+	proxy.logWriter = &output
+
+	_, err := proxy.ExecuteSessionOperation(t.Context(), &pb.ExecuteSessionOperationRequest{
+		Identity:  &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: "pod-a-uid"},
+		Operation: &pb.ExecuteSessionOperationRequest_Command{Command: &pb.SessionCommand{Argv: []string{"sh", "-c", "secret command"}}},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteSessionOperation() error = %v", err)
+	}
+
+	lines := decodeSessionLogLines(t, output.String())
+	if len(lines) != 4 {
+		t.Fatalf("log lines = %#v, want stdout x2, stderr, audit", lines)
+	}
+	for i, line := range lines {
+		if line.RunUID != string(run.UID) || line.AssignedPodUID != run.Status.AssignedPodUID || line.RunName != run.Name || line.Namespace != run.Namespace || line.Runtime != run.Spec.Runtime || line.Pod != "pod-a" {
+			t.Fatalf("line %d metadata = %#v", i, line)
+		}
+		if line.Operation != "command" || line.Outcome != "failed" || line.ExitCode == nil || *line.ExitCode != 7 {
+			t.Fatalf("line %d operation metadata = %#v", i, line)
+		}
+	}
+	if lines[0].Stream != "stdout" || lines[0].Message != "first" || lines[1].Stream != "stdout" || lines[1].Message != "second" {
+		t.Fatalf("stdout lines = %#v", lines[:2])
+	}
+	if lines[2].Stream != "stderr" || lines[2].Message != "problem" {
+		t.Fatalf("stderr line = %#v", lines[2])
+	}
+	if lines[3].Stream != "audit" || lines[3].Message != "session operation completed" {
+		t.Fatalf("audit line = %#v", lines[3])
+	}
+	if strings.Contains(output.String(), "secret command") {
+		t.Fatalf("logs must not contain command text: %s", output.String())
+	}
+}
+
+func decodeSessionLogLines(t *testing.T, output string) []executionLogLine {
+	t.Helper()
+	var lines []executionLogLine
+	for _, raw := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		var line executionLogLine
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("decode log line %q: %v", raw, err)
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 func TestSessionRuntimeProxyForwardsToAssignedRuntimePod(t *testing.T) {

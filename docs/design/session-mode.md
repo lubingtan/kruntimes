@@ -219,11 +219,14 @@ untrusted LLM-generated code. Runtime Pod templates remain responsible for
 image pinning, ServiceAccount, resource limits, security context, and network
 policy. v1.0 must provide at least one secure session backend, initially gVisor.
 
-Every operation emits structured external logs keyed by Run UID, session
-identity, type, timestamps, result, exit code, and truncation metadata.
-Command history, file contents, stdout, stderr, and high-frequency events are
-not written to `Run.status`. ArtifactStore remains the durable path for large
-outputs and exports.
+Owner runtimed emits structured JSONL container logs for every session mutation.
+Lines are keyed by Run UID, assignment identity, type, timestamps, result, and
+exit code; bounded command output uses the existing `stdout` and `stderr`
+streams, while a separate `audit` line omits command text, stdin, and file
+contents. kruntimes does not retain these logs: Kubernetes log collectors such
+as Fluent Bit own persistence and export. Command history, file contents,
+stdout, stderr, and high-frequency events are not written to `Run.status`.
+ArtifactStore remains the durable path for large outputs and exports.
 
 ## Non-Goals
 

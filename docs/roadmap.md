@@ -225,7 +225,9 @@ wiring from accumulating avoidable conflicts.
     operation status;
   - [x] add the authenticated versioned Session HTTP API to the shared gateway,
     HTTP-to-`SessionRuntime` translation, and bounded request/response handling;
-  - [ ] stream structured Session logs through the gateway;
+  - [x] emit structured Session output and audit logs from owner runtimed for
+    existing Kubernetes log collectors and `krt logs`; do not create a separate
+    gateway log store;
   - [ ] implement the per-session FIFO mutation queue: one active command or
     file mutation, global and per-Run bounds, default/max operation timeout,
     cancellation, and graceful termination;

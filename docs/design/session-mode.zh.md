@@ -175,9 +175,11 @@ v0 session 是 **trusted-workload preview**，不是 untrusted LLM-generated cod
 Runtime Pod template 仍负责 image pinning、ServiceAccount、resource limits、security context 与
 network policy。v1.0 必须至少提供一种 secure session backend，初始目标为 gVisor。
 
-每个 operation 向外部日志输出带 Run UID、session identity、type、timestamps、result、
-exit code 与 truncation metadata 的 structured event。command history、file contents、stdout、stderr
-和 high-frequency event 不写入 `Run.status`。ArtifactStore 是大输出与 export 的 durable 路径。
+owner runtimed 会为每个 session mutation 输出 structured JSONL container logs，包含 Run UID、assignment identity、
+type、timestamps、result 和 exit code。bounded command output 使用已有的 `stdout` 与
+`stderr` stream；独立的 `audit` line 不包含 command text、stdin 或 file contents。kruntimes 不持久化
+这些日志，Kubernetes log collector（例如 Fluent Bit）负责持久化和导出。command history、file contents、
+stdout、stderr 与 high-frequency event 不写入 `Run.status`。ArtifactStore 是大输出与 export 的 durable path。
 
 ## 非目标
 

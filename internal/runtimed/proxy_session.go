@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"strings"
+	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -38,6 +42,8 @@ type sessionRuntimeProxy struct {
 	statusPort  string
 	operations  *SessionOperationQueue
 	dialPeer    func(context.Context, string) (pb.SessionRuntimeClient, io.Closer, error)
+	logWriter   io.Writer
+	logMu       sync.Mutex
 }
 
 type sessionRoute struct {
@@ -62,6 +68,7 @@ func newSessionRuntimeProxy(
 		statusPort:  statusPort,
 		operations:  NewSessionOperationQueue(0, 0),
 		dialPeer:    dialSessionRuntimePeer,
+		logWriter:   os.Stdout,
 	}
 }
 
@@ -83,9 +90,109 @@ func (s *sessionRuntimeProxy) ExecuteSessionOperation(ctx context.Context, req *
 	if !route.owner {
 		return route.client.ExecuteSessionOperation(route.ctx, req)
 	}
-	return s.operations.Execute(route.ctx, route.run, func(operationCtx context.Context) (*pb.ExecuteSessionOperationResponse, error) {
+	started := time.Now()
+	response, operationErr := s.operations.Execute(route.ctx, route.run, func(operationCtx context.Context) (*pb.ExecuteSessionOperationResponse, error) {
 		return route.client.ExecuteSessionOperation(operationCtx, req)
 	})
+	s.emitSessionOperationLog(route.run, req, response, operationErr, time.Since(started))
+	return response, operationErr
+}
+
+func (s *sessionRuntimeProxy) emitSessionOperationLog(
+	run *v1alpha1.Run,
+	request *pb.ExecuteSessionOperationRequest,
+	response *pb.ExecuteSessionOperationResponse,
+	operationErr error,
+	duration time.Duration,
+) {
+	if run == nil || s.logWriter == nil {
+		return
+	}
+	operation := sessionOperationName(request)
+	outcome, statusCode := sessionOperationOutcome(response, operationErr)
+	var exitCode *int32
+	timedOut := false
+	if command := response.GetCommand(); command != nil {
+		exitCode = &command.ExitCode
+		timedOut = command.TimedOut
+	}
+
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if command := response.GetCommand(); command != nil {
+		s.emitSessionStream(run, "stdout", string(command.Stdout), operation, outcome, statusCode, exitCode, timedOut, duration)
+		s.emitSessionStream(run, "stderr", string(command.Stderr), operation, outcome, statusCode, exitCode, timedOut, duration)
+	}
+	audit := executionLogLineFor(run, s.podName, "audit", "session operation completed")
+	audit.Operation = operation
+	audit.Outcome = outcome
+	audit.StatusCode = statusCode
+	audit.ExitCode = exitCode
+	audit.TimedOut = timedOut
+	audit.DurationMilliseconds = duration.Milliseconds()
+	writeExecutionLogLine(s.logWriter, audit)
+}
+
+func (s *sessionRuntimeProxy) emitSessionStream(
+	run *v1alpha1.Run,
+	stream, content, operation, outcome, statusCode string,
+	exitCode *int32,
+	timedOut bool,
+	duration time.Duration,
+) {
+	for _, message := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
+		if message == "" {
+			continue
+		}
+		line := executionLogLineFor(run, s.podName, stream, strings.TrimSuffix(message, "\r"))
+		line.Operation = operation
+		line.Outcome = outcome
+		line.StatusCode = statusCode
+		line.ExitCode = exitCode
+		line.TimedOut = timedOut
+		line.DurationMilliseconds = duration.Milliseconds()
+		writeExecutionLogLine(s.logWriter, line)
+	}
+}
+
+func sessionOperationName(request *pb.ExecuteSessionOperationRequest) string {
+	switch {
+	case request.GetCommand() != nil:
+		return "command"
+	case request.GetWriteFile() != nil:
+		return "write_file"
+	case request.GetCreateDirectory() != nil:
+		return "create_directory"
+	case request.GetDeleteFile() != nil:
+		return "delete_file"
+	case request.GetRenameFile() != nil:
+		return "rename_file"
+	default:
+		return "unknown"
+	}
+}
+
+func sessionOperationOutcome(response *pb.ExecuteSessionOperationResponse, operationErr error) (string, string) {
+	if operationErr != nil {
+		code := status.Code(operationErr)
+		switch code {
+		case codes.Canceled:
+			return "cancelled", code.String()
+		case codes.DeadlineExceeded:
+			return "timed_out", code.String()
+		default:
+			return "failed", code.String()
+		}
+	}
+	if command := response.GetCommand(); command != nil {
+		switch {
+		case command.TimedOut:
+			return "timed_out", ""
+		case command.ExitCode != 0:
+			return "failed", ""
+		}
+	}
+	return "succeeded", ""
 }
 
 func (s *sessionRuntimeProxy) ReadSessionFile(ctx context.Context, req *pb.ReadSessionFileRequest) (*pb.ReadSessionFileResponse, error) {

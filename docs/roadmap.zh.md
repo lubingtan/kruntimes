@@ -190,7 +190,8 @@ controller wiring 累积不必要的冲突。
     file operations、process groups 和 operation status；
   - [x] 在共享 gateway 增加 authenticated versioned Session HTTP API、HTTP-to-`SessionRuntime`
     translation，以及有界 request/response handling；
-  - [ ] 通过 gateway stream structured Session logs；
+  - [x] 由 owner runtimed 为现有 Kubernetes log collector 和 `krt logs` 输出 structured
+    Session output 与 audit logs；不创建单独的 gateway log store；
   - [ ] 实现每个 session 的 FIFO mutation queue：每次一个 active command 或 file mutation、
     global 与 per-Run bounds、默认/最大 operation timeout、cancellation 和 graceful termination；
     - [x] 在 owner runtimed 通过每个 Session 的 FIFO queue 串行 mutation，支持 Run 级 queue/timeout

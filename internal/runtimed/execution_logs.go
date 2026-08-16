@@ -16,13 +16,20 @@ type executionOutput struct {
 }
 
 type executionLogLine struct {
-	RunUID    string `json:"run_uid"`
-	RunName   string `json:"run_name"`
-	Namespace string `json:"namespace"`
-	Runtime   string `json:"runtime"`
-	Pod       string `json:"pod"`
-	Stream    string `json:"stream"`
-	Message   string `json:"message"`
+	RunUID               string `json:"run_uid"`
+	AssignedPodUID       string `json:"assigned_pod_uid,omitempty"`
+	RunName              string `json:"run_name"`
+	Namespace            string `json:"namespace"`
+	Runtime              string `json:"runtime"`
+	Pod                  string `json:"pod"`
+	Stream               string `json:"stream"`
+	Message              string `json:"message"`
+	Operation            string `json:"operation,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	StatusCode           string `json:"status_code,omitempty"`
+	ExitCode             *int32 `json:"exit_code,omitempty"`
+	TimedOut             bool   `json:"timed_out,omitempty"`
+	DurationMilliseconds int64  `json:"duration_milliseconds,omitempty"`
 }
 
 func outputFromStatus(resp *pb.StatusResponse) executionOutput {
@@ -52,19 +59,27 @@ func (c *Controller) emitStream(writer io.Writer, run *v1alpha1.Run, stream, con
 		if message == "" {
 			continue
 		}
-		line := executionLogLine{
-			RunUID:    string(run.UID),
-			RunName:   run.Name,
-			Namespace: run.Namespace,
-			Runtime:   run.Spec.Runtime,
-			Pod:       c.PodName,
-			Stream:    stream,
-			Message:   strings.TrimSuffix(message, "\r"),
-		}
-		encoded, err := json.Marshal(line)
-		if err != nil {
-			continue
-		}
-		_, _ = writer.Write(append(encoded, '\n'))
+		writeExecutionLogLine(writer, executionLogLineFor(run, c.PodName, stream, strings.TrimSuffix(message, "\r")))
 	}
+}
+
+func executionLogLineFor(run *v1alpha1.Run, pod, stream, message string) executionLogLine {
+	return executionLogLine{
+		RunUID:         string(run.UID),
+		AssignedPodUID: run.Status.AssignedPodUID,
+		RunName:        run.Name,
+		Namespace:      run.Namespace,
+		Runtime:        run.Spec.Runtime,
+		Pod:            pod,
+		Stream:         stream,
+		Message:        message,
+	}
+}
+
+func writeExecutionLogLine(writer io.Writer, line executionLogLine) {
+	encoded, err := json.Marshal(line)
+	if err != nil {
+		return
+	}
+	_, _ = writer.Write(append(encoded, '\n'))
 }
