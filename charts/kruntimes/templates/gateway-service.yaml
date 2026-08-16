@@ -1,0 +1,18 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kruntimes.gateway.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kruntimes.gateway.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "kruntimes.gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.servicePort }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

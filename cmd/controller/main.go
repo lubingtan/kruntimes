@@ -48,6 +48,9 @@ func main() {
 		runtimedServiceAccountName               string
 		runtimeMaintainerImage                   string
 		runtimeMaintainerPullSecrets             string
+		gatewayNamespace                         string
+		gatewaySelectorLabels                    string
+		gatewayURL                               string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metric endpoint binds to.")
@@ -62,6 +65,9 @@ func main() {
 	flag.StringVar(&runtimedServiceAccountName, "runtimed-service-account-name", "", "ServiceAccount name injected into Runtime Pods for the runtimed sidecar.")
 	flag.StringVar(&runtimeMaintainerImage, "runtime-maintainer-image", "", "Image containing the long-running runtime maintainer.")
 	flag.StringVar(&runtimeMaintainerPullSecrets, "runtime-maintainer-image-pull-secrets", "", "Comma-separated image pull Secret names for runtime maintainers.")
+	flag.StringVar(&gatewayNamespace, "gateway-namespace", "", "Namespace of the enabled Runtime gateway. Empty keeps Runtime Pod ingress denied.")
+	flag.StringVar(&gatewaySelectorLabels, "gateway-selector-labels", "", "Comma-separated key=value labels selecting Runtime gateway Pods.")
+	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway HTTP base URL written to ready Session Run endpoints.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -122,6 +128,9 @@ func main() {
 		Scheme:                     mgr.GetScheme(),
 		DefaultDaemonImage:         defaultDaemonImage,
 		RuntimedServiceAccountName: runtimedServiceAccountName,
+		GatewayNamespace:           gatewayNamespace,
+		GatewaySelectorLabels:      parseLabels(gatewaySelectorLabels),
+		GatewayURL:                 gatewayURL,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Runtime")
@@ -205,6 +214,21 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func parseLabels(value string) map[string]string {
+	if value == "" {
+		return nil
+	}
+	labels := make(map[string]string)
+	for _, item := range strings.Split(value, ",") {
+		key, labelValue, ok := strings.Cut(item, "=")
+		if !ok || key == "" || labelValue == "" {
+			continue
+		}
+		labels[key] = labelValue
+	}
+	return labels
 }
 
 func localObjectReferences(csv string) []corev1.LocalObjectReference {

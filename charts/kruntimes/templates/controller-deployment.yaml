@@ -70,6 +70,11 @@ spec:
             - --default-daemon-image={{ include "kruntimes.image" (list . .Values.runtimed.image) }}
             - --runtimed-service-account-name={{ include "kruntimes.runtimed.name" . }}
             - --runtime-maintainer-image={{ include "kruntimes.image" (list . .Values.controller.image) }}
+            {{- if .Values.gateway.enabled }}
+            - --gateway-namespace={{ .Release.Namespace }}
+            - --gateway-selector-labels=app.kubernetes.io/name={{ include "kruntimes.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=runtime-gateway
+            - --gateway-url=http://{{ include "kruntimes.gateway.name" . }}.{{ .Release.Namespace }}.svc
+            {{- end }}
             {{- if $runtimeMaintainerPullSecrets }}
             - --runtime-maintainer-image-pull-secrets={{ join "," $runtimeMaintainerPullSecrets }}
             {{- end }}

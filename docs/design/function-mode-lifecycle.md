@@ -66,7 +66,10 @@ Function-mode status gains one stable endpoint reference:
 ```go
 type RunEndpointProtocol string
 
-const RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
+const (
+    RunEndpointProtocolHTTP  RunEndpointProtocol = "HTTP"
+    RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
+)
 
 type RunEndpoint struct {
     Protocol RunEndpointProtocol `json:"protocol"`

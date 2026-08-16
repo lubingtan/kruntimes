@@ -191,17 +191,18 @@ wiring from accumulating avoidable conflicts.
   Kubernetes Service for its Runtime. Kubernetes selects a ready Runtime Pod;
   runtimed resolves ownership only within that Runtime.
   Initial implementation TODO:
-  - [ ] add Helm templates, `gateway.enabled`, values, RBAC, and smoke coverage
-    for the shared gateway Deployment, ClusterIP Service, dedicated runtimed
-    gRPC port, and HTTP-to-gRPC adapter;
+  - [x] add Helm templates, `gateway.enabled`, values, RBAC, a dedicated
+    runtimed gRPC port, HTTP-to-gRPC adapter, and unit/render coverage for the
+    shared gateway Deployment and ClusterIP Service;
   - [ ] define chart-managed TLS configuration for an existing Secret and
     optional cert-manager integration;
-  - [ ] implement Runtime-scoped Run lookup and bounded local or single-hop
+  - [x] implement Runtime-scoped Run lookup and bounded local or single-hop
     peer routing;
-  - [ ] fence registration epochs before stale-pod reassignment and reject
-    mismatched Run UID, attempt, or assigned Pod UID;
-  - [ ] authorize callers through Kubernetes SelfSubjectAccessReview with a
-    bounded decision cache;
+  - [x] fence routing with immutable Run UID and assigned Pod UID, rejecting
+    stale assignments before forwarding;
+  - [x] authenticate caller tokens through Kubernetes TokenReview and authorize
+    the target Run through SubjectAccessReview;
+  - [ ] add a bounded authorization decision cache;
   - [ ] enforce TLS, request, response, concurrency, and proxy-loop limits;
 - [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
@@ -215,16 +216,16 @@ wiring from accumulating avoidable conflicts.
   Initial implementation TODO:
   - [x] review and approve the API, lifecycle, queue, data-plane, security, and
     future-backend design;
-  - [ ] add `Run.spec.mode.session`, validation, generated CRDs, and status
+  - [x] add `Run.spec.mode.session`, validation, generated CRDs, and status
     conditions; reject a Session Run that declares `spec.workspace`;
-  - [ ] initialize source and artifact inputs into a Run-UID-scoped ephemeral
+  - [x] initialize source and artifact inputs into a Run-UID-scoped ephemeral
     workspace, register the session locally, and transition the Run to `Ready`;
-  - [ ] implement the internal `SessionRuntime` contract for lifecycle,
+  - [x] implement the internal `SessionRuntime` contract for lifecycle,
     workspace-constrained commands, file operations, process groups, and
     operation status;
-  - [ ] add the authenticated versioned Session HTTP API to the shared gateway,
-    HTTP-to-`SessionRuntime` translation, bounded responses, and streamed
-    structured logs;
+  - [x] add the authenticated versioned Session HTTP API to the shared gateway,
+    HTTP-to-`SessionRuntime` translation, and bounded request/response handling;
+  - [ ] stream structured Session logs through the gateway;
   - [ ] implement the per-session FIFO mutation queue: one active command or
     file mutation, global and per-Run bounds, default/max operation timeout,
     cancellation, and graceful termination;

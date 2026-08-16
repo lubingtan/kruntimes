@@ -68,6 +68,42 @@ controller:
       cpu: 500m
       memory: 256Mi
 
+gateway:
+  enabled: false
+  image: ghcr.io/kruntimes/gateway
+  imagePullPolicy: IfNotPresent
+  replicas: 2
+  httpBindAddress: ":8084"
+  metricsBindAddress: ":8085"
+  probeBindAddress: ":8086"
+  servicePort: 80
+  httpPort: 8084
+  metricsPort: 8085
+  probePort: 8086
+  podAnnotations: {}
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 runtimed:
   image: ghcr.io/kruntimes/runtimed
 

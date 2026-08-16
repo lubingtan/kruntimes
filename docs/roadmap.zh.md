@@ -165,14 +165,15 @@ controller wiring 累积不必要的冲突。
   其 Runtime 的 Kubernetes Service。Kubernetes 选择 ready Runtime Pod；runtimed 只在该 Runtime
   内解析 owner。
   初始实现 TODO：
-  - [ ] 为共享 gateway Deployment、ClusterIP Service、专用 runtimed gRPC port 和
-    HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 和 smoke coverage；
+  - [x] 为共享 gateway Deployment、ClusterIP Service、专用 runtimed gRPC port 和
+    HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 以及 unit/render coverage；
   - [ ] 定义 chart-managed TLS configuration，支持 existing Secret 和 optional cert-manager
     integration；
-  - [ ] 实现 Runtime-scoped Run lookup，以及有界 local 或 single-hop peer routing；
-  - [ ] 在 stale-pod reassignment 前 fence registration epoch，并拒绝 Run UID、attempt 或
-    assigned Pod UID mismatch；
-  - [ ] 通过 Kubernetes SelfSubjectAccessReview 和有界 decision cache authorize caller；
+  - [x] 实现 Runtime-scoped Run lookup，以及有界 local 或 single-hop peer routing；
+  - [x] 使用 immutable Run UID 和 assigned Pod UID fence routing，在转发前拒绝 stale assignment；
+  - [x] 通过 Kubernetes TokenReview authenticate caller token，并通过 SubjectAccessReview
+    authorize target Run；
+  - [ ] 增加 bounded authorization decision cache；
   - [ ] 执行 TLS、request、response、concurrency 和 proxy-loop limits；
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
@@ -181,14 +182,15 @@ controller wiring 累积不必要的冲突。
   runtimed 本地 claim 门控实现独占，ephemeral；assigned Pod 丢失时终止，而不是在新 Pod 上静默恢复。
   初始实现 TODO：
   - [x] review 并确认 API、lifecycle、queue、data-plane、security 和 future-backend 设计；
-  - [ ] 增加 `Run.spec.mode.session`、validation、generated CRDs 和 status conditions；拒绝
+  - [x] 增加 `Run.spec.mode.session`、validation、generated CRDs 和 status conditions；拒绝
     声明 `spec.workspace` 的 Session Run；
-  - [ ] 将 source 与 artifact inputs 初始化到 Run-UID-scoped ephemeral workspace，在本地注册
+  - [x] 将 source 与 artifact inputs 初始化到 Run-UID-scoped ephemeral workspace，在本地注册
     session，并将 Run transition 到 `Ready`；
-  - [ ] 实现内部 `SessionRuntime` contract，覆盖 lifecycle、workspace-constrained commands、
+  - [x] 实现内部 `SessionRuntime` contract，覆盖 lifecycle、workspace-constrained commands、
     file operations、process groups 和 operation status；
-  - [ ] 在共享 gateway 增加 authenticated versioned Session HTTP API、HTTP-to-`SessionRuntime`
-    translation、有界 response 和 streamed structured logs；
+  - [x] 在共享 gateway 增加 authenticated versioned Session HTTP API、HTTP-to-`SessionRuntime`
+    translation，以及有界 request/response handling；
+  - [ ] 通过 gateway stream structured Session logs；
   - [ ] 实现每个 session 的 FIFO mutation queue：每次一个 active command 或 file mutation、
     global 与 per-Run bounds、默认/最大 operation timeout、cancellation 和 graceful termination；
     - [x] 在 owner runtimed 通过每个 Session 的 FIFO queue 串行 mutation，支持 Run 级 queue/timeout

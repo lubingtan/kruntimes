@@ -73,8 +73,8 @@ activity 后过期。Session 继续使用普通 Run 的 cancellation、deletion�
   `SessionRuntime` gRPC service，但只接受本地 runtimed 的调用；它不接收 client traffic、不 authorize
   Kubernetes user、不跨 Pod 路由，也不拥有 session queue。
 
-chart 而非 controller 拥有 gateway Deployment、Service、RBAC、replicas 和 TLS configuration。values
-控制是否安装该组件以及使用哪个 serving certificate Secret。Runtime controller 创建每个 Runtime
+chart 而非 controller 拥有 gateway Deployment、Service、RBAC 和 replicas。values 控制是否安装该组件。
+TLS termination 与 external exposure 在该 cluster-local Service 之外配置。Runtime controller 创建每个 Runtime
 Service；Runtime 的创建、更新或删除不改变 gateway 自身的 Kubernetes resource。
 
 请求路径如下：
@@ -89,7 +89,7 @@ External client / SDK
               -> local Runtime Server (SessionRuntime gRPC)
 ```
 
-Runtime gateway server 暴露 versioned TLS HTTP API，并接收 client 的 Kubernetes bearer token。
+Runtime gateway server 暴露 versioned HTTP API，并接收 client 的 Kubernetes bearer token。
 每个 endpoint path 标识 namespace、Runtime 和 immutable Run UID。gateway server 验证目标 Run，从当前
 assignment 推导 `SessionIdentity`，再调用该 Runtime 的 Service。Kubernetes 将 call 路由到一个 ready
 Runtime Pod。收到 request 的 runtimed 只列出按自己 Runtime 名称索引的 Run，然后检查目标仍是具有相同

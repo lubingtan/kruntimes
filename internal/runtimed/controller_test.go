@@ -1110,7 +1110,12 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
 	sessionClient := &fakeSessionRuntimeClient{}
-	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient}
+	c := &Controller{
+		Client:     k8sClient,
+		PodName:    "runtime-pod",
+		GatewayURL: "http://kruntimes-gateway.platform.svc/",
+		sessionCli: sessionClient,
+	}
 	ar := newActiveRun(run, time.Now())
 	c.activeRuns.Store(string(run.UID), ar)
 
@@ -1135,6 +1140,9 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	}
 	if updated.Status.Phase != v1alpha1.RunReady {
 		t.Fatalf("phase = %s, want Ready", updated.Status.Phase)
+	}
+	if updated.Status.Endpoint == nil || updated.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTP || updated.Status.Endpoint.URL != "http://kruntimes-gateway.platform.svc/v1/namespaces/default/runtimes/bash/sessions/session-uid" {
+		t.Fatalf("endpoint = %#v", updated.Status.Endpoint)
 	}
 	if condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
 		t.Fatalf("Ready condition = %#v, want true", condition)

@@ -103,6 +103,7 @@ type Controller struct {
 	RuntimeName       string
 	RuntimeNamespace  string
 	RuntimeEndpoint   string
+	GatewayURL        string
 	Workers           int
 	ArtifactStore     artifact.Store
 	ArtifactStoreSpec *v1alpha1.RuntimeArtifactStoreSpec

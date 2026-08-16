@@ -30,11 +30,14 @@ const (
 )
 
 // RunEndpointProtocol identifies the public protocol for invoking a function Run.
-// +kubebuilder:validation:Enum=HTTPS
+// +kubebuilder:validation:Enum=HTTP;HTTPS
 type RunEndpointProtocol string
 
 const (
-	// RunEndpointProtocolHTTPS is the initial public invoke protocol.
+	// RunEndpointProtocolHTTP identifies a plain HTTP gateway endpoint, normally
+	// the cluster-local Runtime gateway Service.
+	RunEndpointProtocolHTTP RunEndpointProtocol = "HTTP"
+	// RunEndpointProtocolHTTPS identifies a TLS-terminated public endpoint.
 	RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
 )
 

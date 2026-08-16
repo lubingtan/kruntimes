@@ -50,6 +50,9 @@ type RuntimeReconciler struct {
 
 	DefaultDaemonImage         string
 	RuntimedServiceAccountName string
+	GatewayNamespace           string
+	GatewaySelectorLabels      map[string]string
+	GatewayURL                 string
 }
 
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runtimes,verbs=get;list;watch;update;patch
@@ -304,6 +307,9 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 		},
 	}
 	daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--runtime-name=%s", name))
+	if r.GatewayURL != "" {
+		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--gateway-url=%s", r.GatewayURL))
+	}
 	if runsCapacity > 0 {
 		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--workers=%d", runsCapacity))
 	}
@@ -510,6 +516,26 @@ func (r *RuntimeReconciler) buildNetworkPolicy(rt *v1alpha1.Runtime) *networking
 		runtimeLabel: rt.Name,
 		"app":        "kruntimes-" + rt.Name,
 	}
+	ingress := []networkingv1.NetworkPolicyIngressRule(nil)
+	if r.GatewayNamespace != "" {
+		ingress = []networkingv1.NetworkPolicyIngressRule{
+			{
+				From: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: &metav1.LabelSelector{MatchLabels: labels},
+				}},
+				Ports: sessionRuntimeNetworkPolicyPorts(),
+			},
+			{
+				From: []networkingv1.NetworkPolicyPeer{{
+					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						"kubernetes.io/metadata.name": r.GatewayNamespace,
+					}},
+					PodSelector: &metav1.LabelSelector{MatchLabels: r.gatewaySelectorLabels()},
+				}},
+				Ports: sessionRuntimeNetworkPolicyPorts(),
+			},
+		}
+	}
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "runtime-" + rt.Name,
@@ -523,8 +549,23 @@ func (r *RuntimeReconciler) buildNetworkPolicy(rt *v1alpha1.Runtime) *networking
 			PolicyTypes: []networkingv1.PolicyType{
 				networkingv1.PolicyTypeIngress,
 			},
+			Ingress: ingress,
 		},
 	}
+}
+
+func (r *RuntimeReconciler) gatewaySelectorLabels() map[string]string {
+	if len(r.GatewaySelectorLabels) != 0 {
+		return maps.Clone(r.GatewaySelectorLabels)
+	}
+	return map[string]string{"app.kubernetes.io/component": "runtime-gateway"}
+}
+
+func sessionRuntimeNetworkPolicyPorts() []networkingv1.NetworkPolicyPort {
+	return []networkingv1.NetworkPolicyPort{{
+		Protocol: ptr(corev1.ProtocolTCP),
+		Port:     ptr(intstr.FromInt(9093)),
+	}}
 }
 
 func defaultContainerSecurityContext() *corev1.SecurityContext {

@@ -50,6 +50,7 @@ func main() {
 		statusAddr          string
 		workers             int
 		runtimeName         string
+		gatewayURL          string
 		artifactStoreDriver string
 		artifactStoreRoot   string
 		artifactVolumeClaim string
@@ -70,6 +71,7 @@ func main() {
 	flag.StringVar(&statusAddr, "status-addr", ":9093", "gRPC address for the status proxy (for krt logs).")
 	flag.StringVar(&runtimeEndpoint, "runtime-endpoint", "localhost:9091", "gRPC endpoint of the runtime server.")
 	flag.StringVar(&runtimeName, "runtime-name", "", "Runtime resource name served by this pod.")
+	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway HTTP base URL for Session Run endpoints.")
 	flag.IntVar(&workers, "workers", int(v1alpha1.RuntimeDefaultRunsCapacity), "Max concurrent run executions.")
 	flag.StringVar(&artifactStoreDriver, "artifact-store-driver", "", "Artifact store driver: filesystem or s3.")
 	flag.StringVar(&artifactStoreRoot, "artifact-store-root", "", "Filesystem artifact store root. Empty disables artifact collection.")
@@ -239,6 +241,7 @@ func main() {
 		MaxArtifactBytes:  maxArtifactBytes,
 		MaxArtifactsBytes: maxArtifactsBytes,
 		SessionOperations: sessionOperations,
+		GatewayURL:        gatewayURL,
 		Recorder:          mgr.GetEventRecorderFor("runtimed"),
 	}
 

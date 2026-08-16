@@ -536,9 +536,10 @@ class FunctionRuntime(object):
 
 class SessionRuntimeStub(object):
     """SessionRuntime is an optional Runtime Server extension for stateful session
-    Runs. It is reachable only from the colocated owner runtimed. runtimed owns
-    queue admission and operation lifecycle; the Runtime Server owns local
-    workspace confinement and process execution.
+    Runs. runtimed also implements this service for gateway traffic, forwarding
+    requests only to the assigned Pod of the same Runtime when it is not the
+    owner. runtimed owns queue admission and operation lifecycle; the Runtime
+    Server owns local workspace confinement and process execution.
     """
 
     def __init__(self, channel):
@@ -581,9 +582,10 @@ class SessionRuntimeStub(object):
 
 class SessionRuntimeServicer(object):
     """SessionRuntime is an optional Runtime Server extension for stateful session
-    Runs. It is reachable only from the colocated owner runtimed. runtimed owns
-    queue admission and operation lifecycle; the Runtime Server owns local
-    workspace confinement and process execution.
+    Runs. runtimed also implements this service for gateway traffic, forwarding
+    requests only to the assigned Pod of the same Runtime when it is not the
+    owner. runtimed owns queue admission and operation lifecycle; the Runtime
+    Server owns local workspace confinement and process execution.
     """
 
     def RegisterSession(self, request, context):
@@ -671,9 +673,10 @@ def add_SessionRuntimeServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class SessionRuntime(object):
     """SessionRuntime is an optional Runtime Server extension for stateful session
-    Runs. It is reachable only from the colocated owner runtimed. runtimed owns
-    queue admission and operation lifecycle; the Runtime Server owns local
-    workspace confinement and process execution.
+    Runs. runtimed also implements this service for gateway traffic, forwarding
+    requests only to the assigned Pod of the same Runtime when it is not the
+    owner. runtimed owns queue admission and operation lifecycle; the Runtime
+    Server owns local workspace confinement and process execution.
     """
 
     @staticmethod

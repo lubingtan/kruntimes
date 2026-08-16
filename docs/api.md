@@ -58,7 +58,7 @@ Common status fields:
 | `status.phase` | `Pending`, `Scheduled`, `Running`, `Ready`, `Succeeded`, `Failed`, `Timeout`, or `Cancelled`. `Ready` is active and non-terminal; it is used by registered function-mode Runs. |
 | `status.assignedPod` | Runtime Pod selected by the scheduler. |
 | `status.assignedPodUID` | UID of the assigned Runtime Pod, used to distinguish Pod-name reuse during recovery. |
-| `status.endpoint` | Bounded HTTPS invoke endpoint and optional CA bundle for a ready function-mode Run. It is absent for task Runs. |
+| `status.endpoint` | Bounded HTTP or HTTPS gateway endpoint and optional CA bundle for a ready function- or session-mode Run. It is absent for task Runs. |
 | `status.attempt` | Current deterministic attempt count. |
 | `status.outputs` | Bounded structured outputs from `$KRUNTIME_OUTPUTS`. |
 | `status.artifactRefs` | Compact artifact references for files stored outside etcd. |

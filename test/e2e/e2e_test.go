@@ -5,15 +5,21 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,7 +31,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/transport/spdy"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -542,6 +550,241 @@ func waitForRunDeleted(t *testing.T, run *v1alpha1.Run, timeout time.Duration) {
 func taskMode(args ...string) v1alpha1.RunMode {
 	return v1alpha1.RunMode{
 		Task: &v1alpha1.RunTaskMode{Args: args},
+	}
+}
+
+func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-gateway-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTP {
+		t.Fatalf("Session Run endpoint = %#v, want HTTP gateway endpoint", run.Status.Endpoint)
+	}
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+
+	statusResponse := waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	var sessionStatus struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(statusResponse, &sessionStatus); err != nil {
+		t.Fatalf("decode Session status response: %v", err)
+	}
+	if sessionStatus.State != "SESSION_STATE_READY" {
+		t.Fatalf("Session state = %q, want SESSION_STATE_READY", sessionStatus.State)
+	}
+
+	unauthenticated := waitForGatewayResponse(t, http.MethodGet, baseURL, "", nil, http.StatusUnauthorized)
+	if !strings.Contains(string(unauthenticated), "bearer token is required") {
+		t.Fatalf("unauthenticated response = %s", unauthenticated)
+	}
+
+	payload := []byte(`{"command":{"argv":["sh","-c","printf gateway-ok"]}}`)
+	operationResponse := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, payload, http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(operationResponse, &operation); err != nil {
+		t.Fatalf("decode Session operation response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "gateway-ok" {
+		t.Fatalf("Session command result = %#v, want successful gateway-ok output", operation.Command)
+	}
+}
+
+func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "session-gateway-user-" + suffix, Namespace: testNamespace}}
+	if err := k8sClient.Create(ctx, serviceAccount); err != nil {
+		t.Fatalf("create gateway test ServiceAccount: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, serviceAccount) })
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceAccount.Name, Namespace: testNamespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups:     []string{v1alpha1.GroupVersion.Group},
+			Resources:     []string{"runs"},
+			ResourceNames: []string{run.Name},
+			Verbs:         []string{"get"},
+		}},
+	}
+	if err := k8sClient.Create(ctx, role); err != nil {
+		t.Fatalf("create gateway test Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccount.Name, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(ctx, binding); err != nil {
+		t.Fatalf("create gateway test RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, binding) })
+
+	response, err := coreClientset.CoreV1().ServiceAccounts(testNamespace).CreateToken(ctx, serviceAccount.Name, &authenticationv1.TokenRequest{}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create gateway test ServiceAccount token: %v", err)
+	}
+	if response.Status.Token == "" {
+		t.Fatal("gateway test ServiceAccount token is empty")
+	}
+	return response.Status.Token
+}
+
+func waitForGatewayPod(t *testing.T) *corev1.Pod {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for {
+		pods, err := coreClientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app.kubernetes.io/component=runtime-gateway"})
+		if err == nil {
+			for i := range pods.Items {
+				if podReady(&pods.Items[i]) {
+					return &pods.Items[i]
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for Runtime gateway Pod: %v", err)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func podReady(pod *corev1.Pod) bool {
+	if pod == nil || pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func gatewayEndpointURL(t *testing.T, pod *corev1.Pod, endpoint string) string {
+	t.Helper()
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Path == "" {
+		t.Fatalf("parse gateway endpoint %q: %v", endpoint, err)
+	}
+	localPort := availableLocalPort(t)
+	closer, err := forwardPodPort(t.Context(), pod.Namespace, pod.Name, localPort, 8084)
+	if err != nil {
+		t.Fatalf("port-forward Runtime gateway: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	return fmt.Sprintf("http://127.0.0.1:%d%s", localPort, parsed.EscapedPath())
+}
+
+func availableLocalPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve local port: %v", err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body []byte, expectedStatus int) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for {
+		request, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("create gateway request: %v", err)
+		}
+		if len(body) > 0 {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			contents, readErr := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read gateway response: %v", readErr)
+			}
+			if response.StatusCode == expectedStatus {
+				return contents
+			}
+			if response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("gateway response status = %d, want %d: %s", response.StatusCode, expectedStatus, contents)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for gateway response status %d: %v", expectedStatus, err)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func forwardPodPort(ctx context.Context, namespace, podName string, localPort, remotePort int) (io.Closer, error) {
+	transport, upgrader, err := spdy.RoundTripperFor(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build port-forward transport: %w", err)
+	}
+	requestURL := coreClientset.CoreV1().RESTClient().Post().Namespace(namespace).Resource("pods").Name(podName).SubResource("portforward").URL()
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, requestURL)
+	stopCh := make(chan struct{})
+	readyCh := make(chan struct{})
+	forwarder, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"}, []string{fmt.Sprintf("%d:%d", localPort, remotePort)}, stopCh, readyCh, io.Discard, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("create port-forward: %w", err)
+	}
+	running := &e2ePortForward{stopCh: stopCh, done: make(chan error, 1)}
+	go func() { running.done <- forwarder.ForwardPorts() }()
+	select {
+	case <-readyCh:
+		return running, nil
+	case err := <-running.done:
+		return nil, fmt.Errorf("port-forward to Pod %s exited: %w", podName, err)
+	case <-ctx.Done():
+		_ = running.Close()
+		return nil, ctx.Err()
+	}
+}
+
+type e2ePortForward struct {
+	stopCh chan struct{}
+	done   chan error
+	once   sync.Once
+}
+
+func (f *e2ePortForward) Close() error {
+	f.once.Do(func() { close(f.stopCh) })
+	select {
+	case err := <-f.done:
+		return err
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("timed out stopping port-forward")
 	}
 }
 

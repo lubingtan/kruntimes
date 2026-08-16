@@ -93,8 +93,8 @@ The following terms are distinct:
   routes across Pods, or owns the session queue.
 
 The chart, rather than a controller, owns the gateway Deployment, Service, RBAC,
-replicas, and TLS configuration. Values control whether the component is
-installed and which serving certificate Secret it uses. The Runtime controller
+and replicas. Values control whether the component is installed. TLS termination
+and external exposure are configured outside this cluster-local Service. The Runtime controller
 creates each Runtime Service; the gateway's Kubernetes resources do not change
 when a Runtime is created, updated, or deleted.
 
@@ -110,7 +110,7 @@ External client / SDK
               -> local Runtime Server (SessionRuntime gRPC)
 ```
 
-The Runtime gateway server exposes a versioned TLS HTTP API and receives the
+The Runtime gateway server exposes a versioned HTTP API and receives the
 client's Kubernetes bearer token. Every endpoint path identifies namespace,
 Runtime, and immutable Run UID. The gateway server verifies the requested Run,
 derives its `SessionIdentity` from the current assignment, and calls that

@@ -2,6 +2,7 @@
 IMG_SCHEDULER ?= kruntimes-scheduler:latest
 IMG_CONTROLLER ?= kruntimes-controller:latest
 IMG_RUNTIMED ?= kruntimes-runtimed:latest
+IMG_GATEWAY ?= kruntimes-gateway:latest
 IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:latest
 IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:latest
 
@@ -107,12 +108,15 @@ E2E_RUN_IMAGE_TAG ?= e2e-$(shell date +%Y%m%d%H%M%S)
 E2E_IMG_SCHEDULER ?= kruntimes-scheduler:$(E2E_IMAGE_TAG)
 E2E_IMG_CONTROLLER ?= kruntimes-controller:$(E2E_IMAGE_TAG)
 E2E_IMG_RUNTIMED ?= kruntimes-runtimed:$(E2E_IMAGE_TAG)
+E2E_IMG_GATEWAY ?= kruntimes-gateway:$(E2E_IMAGE_TAG)
 E2E_IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:$(E2E_IMAGE_TAG)
+E2E_TEST ?=
 .PHONY: e2e-setup
 e2e-setup: IMG_SCHEDULER = $(E2E_IMG_SCHEDULER)
 e2e-setup: IMG_CONTROLLER = $(E2E_IMG_CONTROLLER)
 e2e-setup: IMG_RUNTIMED = $(E2E_IMG_RUNTIMED)
+e2e-setup: IMG_GATEWAY = $(E2E_IMG_GATEWAY)
 e2e-setup: IMG_BASH_RUNTIME = $(E2E_IMG_BASH_RUNTIME)
 e2e-setup: IMG_PYTHON_RUNTIME = $(E2E_IMG_PYTHON_RUNTIME)
 e2e-setup: manifests docker-build ## Create kind cluster, load images, and deploy chart.
@@ -120,6 +124,7 @@ e2e-setup: manifests docker-build ## Create kind cluster, load images, and deplo
 	kind load docker-image $(E2E_IMG_SCHEDULER) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_CONTROLLER) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_RUNTIMED) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(E2E_IMG_GATEWAY) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_BASH_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_PYTHON_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	# Server-side apply avoids copying large CRD schemas into the 256 KiB last-applied annotation.
@@ -128,6 +133,8 @@ e2e-setup: manifests docker-build ## Create kind cluster, load images, and deplo
 		--set scheduler.image=$(E2E_IMG_SCHEDULER) \
 		--set controller.image=$(E2E_IMG_CONTROLLER) \
 		--set runtimed.image=$(E2E_IMG_RUNTIMED) \
+		--set gateway.enabled=true \
+		--set gateway.image=$(E2E_IMG_GATEWAY) \
 		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s
 
 .PHONY: e2e-test
@@ -135,14 +142,21 @@ e2e-test: generate ## Run E2E tests against the kind cluster.
 	KRUNTIMES_BASH_RUNTIME_IMAGE=$(E2E_IMG_BASH_RUNTIME) \
 	KRUNTIMES_PYTHON_RUNTIME_IMAGE=$(E2E_IMG_PYTHON_RUNTIME) \
 	KRUNTIMES_RUNTIMED_IMAGE=$(E2E_IMG_RUNTIMED) \
-	go test ./test/e2e/... -v -count=1 -failfast
+	go test ./test/e2e/... -v -count=1 -failfast $(if $(E2E_TEST),-run '$(E2E_TEST)')
 
 .PHONY: e2e
 e2e: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
 e2e: e2e-setup e2e-test ## Full E2E: setup cluster, deploy, run tests.
 
+.PHONY: e2e-run e2e-test-required
+e2e-test-required:
+	@test -n "$(E2E_TEST)" || { echo "E2E_TEST is required, for example: make e2e-run E2E_TEST=TestSessionGatewayExecutesAuthorizedOperation" >&2; exit 2; }
+
+e2e-run: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
+e2e-run: e2e-test-required e2e-setup e2e-test ## Set up E2E and run the tests matching E2E_TEST.
+
 # Preserve setup-before-test ordering even when make is invoked with -j.
-.NOTPARALLEL: e2e-setup e2e
+.NOTPARALLEL: e2e-setup e2e e2e-run
 
 .PHONY: e2e-cleanup
 e2e-cleanup: ## Delete the kind cluster.
@@ -165,6 +179,7 @@ build: generate proto ## Build all binaries.
 	go build -o bin/scheduler ./cmd/scheduler
 	go build -o bin/runtimed ./cmd/runtimed
 	go build -o bin/controller ./cmd/controller
+	go build -o bin/runtime-gateway ./cmd/runtime-gateway
 	go build -o bin/krt ./cmd/krt
 	go build -o bin/bash-runtime ./runtimes/bash/cmd
 
@@ -199,7 +214,7 @@ run-runtimed: generate manifests proto ## Run runtimed locally (requires kubecon
 ##@ Docker
 
 .PHONY: docker-build
-docker-build: docker-build-scheduler docker-build-controller docker-build-runtimed docker-build-bash-runtime docker-build-python-runtime ## Build all Docker images.
+docker-build: docker-build-scheduler docker-build-controller docker-build-runtimed docker-build-gateway docker-build-bash-runtime docker-build-python-runtime ## Build all Docker images.
 
 .PHONY: docker-build-scheduler
 docker-build-scheduler: generate ## Build scheduler Docker image.
@@ -212,6 +227,10 @@ docker-build-controller: generate ## Build controller Docker image.
 .PHONY: docker-build-runtimed
 docker-build-runtimed: generate proto ## Build runtimed Docker image.
 	$(CONTAINER_TOOL) build -t $(IMG_RUNTIMED) -f Dockerfile.runtimed .
+
+.PHONY: docker-build-gateway
+docker-build-gateway: generate proto ## Build Runtime gateway Docker image.
+	$(CONTAINER_TOOL) build -t $(IMG_GATEWAY) -f Dockerfile.gateway .
 
 .PHONY: docker-build-bash-runtime
 docker-build-bash-runtime: proto ## Build bash-runtime Docker image.
@@ -226,6 +245,7 @@ docker-push: ## Push Docker images.
 	$(CONTAINER_TOOL) push $(IMG_SCHEDULER)
 	$(CONTAINER_TOOL) push $(IMG_CONTROLLER)
 	$(CONTAINER_TOOL) push $(IMG_RUNTIMED)
+	$(CONTAINER_TOOL) push $(IMG_GATEWAY)
 	$(CONTAINER_TOOL) push $(IMG_BASH_RUNTIME)
 	$(CONTAINER_TOOL) push $(IMG_PYTHON_RUNTIME)
 

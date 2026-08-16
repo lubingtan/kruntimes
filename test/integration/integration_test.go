@@ -1660,7 +1660,7 @@ func TestCRDValidationRejectsUnsupportedFunctionEndpointProtocol(t *testing.T) {
 			return err
 		}
 		run.Status.Phase = v1alpha1.RunReady
-		run.Status.Endpoint = &v1alpha1.RunEndpoint{Protocol: v1alpha1.RunEndpointProtocol("HTTP"), URL: "http://example.invalid/invoke"}
+		run.Status.Endpoint = &v1alpha1.RunEndpoint{Protocol: v1alpha1.RunEndpointProtocol("FTP"), URL: "ftp://example.invalid/invoke"}
 		return k8sClient.Status().Update(ctx, run)
 	})
 	if !apierrors.IsInvalid(err) {

@@ -17,12 +17,13 @@ Examples: `feat(krt): add -f flag for stdin/file input`, `fix(scheduler): handle
 ## Build & Test Commands
 
 ```bash
-make build              # compile all 5 Go binaries
+make build              # compile all Go binaries
 make lint               # go fmt + go vet + golangci-lint (if installed) (scheduler, controller, runtimed, bash-runtime, krt)
 make test               # unit tests (skips integration and e2e)
 make test-integration   # envtest-based integration tests (real API server)
 make e2e-test           # E2E tests against a kind cluster (requires make e2e-setup first)
 make e2e                # full E2E: kind cluster + deploy + test
+make e2e-run E2E_TEST=TestName # full E2E setup, then the matching test only
 make proto              # regenerate Go gRPC code from api/runtime/v1/runtime.proto
 make proto-python       # regenerate Python gRPC stubs (requires uv)
 make proto-python       # regenerate Python gRPC stubs (requires uv)

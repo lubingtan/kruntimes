@@ -3,6 +3,7 @@ package runtimed
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -100,6 +101,9 @@ func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error 
 	}
 	run.Status.Phase = v1alpha1.RunReady
 	run.Status.Message = "session registered"
+	if endpoint := c.sessionEndpoint(&run); endpoint != nil {
+		run.Status.Endpoint = endpoint
+	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type:               runstatus.ConditionReady,
 		Status:             metav1.ConditionTrue,
@@ -112,6 +116,22 @@ func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error 
 	}
 	ar.run = &run
 	return nil
+}
+
+func (c *Controller) sessionEndpoint(run *v1alpha1.Run) *v1alpha1.RunEndpoint {
+	if run == nil || c.GatewayURL == "" {
+		return nil
+	}
+	return &v1alpha1.RunEndpoint{
+		Protocol: v1alpha1.RunEndpointProtocolHTTP,
+		URL: fmt.Sprintf(
+			"%s/v1/namespaces/%s/runtimes/%s/sessions/%s",
+			strings.TrimRight(c.GatewayURL, "/"),
+			run.Namespace,
+			run.Spec.Runtime,
+			run.UID,
+		),
+	}
 }
 
 func (c *Controller) applyStartSessionFailure(ctx context.Context, ar *activeRun, reason string, startErr error) {
