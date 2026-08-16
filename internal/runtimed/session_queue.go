@@ -35,6 +35,47 @@ type sessionOperationQueueEntry struct {
 
 	mu           sync.Mutex
 	activeCancel context.CancelFunc
+	lastActivity time.Time
+	pending      int
+}
+
+// Ensure starts tracking a ready Session Run before its first operation.
+func (q *SessionOperationQueue) Ensure(run *v1alpha1.Run, activity time.Time) error {
+	if q == nil {
+		return fmt.Errorf("session operation queue is not configured")
+	}
+	uid, queueSize, timeout, err := q.limits(run)
+	if err != nil {
+		return err
+	}
+	if activity.IsZero() {
+		activity = time.Now()
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if entry := q.sessions[uid]; entry != nil {
+		entry.setActivity(activity)
+		return nil
+	}
+	entry := &sessionOperationQueueEntry{jobs: make(chan sessionOperationJob, queueSize), lastActivity: activity}
+	q.sessions[uid] = entry
+	go entry.run(timeout)
+	return nil
+}
+
+// IdleDeadline returns the next idle expiry for a tracked Session Run. Active
+// or queued operations keep the session active until they finish.
+func (q *SessionOperationQueue) IdleDeadline(runUID string, timeout time.Duration, now time.Time) (time.Time, bool) {
+	if q == nil || runUID == "" || timeout <= 0 {
+		return time.Time{}, false
+	}
+	q.mu.Lock()
+	entry := q.sessions[runUID]
+	q.mu.Unlock()
+	if entry == nil {
+		return time.Time{}, false
+	}
+	return entry.idleDeadline(timeout, now), true
 }
 
 type sessionOperationJob struct {
@@ -89,7 +130,7 @@ func (q *SessionOperationQueue) Execute(
 	q.mu.Lock()
 	entry := q.sessions[uid]
 	if entry == nil {
-		entry = &sessionOperationQueueEntry{jobs: make(chan sessionOperationJob, queueSize)}
+		entry = &sessionOperationQueueEntry{jobs: make(chan sessionOperationJob, queueSize), lastActivity: time.Now()}
 		q.sessions[uid] = entry
 		go entry.run(timeout)
 	}
@@ -102,10 +143,12 @@ func (q *SessionOperationQueue) Execute(
 		execute: execute,
 		result:  make(chan sessionOperationResult, 1),
 	}
+	entry.accept(time.Now())
 	select {
 	case entry.jobs <- job:
 		q.mu.Unlock()
 	default:
+		entry.complete(time.Now())
 		q.mu.Unlock()
 		return nil, status.Error(codes.ResourceExhausted, "session operation queue is full")
 	}
@@ -163,11 +206,13 @@ func (e *sessionOperationQueueEntry) run(timeout time.Duration) {
 	for job := range e.jobs {
 		if e.isClosed() {
 			e.deliver(job, nil, status.Error(codes.Canceled, "session closed"))
+			e.complete(time.Now())
 			continue
 		}
 		select {
 		case <-job.ctx.Done():
 			e.deliver(job, nil, status.FromContextError(job.ctx.Err()).Err())
+			e.complete(time.Now())
 			continue
 		default:
 		}
@@ -176,6 +221,7 @@ func (e *sessionOperationQueueEntry) run(timeout time.Duration) {
 		if !e.setActive(cancel) {
 			cancel()
 			e.deliver(job, nil, status.Error(codes.Canceled, "session closed"))
+			e.complete(time.Now())
 			continue
 		}
 		response, err := job.execute(operationCtx)
@@ -188,7 +234,41 @@ func (e *sessionOperationQueueEntry) run(timeout time.Duration) {
 			}
 		}
 		e.deliver(job, response, err)
+		e.complete(time.Now())
 	}
+}
+
+func (e *sessionOperationQueueEntry) setActivity(activity time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.lastActivity.Before(activity) {
+		e.lastActivity = activity
+	}
+}
+
+func (e *sessionOperationQueueEntry) accept(activity time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pending++
+	e.lastActivity = activity
+}
+
+func (e *sessionOperationQueueEntry) complete(activity time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pending > 0 {
+		e.pending--
+	}
+	e.lastActivity = activity
+}
+
+func (e *sessionOperationQueueEntry) idleDeadline(timeout time.Duration, now time.Time) time.Time {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pending > 0 {
+		return now.Add(timeout)
+	}
+	return e.lastActivity.Add(timeout)
 }
 
 func (e *sessionOperationQueueEntry) isClosed() bool {

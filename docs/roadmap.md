@@ -459,6 +459,10 @@ wiring from accumulating avoidable conflicts.
 - [ ] Clean up a Runtime's runtime maintainer when the Runtime is deleted.
   Define ownership and finalization so orphaned maintainers do not accumulate,
   while preserving artifact cleanup for Runs that still require it.
+- [ ] Add explicit `Run` suspend and resume semantics. Define API and lifecycle
+  behavior for Pending, executing task, function, and Session Runs, including
+  what is retained or discarded for processes, workspaces, requests, and
+  timeout accounting; do not model this as a best-effort boolean switch.
 - Define compatibility and migration guarantees.
 - Document deprecation policy.
 - Clarify multi-tenant isolation strategy for production environments.

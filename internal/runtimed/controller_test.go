@@ -1189,6 +1189,89 @@ func TestReadySessionCancellationClosesRuntimeSession(t *testing.T) {
 	}
 }
 
+func TestReadySessionIdleExpiryClosesRuntimeSession(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	idleTimeout := int32(1)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{IdleTimeoutSeconds: &idleTimeout}},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, AssignedPod: "runtime-pod", AssignedPodUID: "runtime-pod-uid", StartTime: &metav1.Time{Time: time.Now()}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	operations := NewSessionOperationQueue(0, 0)
+	if err := operations.Ensure(run, time.Now().Add(-2*time.Second)); err != nil {
+		t.Fatalf("start idle tracking: %v", err)
+	}
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient, SessionOperations: operations}
+	c.activeRuns.Store(string(run.UID), newActiveRun(run, time.Now()))
+
+	if _, err := c.reconcileReady(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReady: %v", err)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunTimeout {
+		t.Fatalf("phase = %s, want Timeout", updated.Status.Phase)
+	}
+}
+
+func TestReadySessionTotalTimeoutTakesPrecedenceOverIdleTimeout(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	idleTimeout := int32(60)
+	totalTimeout := metav1.Duration{Duration: time.Second}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Timeout: &totalTimeout,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{IdleTimeoutSeconds: &idleTimeout}},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, AssignedPod: "runtime-pod", AssignedPodUID: "runtime-pod-uid", StartTime: &metav1.Time{Time: time.Now().Add(-2 * time.Second)}},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	operations := NewSessionOperationQueue(0, 0)
+	if err := operations.Ensure(run, time.Now()); err != nil {
+		t.Fatalf("start idle tracking: %v", err)
+	}
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient, SessionOperations: operations}
+	c.activeRuns.Store(string(run.UID), c.buildActiveRun(run))
+
+	if _, err := c.reconcileReady(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReady: %v", err)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunTimeout {
+		t.Fatalf("phase = %s, want Timeout", updated.Status.Phase)
+	}
+	if updated.Status.Message != "timeout after 1s" {
+		t.Fatalf("message = %q, want total timeout", updated.Status.Message)
+	}
+}
+
 func TestReadySessionRecoveryFailsWhenRuntimeSessionIsNotReady(t *testing.T) {
 	setTestWorkspace(t)
 	scheme := runtime.NewScheme()

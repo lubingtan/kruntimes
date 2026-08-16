@@ -114,6 +114,11 @@ func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error 
 	if err := c.Status().Update(ctx, &run); err != nil {
 		return err
 	}
+	if c.SessionOperations != nil {
+		if err := c.SessionOperations.Ensure(&run, time.Now()); err != nil {
+			return fmt.Errorf("start Session idle tracking: %w", err)
+		}
+	}
 	ar.run = &run
 	return nil
 }
@@ -172,6 +177,15 @@ func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1
 		if response.GetState() == pb.SessionState_SESSION_STATE_READY {
 			if !c.tryClaimActiveRun(ar) {
 				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
+			if c.SessionOperations != nil {
+				activity := time.Now()
+				if lastActivity := response.GetLastActivityUnixNano(); lastActivity > 0 {
+					activity = time.Unix(0, lastActivity)
+				}
+				if err := c.SessionOperations.Ensure(run, activity); err != nil {
+					return ctrl.Result{}, fmt.Errorf("restore Session idle tracking: %w", err)
+				}
 			}
 			c.recordActiveRuns(run.Spec.Runtime)
 			return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil

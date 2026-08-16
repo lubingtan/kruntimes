@@ -382,6 +382,9 @@ controller wiring 累积不必要的冲突。
   隔离的 case，并拆分快速反馈和较慢的 lifecycle coverage，同时保留完整 release gate。
 - [ ] Runtime 删除时清理其 runtime maintainer。定义 ownership 和 finalization，避免 orphaned
   maintainer 累积，同时保留仍需要 artifact cleanup 的 Run 的正确性。
+- [ ] 增加明确的 `Run` suspend 和 resume 语义。定义 Pending、正在执行的 task、function 和
+  Session Run 的 API 与 lifecycle 行为，包括 process、workspace、request 和 timeout accounting
+  中哪些保留、哪些丢弃；不能将其建模为 best-effort 的 boolean 开关。
 - 定义兼容性和迁移保证。
 - 记录弃用策略。
 - 明确生产环境的多租户隔离策略。

@@ -465,10 +465,28 @@ func (c *Controller) reconcileReady(ctx context.Context, run *v1alpha1.Run) (ctr
 	if run.Spec.CancelRequested {
 		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
-	if !ar.deadline.IsZero() && time.Now().After(ar.deadline) {
-		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, fmt.Sprintf("timeout after %s", run.Spec.Timeout.Duration))
+	now := time.Now()
+	requeueAfter := activeRunRequeueAfter(ar)
+	if !ar.deadline.IsZero() {
+		if !now.Before(ar.deadline) {
+			return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, fmt.Sprintf("timeout after %s", run.Spec.Timeout.Duration))
+		}
+		requeueAfter = min(requeueAfter, time.Until(ar.deadline))
 	}
-	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	if deadline, ok := c.sessionIdleDeadline(run, now); ok {
+		if !now.Before(deadline) {
+			return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, "session idle timeout exceeded")
+		}
+		requeueAfter = min(requeueAfter, time.Until(deadline))
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func (c *Controller) sessionIdleDeadline(run *v1alpha1.Run, now time.Time) (time.Time, bool) {
+	if c.SessionOperations == nil || run == nil || run.Spec.Mode.Session == nil || run.Spec.Mode.Session.IdleTimeoutSeconds == nil {
+		return time.Time{}, false
+	}
+	return c.SessionOperations.IdleDeadline(string(run.UID), time.Duration(*run.Spec.Mode.Session.IdleTimeoutSeconds)*time.Second, now)
 }
 
 func (c *Controller) reconcileRunningRecovered(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {

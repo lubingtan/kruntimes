@@ -640,6 +640,24 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
 }
 
+func TestSessionRunExpiresWhenIdle(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-idle-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+	idleTimeout := int32(1)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-idle-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{IdleTimeoutSeconds: &idleTimeout}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create idle Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 10*time.Second, v1alpha1.RunTimeout)
+}
+
 func containsSessionFile(entries []struct {
 	Path string `json:"path"`
 }, path string) bool {
