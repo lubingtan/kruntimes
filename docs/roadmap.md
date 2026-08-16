@@ -232,8 +232,11 @@ wiring from accumulating avoidable conflicts.
     - [x] serialize owner-runtimed mutations with per-Session FIFO queues,
       Run-scoped queue/timeout limits, queue-full rejection, and cancellation
       on Session close;
-    - [ ] expose administrator configuration for the global queue and operation
-      timeout limits, including graceful-termination settings;
+    - [x] expose administrator configuration for global queue and operation
+      timeout limits, plus the runtimed-to-Runtime-Server close deadline;
+    - [ ] define backend-specific graceful process-termination configuration.
+      A common setting cannot be injected into arbitrary custom Runtime images
+      without a reviewed Runtime Server contract;
   - [ ] keep operation history and audit events in structured external logs,
     retain only bounded readiness/endpoint data in Run status, and export large
     outputs through ArtifactStore;

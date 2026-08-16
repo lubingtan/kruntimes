@@ -225,10 +225,17 @@ func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run)
 		c.Log.Error(err, "failed to build SessionRuntime close request", "run", client.ObjectKeyFromObject(run))
 		return
 	}
-	closeCtx, cancel := context.WithTimeout(ctx, executionCleanupTimeout)
+	closeCtx, cancel := context.WithTimeout(ctx, c.sessionCloseTimeout())
 	defer cancel()
 	_, err = c.sessionCli.CloseSession(closeCtx, &pb.CloseSessionRequest{Identity: identity})
 	if err != nil && status.Code(err) != codes.NotFound && status.Code(err) != codes.Unimplemented {
 		c.Log.Error(err, "failed to close Runtime Server session", "run", client.ObjectKeyFromObject(run))
 	}
+}
+
+func (c *Controller) sessionCloseTimeout() time.Duration {
+	if c.SessionCloseTimeout > 0 {
+		return c.SessionCloseTimeout
+	}
+	return executionCleanupTimeout
 }

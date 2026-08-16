@@ -51,6 +51,9 @@ func main() {
 		gatewayNamespace                         string
 		gatewaySelectorLabels                    string
 		gatewayURL                               string
+		sessionMaxQueueSize                      int
+		sessionMaxOperationTimeout               time.Duration
+		sessionCloseTimeout                      time.Duration
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8082", "The address the metric endpoint binds to.")
@@ -68,6 +71,9 @@ func main() {
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "", "Namespace of the enabled Runtime gateway. Empty keeps Runtime Pod ingress denied.")
 	flag.StringVar(&gatewaySelectorLabels, "gateway-selector-labels", "", "Comma-separated key=value labels selecting Runtime gateway Pods.")
 	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway HTTP base URL written to ready Session Run endpoints.")
+	flag.IntVar(&sessionMaxQueueSize, "session-max-queue-size", 0, "Maximum queued mutations per Session Run. A non-positive value uses runtimed defaults.")
+	flag.DurationVar(&sessionMaxOperationTimeout, "session-max-operation-timeout", 0, "Maximum duration of one Session operation. A non-positive value uses runtimed defaults.")
+	flag.DurationVar(&sessionCloseTimeout, "session-close-timeout", 0, "Maximum time runtimed waits for a Session Runtime to close. A non-positive value uses runtimed defaults.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -131,6 +137,9 @@ func main() {
 		GatewayNamespace:           gatewayNamespace,
 		GatewaySelectorLabels:      parseLabels(gatewaySelectorLabels),
 		GatewayURL:                 gatewayURL,
+		SessionMaxQueueSize:        sessionMaxQueueSize,
+		SessionMaxOperationTimeout: sessionMaxOperationTimeout,
+		SessionCloseTimeout:        sessionCloseTimeout,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Runtime")

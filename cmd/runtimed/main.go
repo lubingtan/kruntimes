@@ -64,6 +64,9 @@ func main() {
 		artifactS3Workers   int
 		maxArtifactBytes    int64
 		maxArtifactsBytes   int64
+		sessionMaxQueueSize int
+		sessionMaxTimeout   time.Duration
+		sessionCloseTimeout time.Duration
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9090", "Metrics endpoint address.")
@@ -86,6 +89,9 @@ func main() {
 	flag.IntVar(&artifactS3Workers, "artifact-s3-upload-concurrency", 0, "S3 multipart upload concurrency.")
 	flag.Int64Var(&maxArtifactBytes, "max-artifact-bytes", artifact.DefaultMaxArtifactBytes, "Maximum bytes allowed for one artifact.")
 	flag.Int64Var(&maxArtifactsBytes, "max-artifacts-bytes", artifact.DefaultMaxArtifactsBytes, "Maximum total artifact bytes allowed per Run.")
+	flag.IntVar(&sessionMaxQueueSize, "session-max-queue-size", 0, "Maximum queued mutations per Session Run. Non-positive uses the default.")
+	flag.DurationVar(&sessionMaxTimeout, "session-max-operation-timeout", 0, "Maximum duration of one Session operation. Non-positive uses the default.")
+	flag.DurationVar(&sessionCloseTimeout, "session-close-timeout", 0, "Maximum time to wait for a Session Runtime to close. Non-positive uses the default.")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -206,7 +212,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sessionOperations := runtimed.NewSessionOperationQueue(0, 0)
+	sessionOperations := runtimed.NewSessionOperationQueue(sessionMaxQueueSize, sessionMaxTimeout)
 
 	// Start gRPC proxies for logs, artifacts, and SessionRuntime requests.
 	go func() {
@@ -227,22 +233,23 @@ func main() {
 	}()
 
 	runtimedCtrl := &runtimed.Controller{
-		Client:            mgr.GetClient(),
-		PodReader:         mgr.GetAPIReader(),
-		RunReader:         mgr.GetAPIReader(),
-		Log:               ctrl.Log.WithName("controllers").WithName("Runtimed"),
-		PodName:           podName,
-		RuntimeName:       runtimeName,
-		RuntimeNamespace:  runtimeNamespace,
-		RuntimeEndpoint:   runtimeEndpoint,
-		Workers:           workers,
-		ArtifactStore:     artifactStore,
-		ArtifactStoreSpec: artifactStoreSpec,
-		MaxArtifactBytes:  maxArtifactBytes,
-		MaxArtifactsBytes: maxArtifactsBytes,
-		SessionOperations: sessionOperations,
-		GatewayURL:        gatewayURL,
-		Recorder:          mgr.GetEventRecorderFor("runtimed"),
+		Client:              mgr.GetClient(),
+		PodReader:           mgr.GetAPIReader(),
+		RunReader:           mgr.GetAPIReader(),
+		Log:                 ctrl.Log.WithName("controllers").WithName("Runtimed"),
+		PodName:             podName,
+		RuntimeName:         runtimeName,
+		RuntimeNamespace:    runtimeNamespace,
+		RuntimeEndpoint:     runtimeEndpoint,
+		Workers:             workers,
+		ArtifactStore:       artifactStore,
+		ArtifactStoreSpec:   artifactStoreSpec,
+		MaxArtifactBytes:    maxArtifactBytes,
+		MaxArtifactsBytes:   maxArtifactsBytes,
+		SessionOperations:   sessionOperations,
+		SessionCloseTimeout: sessionCloseTimeout,
+		GatewayURL:          gatewayURL,
+		Recorder:            mgr.GetEventRecorderFor("runtimed"),
 	}
 
 	if err := runtimedCtrl.SetupWithManager(mgr); err != nil {

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -92,6 +93,28 @@ func TestBuildDeploymentAddsCapacityAnnotationsAndWorkers(t *testing.T) {
 		}
 		if container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != corev1.Capability("ALL") {
 			t.Fatalf("container %s capabilities = %#v, want drop ALL", container.Name, container.SecurityContext.Capabilities)
+		}
+	}
+}
+
+func TestBuildDeploymentPassesSessionAdministratorLimitsToRuntimed(t *testing.T) {
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "default"},
+		Spec:       v1alpha1.RuntimeSpec{Template: runtimePodTemplate("bash-runtime:latest")},
+	}
+	reconciler := &RuntimeReconciler{
+		SessionMaxQueueSize:        8,
+		SessionMaxOperationTimeout: 90 * time.Second,
+		SessionCloseTimeout:        12 * time.Second,
+	}
+	daemon := reconciler.buildDeployment(rt).Spec.Template.Spec.Containers[1]
+	for _, want := range []string{
+		"--session-max-queue-size=8",
+		"--session-max-operation-timeout=1m30s",
+		"--session-close-timeout=12s",
+	} {
+		if !slices.Contains(daemon.Args, want) {
+			t.Errorf("daemon args = %v, missing %q", daemon.Args, want)
 		}
 	}
 }

@@ -1189,6 +1189,16 @@ func TestReadySessionCancellationClosesRuntimeSession(t *testing.T) {
 	}
 }
 
+func TestSessionCloseTimeoutUsesConfiguredValue(t *testing.T) {
+	configured := 17 * time.Second
+	if got := (&Controller{SessionCloseTimeout: configured}).sessionCloseTimeout(); got != configured {
+		t.Fatalf("configured Session close timeout = %s, want %s", got, configured)
+	}
+	if got := (&Controller{}).sessionCloseTimeout(); got != executionCleanupTimeout {
+		t.Fatalf("default Session close timeout = %s, want %s", got, executionCleanupTimeout)
+	}
+}
+
 func TestReadySessionIdleExpiryClosesRuntimeSession(t *testing.T) {
 	setTestWorkspace(t)
 	scheme := runtime.NewScheme()

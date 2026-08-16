@@ -116,9 +116,12 @@ Queued -> Running -> Succeeded | Failed | Cancelled | TimedOut
 ```
 
 同一时刻只运行一个 mutation；read/list/status 不进入队列。effective queue size 是
-`mode.session.queueSize` 和 runtimed global maximum 的最小值。v0 默认允许 32 个 queued mutation，
-operation limit 为五分钟；Run 只能降低 queue size 或 operation timeout。全局上限的管理员配置接口
-将单独实现。
+`mode.session.queueSize` 和 runtimed global maximum 的最小值；effective operation timeout 也同时
+受 `mode.session.operationTimeout` 和 global maximum 限制。v0 默认允许 32 个 queued mutation，
+operation limit 为五分钟；Run 只能降低 queue size 或 operation timeout。管理员通过 Helm
+`runtimed.session.maxQueueSize`、`runtimed.session.maxOperationTimeout` 和
+`runtimed.session.closeTimeout` 配置这些平台级上限，以及 runtimed 等待 Runtime Server 完成
+session close 的最长时间。
 
 session 关闭时，owner runtimed 拒绝新 operation、取消 queued work、向 running process group 发送
 termination，等待 grace period 后仍未退出则 force-kill。

@@ -106,6 +106,14 @@ gateway:
 
 runtimed:
   image: ghcr.io/kruntimes/runtimed
+  session:
+    # Platform-wide upper bounds. A Session Run may only lower queueSize and
+    # operationTimeout in its own spec.
+    maxQueueSize: 32
+    maxOperationTimeout: 5m
+    # Bounds how long runtimed waits for the Runtime Server to finish closing a
+    # session after cancelling in-flight work.
+    closeTimeout: 5s
 
 workspace:
   emptyDir:

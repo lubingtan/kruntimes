@@ -195,7 +195,10 @@ controller wiring 累积不必要的冲突。
     global 与 per-Run bounds、默认/最大 operation timeout、cancellation 和 graceful termination；
     - [x] 在 owner runtimed 通过每个 Session 的 FIFO queue 串行 mutation，支持 Run 级 queue/timeout
       限制、队列满拒绝与 Session close 时取消；
-    - [ ] 暴露 global queue、operation timeout 与 graceful-termination settings 的管理员配置接口；
+    - [x] 暴露 global queue、operation timeout 上限，以及 runtimed 到 Runtime Server 的
+      session close deadline 的管理员配置接口；
+    - [ ] 定义 backend-specific 的 graceful process-termination 配置。不能在没有 reviewed
+      Runtime Server contract 的情况下，将一个通用 setting 注入任意 custom Runtime image；
   - [ ] 将 operation history 与 audit events 写到 structured external logs；Run status 只保留
     有界 readiness/endpoint 数据，大输出通过 ArtifactStore 导出；
   - [ ] 增加 Python 和 Go SDK：create/open/wait/execute/files/logs/close helpers、typed errors、

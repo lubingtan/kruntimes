@@ -110,8 +110,9 @@ type Controller struct {
 	MaxArtifactBytes  int64
 	MaxArtifactsBytes int64
 
-	HeartbeatInterval  time.Duration
-	ExecutionLogWriter io.Writer
+	HeartbeatInterval   time.Duration
+	ExecutionLogWriter  io.Writer
+	SessionCloseTimeout time.Duration
 
 	activeRuns sync.Map // uid → *activeRun
 	// activeRunsMu makes the local claim decision atomic. In particular, a

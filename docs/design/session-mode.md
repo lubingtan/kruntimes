@@ -145,9 +145,14 @@ Queued -> Running -> Succeeded | Failed | Cancelled | TimedOut
 
 Only one mutation runs at a time. Read/list/status requests do not enter the
 queue. The effective queue size is the minimum of `mode.session.queueSize`
-and the runtimed global maximum. The v0 defaults are 32 queued mutations and a
-five-minute operation limit. A Run can only reduce either limit. Exposing
-administrator configuration for those global limits is tracked separately.
+and the runtimed global maximum. The effective operation timeout is likewise
+bounded by `mode.session.operationTimeout` and the global maximum. The v0
+defaults are 32 queued mutations and a five-minute operation limit. A Run can
+only reduce either limit. Administrators configure these platform-wide limits,
+and the maximum time runtimed waits for the Runtime Server to finish closing a
+session, through Helm `runtimed.session.maxQueueSize`,
+`runtimed.session.maxOperationTimeout`, and
+`runtimed.session.closeTimeout`.
 
 When a session closes, owner runtimed rejects new operations, cancels queued work,
 sends termination to the running process group, waits the grace period, then

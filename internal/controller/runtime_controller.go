@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -53,6 +54,9 @@ type RuntimeReconciler struct {
 	GatewayNamespace           string
 	GatewaySelectorLabels      map[string]string
 	GatewayURL                 string
+	SessionMaxQueueSize        int
+	SessionMaxOperationTimeout time.Duration
+	SessionCloseTimeout        time.Duration
 }
 
 // +kubebuilder:rbac:groups=kruntimes.io,resources=runtimes,verbs=get;list;watch;update;patch
@@ -309,6 +313,15 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 	daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--runtime-name=%s", name))
 	if r.GatewayURL != "" {
 		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--gateway-url=%s", r.GatewayURL))
+	}
+	if r.SessionMaxQueueSize > 0 {
+		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--session-max-queue-size=%d", r.SessionMaxQueueSize))
+	}
+	if r.SessionMaxOperationTimeout > 0 {
+		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--session-max-operation-timeout=%s", r.SessionMaxOperationTimeout))
+	}
+	if r.SessionCloseTimeout > 0 {
+		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--session-close-timeout=%s", r.SessionCloseTimeout))
 	}
 	if runsCapacity > 0 {
 		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--workers=%d", runsCapacity))
