@@ -606,6 +606,44 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "gateway-ok" {
 		t.Fatalf("Session command result = %#v, want successful gateway-ok output", operation.Command)
 	}
+
+	writePayload := []byte(`{"writeFile":{"path":"notes/result.txt","contents":"Z2F0ZXdheS1maWxl","createParents":true}}`)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, writePayload, http.StatusOK)
+
+	filesResponse := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files?path=notes", token, nil, http.StatusOK)
+	var files struct {
+		Entries []struct {
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(filesResponse, &files); err != nil {
+		t.Fatalf("decode Session files response: %v", err)
+	}
+	if !containsSessionFile(files.Entries, "result.txt") {
+		t.Fatalf("Session files = %#v, want result.txt", files.Entries)
+	}
+
+	fileResponse := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/notes/result.txt", token, nil, http.StatusOK)
+	var file struct {
+		Contents []byte `json:"contents"`
+	}
+	if err := json.Unmarshal(fileResponse, &file); err != nil {
+		t.Fatalf("decode Session file response: %v", err)
+	}
+	if string(file.Contents) != "gateway-file" {
+		t.Fatalf("Session file contents = %q, want gateway-file", file.Contents)
+	}
+}
+
+func containsSessionFile(entries []struct {
+	Path string `json:"path"`
+}, path string) bool {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {
