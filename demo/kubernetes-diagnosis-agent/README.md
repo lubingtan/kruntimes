@@ -19,6 +19,9 @@ never sent to the Runtime Pod.
 - `kubectl`, Python 3.10+, and an `OPENAI_API_KEY` in the local environment.
 - A caller identity allowed to create, get, and update `kruntimes.io/runs` in
   the target namespace. Gateway requests require `get` access to that Run.
+  For local access, it also needs `get` on the shared gateway Service and
+  `get`, `list` on its Pods in the gateway namespace to establish the scoped
+  port-forward.
 
 ## Deploy the Runtime
 

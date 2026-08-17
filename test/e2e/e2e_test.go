@@ -43,6 +43,7 @@ import (
 	runretry "github.com/kruntimes/kruntimes/internal/retry"
 	"github.com/kruntimes/kruntimes/internal/runstatus"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
+	"github.com/kruntimes/kruntimes/sdk/go/sandbox"
 )
 
 const testNamespace = "default"
@@ -645,6 +646,67 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
 	assertCancelledRun(t, run)
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
+	runtimeName := fmt.Sprintf("sdk-session-gateway-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	serviceAccount, token := newSessionGatewayServiceAccount(t)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceAccount.Name, Namespace: testNamespace},
+		Rules: []rbacv1.PolicyRule{
+			{APIGroups: []string{v1alpha1.GroupVersion.Group}, Resources: []string{"runs"}, Verbs: []string{"create", "get", "update"}},
+			{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get"}},
+			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), role); err != nil {
+		t.Fatalf("create SDK test Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccount.Name, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(t.Context(), binding); err != nil {
+		t.Fatalf("create SDK test RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), binding) })
+
+	sdkConfig := rest.CopyConfig(restConfig)
+	sdkConfig.BearerToken = token
+	sdkConfig.BearerTokenFile = ""
+	forward, err := sandbox.StartGatewayPortForward(t.Context(), sdkConfig, testNamespace, "kruntimes-gateway", 80)
+	if err != nil {
+		t.Fatalf("start SDK Runtime gateway port-forward: %v", err)
+	}
+	t.Cleanup(forward.Close)
+	sdk, err := sandbox.NewFromRESTConfig(sdkConfig, sandbox.Config{HTTPClient: forward})
+	if err != nil {
+		t.Fatalf("create Sandbox SDK client: %v", err)
+	}
+	session, err := sdk.Create(t.Context(), sandbox.CreateOptions{GenerateName: "e2e-sdk-session-", Namespace: testNamespace, Runtime: runtimeName})
+	if err != nil {
+		t.Fatalf("create SDK Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), session.Run()) })
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := session.Wait(ctx); err != nil {
+		t.Fatalf("wait for SDK Session Run: %v", err)
+	}
+	result, err := session.Execute(ctx, sandbox.Command{Argv: []string{"sh", "-c", "printf sdk-port-forward"}})
+	if err != nil {
+		t.Fatalf("execute SDK Session command: %v", err)
+	}
+	if result.ExitCode != 0 || string(result.Stdout) != "sdk-port-forward" {
+		t.Fatalf("SDK Session command result = %#v, want successful sdk-port-forward output", result)
+	}
+	if err := session.Close(ctx); err != nil {
+		t.Fatalf("close SDK Session Run: %v", err)
+	}
 }
 
 func TestSessionRunExpiresWhenIdle(t *testing.T) {

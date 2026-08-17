@@ -49,3 +49,7 @@ with PortForwardGatewayTransport.start(
 `Execute`, file mutations, and `Close` are never retried automatically. A
 transport failure has an unknown execution outcome; refresh the Run and use
 the structured owner-runtimed logs to determine what happened.
+
+The local caller needs `get` access to the target Run for gateway
+authorization. Starting the port-forward also needs `get` on the shared gateway
+Service and `get`, `list` on its Pods in the gateway namespace.

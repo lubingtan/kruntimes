@@ -43,3 +43,7 @@ client, err := sandbox.NewFromRESTConfig(restConfig, sandbox.Config{HTTPClient: 
 The SDK never retries commands, file mutations, or `Close` after a transport
 failure. Refresh the Run and read structured owner-runtimed logs to determine
 the outcome.
+
+The local caller needs `get` on the target Run for gateway authorization. A
+port-forward client also needs `get` on the shared gateway Service and `get`,
+`list` on its Pods in the gateway namespace.
