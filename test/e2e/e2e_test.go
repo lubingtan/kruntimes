@@ -40,6 +40,8 @@ import (
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	"github.com/kruntimes/kruntimes/internal/krt"
+	runretry "github.com/kruntimes/kruntimes/internal/retry"
+	"github.com/kruntimes/kruntimes/internal/runstatus"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
 )
 
@@ -657,6 +659,42 @@ func TestSessionRunExpiresWhenIdle(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
 	waitForRunPhase(t, run, 10*time.Second, v1alpha1.RunTimeout)
+}
+
+func TestSessionRunFailsWhenAssignedRuntimePodIsLost(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-pod-loss-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-pod-loss-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	podName := run.Status.AssignedPod
+	if podName == "" {
+		t.Fatal("Session Run reached Ready without an assigned Runtime Pod")
+	}
+	if err := k8sClient.Delete(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: run.Namespace},
+	}); err != nil {
+		t.Fatalf("delete assigned Runtime Pod %s: %v", podName, err)
+	}
+
+	// A Ready session owns an ephemeral workspace on this exact Pod. It must
+	// become terminal rather than be re-registered on a replacement Pod.
+	waitForRunPhase(t, run, 60*time.Second, v1alpha1.RunFailed)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || (condition.Reason != runretry.ReasonPodGone && condition.Reason != runretry.ReasonPodTerminating) {
+		t.Fatalf("Completed condition = %#v, want PodGone or PodTerminating", condition)
+	}
 }
 
 func containsSessionFile(entries []struct {
