@@ -242,7 +242,7 @@ wiring from accumulating avoidable conflicts.
   - [ ] keep operation history and audit events in structured external logs,
     retain only bounded readiness/endpoint data in Run status, and export large
     outputs through ArtifactStore;
-  - [ ] add Python and Go SDKs with create/open/wait/execute/files/logs/close
+  - [x] add Python and Go SDKs with create/open/wait/execute/files/logs/close
     helpers, typed errors, direct in-cluster access, and local port-forward
     support;
   - [ ] add a Kubernetes diagnosis agent example that uses a Session Run for
