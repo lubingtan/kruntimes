@@ -76,9 +76,36 @@ func TestSandboxFileMutationsUseGatewayOperationNames(t *testing.T) {
 	}
 }
 
+func TestSandboxLogsFilterRunUID(t *testing.T) {
+	reader := logReader(func(context.Context, string, string, string) (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("not-json\n{\"run_uid\":\"other\",\"stream\":\"stdout\"}\n{\"run_uid\":\"run-uid\",\"stream\":\"audit\",\"message\":\"session operation completed\",\"operation\":\"command\"}\n")), nil
+	})
+	sandbox := readySandbox(t, httpDoer(func(*http.Request) (*http.Response, error) { return nil, nil }))
+	sandbox.client.logReader = reader
+	sandbox.run.Name = "session"
+	sandbox.run.Namespace = "default"
+	sandbox.run.Status.AssignedPod = "runtime-pod"
+	if err := sandbox.client.runs.Create(t.Context(), sandbox.run); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := sandbox.Logs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || lines[0].Stream != "audit" || lines[0].Operation != "command" {
+		t.Fatalf("logs = %#v", lines)
+	}
+}
+
 type httpDoer func(*http.Request) (*http.Response, error)
 
 func (do httpDoer) Do(request *http.Request) (*http.Response, error) { return do(request) }
+
+type logReader func(context.Context, string, string, string) (io.ReadCloser, error)
+
+func (read logReader) Open(ctx context.Context, namespace, pod, container string) (io.ReadCloser, error) {
+	return read(ctx, namespace, pod, container)
+}
 
 func readySandbox(t *testing.T, doer HTTPDoer) *Sandbox {
 	t.Helper()

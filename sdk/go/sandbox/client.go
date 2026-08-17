@@ -2,6 +2,7 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -29,10 +30,16 @@ type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+// LogReader opens the runtimed container log for one assigned Runtime Pod.
+type LogReader interface {
+	Open(ctx context.Context, namespace, pod, container string) (io.ReadCloser, error)
+}
+
 // Client creates and manages Sandboxes backed by Session-mode Runs.
 type Client struct {
 	runs         client.Client
 	httpClient   HTTPDoer
+	logReader    LogReader
 	bearerToken  string
 	pollInterval time.Duration
 }
@@ -43,6 +50,7 @@ type Client struct {
 type Config struct {
 	Runs         client.Client
 	HTTPClient   HTTPDoer
+	LogReader    LogReader
 	BearerToken  string
 	PollInterval time.Duration
 }
@@ -60,7 +68,7 @@ func New(config Config) (*Client, error) {
 	if interval <= 0 {
 		interval = defaultPollInterval
 	}
-	return &Client{runs: config.Runs, httpClient: config.HTTPClient, bearerToken: config.BearerToken, pollInterval: interval}, nil
+	return &Client{runs: config.Runs, httpClient: config.HTTPClient, logReader: config.LogReader, bearerToken: config.BearerToken, pollInterval: interval}, nil
 }
 
 // CreateOptions defines a new Session-mode Run.
@@ -278,6 +286,51 @@ func (s *Sandbox) ListFiles(ctx context.Context, directory string) ([]FileInfo, 
 		return nil, err
 	}
 	return response.Entries, nil
+}
+
+// LogLine is one structured output or audit record emitted by owner runtimed.
+type LogLine struct {
+	RunUID               string `json:"run_uid"`
+	AssignedPodUID       string `json:"assigned_pod_uid,omitempty"`
+	Stream               string `json:"stream"`
+	Message              string `json:"message"`
+	Operation            string `json:"operation,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	StatusCode           string `json:"status_code,omitempty"`
+	ExitCode             *int32 `json:"exit_code,omitempty"`
+	TimedOut             bool   `json:"timed_out,omitempty"`
+	DurationMilliseconds int64  `json:"duration_milliseconds,omitempty"`
+}
+
+// Logs returns structured owner-runtimed log lines for this Sandbox only.
+func (s *Sandbox) Logs(ctx context.Context) ([]LogLine, error) {
+	if s.client.logReader == nil {
+		return nil, errors.New("sandbox log reader is not configured")
+	}
+	if err := s.Refresh(ctx); err != nil {
+		return nil, err
+	}
+	if s.run.Status.AssignedPod == "" {
+		return nil, &StateError{Run: s.run.DeepCopy(), Message: "Session Run has no assigned Runtime Pod"}
+	}
+	stream, err := s.client.logReader.Open(ctx, s.run.Namespace, s.run.Status.AssignedPod, "runtimed")
+	if err != nil {
+		return nil, fmt.Errorf("open runtimed logs: %w", err)
+	}
+	defer stream.Close()
+	lines := []LogLine{}
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	for scanner.Scan() {
+		var line LogLine
+		if json.Unmarshal(scanner.Bytes(), &line) == nil && line.RunUID == string(s.run.UID) {
+			lines = append(lines, line)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read runtimed logs: %w", err)
+	}
+	return lines, nil
 }
 
 // APIError reports a non-success Runtime gateway response.
