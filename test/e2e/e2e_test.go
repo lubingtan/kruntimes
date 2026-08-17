@@ -665,6 +665,30 @@ func TestSessionRunExpiresWhenIdle(t *testing.T) {
 	waitForRunPhase(t, run, 10*time.Second, v1alpha1.RunTimeout)
 }
 
+func TestSessionRunExpiresWhenTotalTimeoutReached(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-total-timeout-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+	timeout := metav1.Duration{Duration: 5 * time.Second}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-total-timeout-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Timeout: &timeout,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	waitForRunPhase(t, run, 15*time.Second, v1alpha1.RunTimeout)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || condition.Reason != runretry.ReasonTimeout {
+		t.Fatalf("Completed condition = %#v, want Timeout", condition)
+	}
+}
+
 func TestSessionRunFailsWhenAssignedRuntimePodIsLost(t *testing.T) {
 	runtimeName := fmt.Sprintf("session-pod-loss-%d", time.Now().UnixNano())
 	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
