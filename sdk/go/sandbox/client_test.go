@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
@@ -141,5 +144,42 @@ func TestSandboxRejectsEndpointForAnotherRun(t *testing.T) {
 	sandbox := &Sandbox{run: &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{UID: "run-uid"}, Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, Endpoint: &v1alpha1.RunEndpoint{URL: "http://gateway/v1/namespaces/default/runtimes/bash/sessions/other"}}}}
 	if _, err := sandbox.endpoint("files"); err == nil {
 		t.Fatal("endpoint() error = nil, want UID fencing error")
+	}
+}
+
+func TestGatewayPortForwardPreservesRunEndpointPath(t *testing.T) {
+	forward := &GatewayPortForward{
+		httpClient: httpDoer(func(request *http.Request) (*http.Response, error) {
+			if request.URL.String() != "http://127.0.0.1:19090/v1/namespaces/default/runtimes/bash/sessions/run-uid/files?maxBytes=10" {
+				t.Fatalf("forwarded URL = %q", request.URL)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+		}),
+		localURL: &url.URL{Scheme: "http", Host: "127.0.0.1:19090"},
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://gateway/v1/namespaces/default/runtimes/bash/sessions/run-uid/files?maxBytes=10", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := forward.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+}
+
+func TestReadyGatewayPodSelectsReadyServiceBackend(t *testing.T) {
+	clientset := kubernetesfake.NewSimpleClientset(
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "platform"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "gateway"}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-z", Namespace: "platform", Labels: map[string]string{"app": "gateway"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway-a", Namespace: "platform", Labels: map[string]string{"app": "gateway"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "not-ready", Namespace: "platform", Labels: map[string]string{"app": "gateway"}}, Status: corev1.PodStatus{Phase: corev1.PodPending}},
+	)
+	pod, err := readyGatewayPod(t.Context(), clientset.CoreV1(), "platform", "gateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod != "gateway-a" {
+		t.Fatalf("gateway Pod = %q, want gateway-a", pod)
 	}
 }
