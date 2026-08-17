@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
@@ -50,7 +51,7 @@ func StartGatewayPortForward(ctx context.Context, config *rest.Config, namespace
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes Pod client: %w", err)
 	}
-	podName, err := readyGatewayPod(ctx, pods, namespace, service)
+	podName, targetPort, err := readyGatewayBackend(ctx, pods, namespace, service, servicePort)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +71,7 @@ func StartGatewayPortForward(ctx context.Context, config *rest.Config, namespace
 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, apiURL)
 	stop := make(chan struct{})
 	ready := make(chan struct{})
-	forwarder, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"}, []string{"0:" + strconv.Itoa(servicePort)}, stop, ready, io.Discard, io.Discard)
+	forwarder, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"}, []string{"0:" + strconv.Itoa(targetPort)}, stop, ready, io.Discard, io.Discard)
 	if err != nil {
 		return nil, fmt.Errorf("create Runtime gateway port-forward: %w", err)
 	}
@@ -154,7 +155,47 @@ func readyGatewayPod(ctx context.Context, pods corev1client.CoreV1Interface, nam
 	if len(serviceObject.Spec.Selector) == 0 {
 		return "", fmt.Errorf("Runtime gateway Service %q has no selector", service)
 	}
-	list, err := pods.Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set(serviceObject.Spec.Selector).String()})
+	return readyGatewayPodForService(ctx, pods, namespace, serviceObject)
+}
+
+func readyGatewayBackend(ctx context.Context, pods corev1client.CoreV1Interface, namespace, service string, servicePort int) (string, int, error) {
+	serviceObject, err := pods.Services(namespace).Get(ctx, service, metav1.GetOptions{})
+	if err != nil {
+		return "", 0, fmt.Errorf("get Runtime gateway Service %q: %w", service, err)
+	}
+	pod, err := readyGatewayPodForService(ctx, pods, namespace, serviceObject)
+	if err != nil {
+		return "", 0, err
+	}
+	targetPort, err := gatewayTargetPort(serviceObject, servicePort)
+	if err != nil {
+		return "", 0, err
+	}
+	if targetPort.Type == intstr.String {
+		podObject, err := pods.Pods(namespace).Get(ctx, pod, metav1.GetOptions{})
+		if err != nil {
+			return "", 0, fmt.Errorf("get selected Runtime gateway Pod %q: %w", pod, err)
+		}
+		port, ok := namedContainerPort(podObject, targetPort.StrVal)
+		if !ok {
+			return "", 0, fmt.Errorf("Runtime gateway Service %q targetPort %q is not declared by Pod %q", service, targetPort.StrVal, pod)
+		}
+		return pod, port, nil
+	}
+	if targetPort.IntVal <= 0 || targetPort.IntVal > 65535 {
+		return "", 0, fmt.Errorf("Runtime gateway Service %q has invalid targetPort %d", service, targetPort.IntVal)
+	}
+	return pod, int(targetPort.IntVal), nil
+}
+
+func readyGatewayPodForService(ctx context.Context, pods corev1client.CoreV1Interface, namespace string, service *corev1.Service) (string, error) {
+	if service == nil {
+		return "", errors.New("Runtime gateway Service is required")
+	}
+	if len(service.Spec.Selector) == 0 {
+		return "", fmt.Errorf("Runtime gateway Service %q has no selector", service.Name)
+	}
+	list, err := pods.Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set(service.Spec.Selector).String()})
 	if err != nil {
 		return "", fmt.Errorf("list Runtime gateway Pods: %w", err)
 	}
@@ -165,10 +206,34 @@ func readyGatewayPod(ctx context.Context, pods corev1client.CoreV1Interface, nam
 		}
 	}
 	if len(names) == 0 {
-		return "", fmt.Errorf("Runtime gateway Service %q has no Ready Pods", service)
+		return "", fmt.Errorf("Runtime gateway Service %q has no Ready Pods", service.Name)
 	}
 	sort.Strings(names)
 	return names[0], nil
+}
+
+func gatewayTargetPort(service *corev1.Service, requestedPort int) (intstr.IntOrString, error) {
+	for _, port := range service.Spec.Ports {
+		if int(port.Port) != requestedPort {
+			continue
+		}
+		if port.TargetPort.Type == intstr.String || port.TargetPort.IntVal != 0 {
+			return port.TargetPort, nil
+		}
+		return intstr.FromInt32(port.Port), nil
+	}
+	return intstr.IntOrString{}, fmt.Errorf("Runtime gateway Service %q does not expose port %d", service.Name, requestedPort)
+}
+
+func namedContainerPort(pod *corev1.Pod, name string) (int, bool) {
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if port.Name == name && port.ContainerPort > 0 {
+				return int(port.ContainerPort), true
+			}
+		}
+	}
+	return 0, false
 }
 
 func podReady(pod *corev1.Pod) bool {

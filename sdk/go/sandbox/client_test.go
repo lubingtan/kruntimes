@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -181,5 +182,19 @@ func TestReadyGatewayPodSelectsReadyServiceBackend(t *testing.T) {
 	}
 	if pod != "gateway-a" {
 		t.Fatalf("gateway Pod = %q, want gateway-a", pod)
+	}
+}
+
+func TestReadyGatewayBackendUsesServiceTargetPort(t *testing.T) {
+	clientset := kubernetesfake.NewSimpleClientset(
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "platform"}, Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "gateway"}, Ports: []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt(8084)}}}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: "platform", Labels: map[string]string{"app": "gateway"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}},
+	)
+	pod, port, err := readyGatewayBackend(t.Context(), clientset.CoreV1(), "platform", "gateway", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod != "gateway" || port != 8084 {
+		t.Fatalf("gateway backend = %q:%d, want gateway:8084", pod, port)
 	}
 }
