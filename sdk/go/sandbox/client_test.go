@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -48,9 +49,49 @@ func TestSandboxCreateAndExecute(t *testing.T) {
 	}
 }
 
+func TestSandboxFileMutationsUseGatewayOperationNames(t *testing.T) {
+	operations := []string{}
+	sandbox := readySandbox(t, httpDoer(func(request *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		for name := range payload {
+			operations = append(operations, name)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	}))
+	ctx := context.Background()
+	if err := sandbox.CreateDirectory(ctx, "notes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sandbox.DeleteFile(ctx, "notes/old", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := sandbox.RenameFile(ctx, "notes/a", "notes/b", true); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(operations, ",") != "createDirectory,deleteFile,renameFile" {
+		t.Fatalf("operation names = %v", operations)
+	}
+}
+
 type httpDoer func(*http.Request) (*http.Response, error)
 
 func (do httpDoer) Do(request *http.Request) (*http.Response, error) { return do(request) }
+
+func readySandbox(t *testing.T, doer HTTPDoer) *Sandbox {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(Config{Runs: fake.NewClientBuilder().WithScheme(scheme).Build(), HTTPClient: doer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Sandbox{client: client, run: &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{UID: "run-uid"}, Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, Endpoint: &v1alpha1.RunEndpoint{URL: "http://gateway/v1/namespaces/default/runtimes/bash/sessions/run-uid"}}}}
+}
 
 func TestSandboxRejectsEndpointForAnotherRun(t *testing.T) {
 	sandbox := &Sandbox{run: &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{UID: "run-uid"}, Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, Endpoint: &v1alpha1.RunEndpoint{URL: "http://gateway/v1/namespaces/default/runtimes/bash/sessions/other"}}}}

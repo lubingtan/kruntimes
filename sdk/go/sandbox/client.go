@@ -221,6 +221,21 @@ func (s *Sandbox) WriteFile(ctx context.Context, path string, contents []byte, c
 	return s.operation(ctx, map[string]any{"writeFile": map[string]any{"path": path, "contents": contents, "createParents": createParents}}, nil)
 }
 
+// CreateDirectory creates a workspace-relative directory and missing parents.
+func (s *Sandbox) CreateDirectory(ctx context.Context, path string) error {
+	return s.operation(ctx, map[string]any{"createDirectory": map[string]any{"path": path}}, nil)
+}
+
+// DeleteFile removes a workspace-relative file or directory.
+func (s *Sandbox) DeleteFile(ctx context.Context, path string, recursive bool) error {
+	return s.operation(ctx, map[string]any{"deleteFile": map[string]any{"path": path, "recursive": recursive}}, nil)
+}
+
+// RenameFile renames a workspace-relative file or directory.
+func (s *Sandbox) RenameFile(ctx context.Context, sourcePath, destinationPath string, overwrite bool) error {
+	return s.operation(ctx, map[string]any{"renameFile": map[string]any{"sourcePath": sourcePath, "destinationPath": destinationPath, "overwrite": overwrite}}, nil)
+}
+
 // ReadFile returns bounded content at a workspace-relative path.
 func (s *Sandbox) ReadFile(ctx context.Context, path string, maxBytes int64) ([]byte, bool, error) {
 	endpoint, err := s.endpoint("files/" + url.PathEscape(path))
