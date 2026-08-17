@@ -76,6 +76,23 @@ func TestSandboxFileMutationsUseGatewayOperationNames(t *testing.T) {
 	}
 }
 
+func TestSandboxReadFilePreservesPathForRuntimeValidation(t *testing.T) {
+	paths := []string{}
+	sandbox := readySandbox(t, httpDoer(func(request *http.Request) (*http.Response, error) {
+		paths = append(paths, request.URL.EscapedPath())
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"contents":""}`))}, nil
+	}))
+	if _, _, err := sandbox.ReadFile(t.Context(), "notes/file.txt", 64); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sandbox.ReadFile(t.Context(), "../outside.txt", 0); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(paths, ",") != "/v1/namespaces/default/runtimes/bash/sessions/run-uid/files/notes/file.txt,/v1/namespaces/default/runtimes/bash/sessions/run-uid/files/../outside.txt" {
+		t.Fatalf("paths = %v", paths)
+	}
+}
+
 func TestSandboxLogsFilterRunUID(t *testing.T) {
 	reader := logReader(func(context.Context, string, string, string) (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader("not-json\n{\"run_uid\":\"other\",\"stream\":\"stdout\"}\n{\"run_uid\":\"run-uid\",\"stream\":\"audit\",\"message\":\"session operation completed\",\"operation\":\"command\"}\n")), nil

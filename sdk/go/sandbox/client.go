@@ -302,18 +302,25 @@ func (s *Sandbox) RenameFile(ctx context.Context, sourcePath, destinationPath st
 
 // ReadFile returns bounded content at a workspace-relative path.
 func (s *Sandbox) ReadFile(ctx context.Context, path string, maxBytes int64) ([]byte, bool, error) {
-	endpoint, err := s.endpoint("files/" + url.PathEscape(path))
+	endpoint, err := s.endpoint("files")
 	if err != nil {
 		return nil, false, err
 	}
+	endpointURL, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse Session file endpoint: %w", err)
+	}
+	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/") + "/" + path
 	if maxBytes > 0 {
-		endpoint += "?maxBytes=" + fmt.Sprint(maxBytes)
+		query := endpointURL.Query()
+		query.Set("maxBytes", fmt.Sprint(maxBytes))
+		endpointURL.RawQuery = query.Encode()
 	}
 	var response struct {
 		Contents  []byte `json:"contents"`
 		Truncated bool   `json:"truncated"`
 	}
-	if err := s.request(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+	if err := s.request(ctx, http.MethodGet, endpointURL.String(), nil, &response); err != nil {
 		return nil, false, err
 	}
 	return response.Contents, response.Truncated, nil
