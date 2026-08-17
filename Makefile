@@ -5,6 +5,7 @@ IMG_RUNTIMED ?= kruntimes-runtimed:latest
 IMG_GATEWAY ?= kruntimes-gateway:latest
 IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:latest
 IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:latest
+IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:latest
 
 # ENVTEST_K8S_VERSION refers to the version of k8s to use for envtest
 ENVTEST_K8S_VERSION = 1.32
@@ -111,6 +112,7 @@ E2E_IMG_RUNTIMED ?= kruntimes-runtimed:$(E2E_IMAGE_TAG)
 E2E_IMG_GATEWAY ?= kruntimes-gateway:$(E2E_IMAGE_TAG)
 E2E_IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:$(E2E_IMAGE_TAG)
+E2E_IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:$(E2E_IMAGE_TAG)
 E2E_TEST ?=
 .PHONY: e2e-setup
 e2e-setup: IMG_SCHEDULER = $(E2E_IMG_SCHEDULER)
@@ -119,7 +121,8 @@ e2e-setup: IMG_RUNTIMED = $(E2E_IMG_RUNTIMED)
 e2e-setup: IMG_GATEWAY = $(E2E_IMG_GATEWAY)
 e2e-setup: IMG_BASH_RUNTIME = $(E2E_IMG_BASH_RUNTIME)
 e2e-setup: IMG_PYTHON_RUNTIME = $(E2E_IMG_PYTHON_RUNTIME)
-e2e-setup: manifests docker-build ## Create kind cluster, load images, and deploy chart.
+e2e-setup: IMG_DIAGNOSIS_RUNTIME = $(E2E_IMG_DIAGNOSIS_RUNTIME)
+e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind cluster, load images, and deploy chart.
 	kind get clusters | grep $(KIND_CLUSTER_NAME) || kind create cluster --name $(KIND_CLUSTER_NAME) --wait 120s
 	kind load docker-image $(E2E_IMG_SCHEDULER) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_CONTROLLER) --name $(KIND_CLUSTER_NAME)
@@ -127,6 +130,7 @@ e2e-setup: manifests docker-build ## Create kind cluster, load images, and deplo
 	kind load docker-image $(E2E_IMG_GATEWAY) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_BASH_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_PYTHON_RUNTIME) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(E2E_IMG_DIAGNOSIS_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	# Server-side apply avoids copying large CRD schemas into the 256 KiB last-applied annotation.
 	kubectl apply --server-side --force-conflicts -f charts/kruntimes/crds
 	$(HELM) upgrade --install kruntimes ./charts/kruntimes \
@@ -141,6 +145,7 @@ e2e-setup: manifests docker-build ## Create kind cluster, load images, and deplo
 e2e-test: generate ## Run E2E tests against the kind cluster.
 	KRUNTIMES_BASH_RUNTIME_IMAGE=$(E2E_IMG_BASH_RUNTIME) \
 	KRUNTIMES_PYTHON_RUNTIME_IMAGE=$(E2E_IMG_PYTHON_RUNTIME) \
+	KRUNTIMES_DIAGNOSIS_RUNTIME_IMAGE=$(E2E_IMG_DIAGNOSIS_RUNTIME) \
 	KRUNTIMES_RUNTIMED_IMAGE=$(E2E_IMG_RUNTIMED) \
 	go test ./test/e2e/... -v -count=1 -failfast $(if $(E2E_TEST),-run '$(E2E_TEST)')
 
@@ -239,6 +244,13 @@ docker-build-bash-runtime: proto ## Build bash-runtime Docker image.
 .PHONY: docker-build-python-runtime
 docker-build-python-runtime: proto-python ## Build python-runtime Docker image.
 	$(CONTAINER_TOOL) build -t $(IMG_PYTHON_RUNTIME) -f Dockerfile.python-runtime .
+
+.PHONY: docker-build-diagnosis-runtime
+docker-build-diagnosis-runtime: docker-build-python-runtime ## Build the Kubernetes diagnosis Runtime image used by its E2E demo.
+	$(CONTAINER_TOOL) build \
+		--build-arg RUNTIME_IMAGE=$(IMG_PYTHON_RUNTIME) \
+		-t $(IMG_DIAGNOSIS_RUNTIME) \
+		-f demo/kubernetes-diagnosis-agent/Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push Docker images.

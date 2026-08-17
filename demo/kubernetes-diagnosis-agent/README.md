@@ -50,6 +50,8 @@ kubectl wait pod --namespace agent-demo -l runtime=diagnosis-python \
 ```
 
 The `runs: "1"` capacity makes the Session Run exclusive to one Runtime Pod.
+The Dockerfile pins `kubectl` to v1.32.0 and verifies its official SHA-256
+checksum during the image build.
 
 ## Run the Agent
 
