@@ -164,6 +164,33 @@ external client 通过共享的 Runtime gateway Service 调用 HTTP，绝不直�
 调用目标 Runtime Service 的 `SessionRuntime` endpoint；owner runtimed 将已接受的 request proxy 到本地
 Runtime Server。
 
+## SDK Contract
+
+面向 agent 的 Go 和 Python SDK 将 Session Run 称为 **Sandbox**。这只是用户层语义：一个 Sandbox
+由一个 `spec.mode.session` 的 `Run` 支撑，Kubernetes Run lifecycle 仍是权威来源。SDK 不创建另一种
+Sandbox resource，也不会绕过 gateway。
+
+两个 SDK 提供相同的 lifecycle 与操作：
+
+| Helper | 行为 |
+| --- | --- |
+| `Create` | 使用请求的 Runtime、source、artifact inputs、environment 与 timeout settings 创建 Session Run |
+| `Open` | 读取一个已有的、具名的 Session Run；绝不创建或重新注册它 |
+| `Wait` | watch 或 poll 至 `Ready` 或 terminal Run phase；返回 typed terminal 或 readiness error |
+| `Execute` | 通过 Run endpoint 发送恰好一个 command 或 file mutation；绝不隐式重试 mutation |
+| `ReadFile`、`ListFiles`、`WriteFile`、`CreateDirectory`、`DeleteFile`、`RenameFile` | 使用有界且 workspace-relative 的 gateway operations |
+| `Logs` | 读取 assigned runtimed container log，并按不可变 Run UID 过滤结构化日志行；不引入 gateway log store |
+| `Close` | 设置 `spec.cancelRequested` 并等待 Run terminal lifecycle；runtimed 负责 queue fencing、Runtime Server close、workspace cleanup 与 capacity release |
+
+`Open` 和每次 data-plane call 都从当前 Run status 推导 endpoint。SDK 会拒绝非 Session Run、未处于
+`Ready` 的 Run，或 endpoint Run UID 与已打开 Run 不匹配的情况。HTTP failures 以保留 status code 和
+有界 server message 的 typed errors 暴露。SDK 绝不会把 transport failure 当作 mutation 未执行的证明。
+
+in-cluster caller 使用调用者的 Kubernetes REST credentials 创建/watch Runs、读取 runtimed logs，并向
+Runtime gateway Service 认证。local caller 则对 shared Runtime gateway Pod 建立 scoped port-forward，保持
+endpoint path 不变，并使用同一套 Kubernetes credentials。Runtime Servers 和 runtimed gRPC ports 在两种
+模式下都仍是私有实现细节。
+
 public Session API 不暴露 Runtime backend。v0 backend 是每个 Runtime Pod 一个 trusted container
 session。未来 Runtime implementation 可以用 gVisor 或 microVM actor 在 worker Pod 中 multiplex 多个
 session，而无需改变 Run 或 `SessionRuntime` API。该模型借鉴 Agent Substrate 的 actor/worker 分层，但不把其

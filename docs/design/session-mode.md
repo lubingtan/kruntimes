@@ -205,6 +205,38 @@ never reach a Runtime Server directly. The gateway server calls the target
 Runtime Service's `SessionRuntime` endpoint; owner runtimed proxies accepted
 requests to its local Runtime Server.
 
+## SDK Contract
+
+The agent-facing Go and Python SDKs call a Session Run a **Sandbox**. This is a
+user-level name only: a Sandbox is backed by one `Run` with
+`spec.mode.session`, and the Kubernetes Run lifecycle remains authoritative.
+The SDKs do not create another Sandbox resource or bypass the gateway.
+
+Both SDKs expose the same lifecycle and operations:
+
+| Helper | Behavior |
+| --- | --- |
+| `Create` | create a Session Run from the requested Runtime, source, artifact inputs, environment, and timeout settings |
+| `Open` | read an existing named Session Run; it never creates or re-registers one |
+| `Wait` | watch or poll until `Ready` or a terminal Run phase; return a typed terminal or readiness error |
+| `Execute` | send exactly one command or file mutation through the Run endpoint; never retry a mutation implicitly |
+| `ReadFile`, `ListFiles`, `WriteFile`, `CreateDirectory`, `DeleteFile`, `RenameFile` | use the bounded, workspace-relative gateway operations |
+| `Logs` | read the assigned runtimed container log and filter the structured lines for the immutable Run UID; it does not introduce a gateway log store |
+| `Close` | set `spec.cancelRequested` and wait for the Run terminal lifecycle; runtimed performs queue fencing, Runtime Server close, workspace cleanup, and capacity release |
+
+`Open` and every data-plane call derive the endpoint from the current Run
+status. The SDK rejects a non-Session Run, a Run that is not `Ready`, or an
+endpoint whose Run UID does not match the opened Run. HTTP failures are exposed
+as typed errors that retain the status code and bounded server message. The SDK
+never treats a transport failure as proof that a mutation did not run.
+
+For in-cluster callers, the SDK uses the caller's Kubernetes REST credentials
+to create/watch Runs, read runtimed logs, and authenticate to the Runtime
+gateway Service. For local callers, it creates a scoped port-forward to the
+shared Runtime gateway Pod while preserving the endpoint path and uses the same
+Kubernetes credentials. Runtime Servers and runtimed gRPC ports remain private
+implementation details in both modes.
+
 The public Session API does not expose a Runtime backend choice. The v0 backend
 is one trusted container session per Runtime Pod. A future Runtime implementation
 may multiplex multiple sessions in a worker Pod through gVisor or microVM
