@@ -81,6 +81,11 @@ test-integration: generate manifests setup-envtest ## Run integration tests (req
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
 	go test ./test/integration/... -v -count=1 -failfast
 
+.PHONY: test-sdk-python
+test-sdk-python: ## Run Python Sandbox SDK and diagnosis agent unit tests.
+	PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v
+	PYTHONPATH=sdk/python/src:demo/kubernetes-diagnosis-agent python3 -m unittest discover -s demo/kubernetes-diagnosis-agent/tests -v
+
 .PHONY: test-race
 test-race: generate manifests proto ## Run focused Go race-detector coverage for runtime and control-plane packages.
 	go test -race ./internal/controller ./internal/scheduler ./internal/runtimed ./runtimes/bash -count=1

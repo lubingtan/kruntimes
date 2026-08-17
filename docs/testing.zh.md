@@ -45,6 +45,16 @@ uv sync --frozen
 uv run --frozen python -m unittest server_test -v
 ```
 
+## Python Sandbox SDK 和 Agent Demo
+
+下面的命令运行 SDK lifecycle、local gateway adapter tests 以及 Kubernetes diagnosis agent 的
+allowlist tests，不会把它们加入 Runtime 的 locked Python environment：
+
+```bash
+make test-sdk-python
+UV_CACHE_DIR=/tmp/kruntimes-uv-cache uv build --directory sdk/python
+```
+
 ## E2E 测试
 
 ```bash
