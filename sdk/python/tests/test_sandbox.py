@@ -9,6 +9,7 @@ from kruntimes.sandbox import (
     SandboxClient,
     SandboxStateError,
 )
+from kruntimes.kubernetes import PortForwardGatewayTransport
 
 
 class FakeRuns:
@@ -103,6 +104,17 @@ class SandboxTests(unittest.TestCase):
         with self.assertRaises(APIError) as error:
             sandbox.execute(Command(shell="true"))
         self.assertEqual(403, error.exception.status_code)
+
+    def test_port_forward_preserves_endpoint_path(self):
+        gateway = FakeGateway()
+        transport = PortForwardGatewayTransport(gateway, "http://127.0.0.1:19090")
+
+        transport.request("GET", "https://gateway/v1/namespaces/default/runtimes/python/sessions/run-uid/files?maxBytes=10", None, {})
+
+        self.assertEqual(
+            "http://127.0.0.1:19090/v1/namespaces/default/runtimes/python/sessions/run-uid/files?maxBytes=10",
+            gateway.requests[0][1],
+        )
 
 
 if __name__ == "__main__":
