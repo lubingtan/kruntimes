@@ -245,7 +245,7 @@ wiring from accumulating avoidable conflicts.
   - [x] add Python and Go SDKs with create/open/wait/execute/files/logs/close
     helpers, typed errors, direct in-cluster access, and local port-forward
     support;
-  - [ ] add a Kubernetes diagnosis agent example that uses a Session Run for
+  - [x] add a Kubernetes diagnosis agent example that uses a Session Run for
     multi-step scripts, files, results, and cleanup; use it to find remaining
     product gaps before calling the feature supported;
   - [ ] add unit, integration, and E2E coverage for registration, ordering,

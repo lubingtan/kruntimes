@@ -204,7 +204,7 @@ controller wiring 累积不必要的冲突。
     有界 readiness/endpoint 数据，大输出通过 ArtifactStore 导出；
   - [x] 增加 Python 和 Go SDK：create/open/wait/execute/files/logs/close helpers、typed errors、
     direct in-cluster access 与 local port-forward support；
-  - [ ] 增加 Kubernetes diagnosis agent 示例，使用 Session Run 实现 multi-step scripts、files、
+  - [x] 增加 Kubernetes diagnosis agent 示例，使用 Session Run 实现 multi-step scripts、files、
     results 和 cleanup；在 feature 被视为 supported 前用该示例发现剩余 product gaps；
   - [ ] 增加 registration、ordering、timeout、cancellation、idle expiry、cleanup、authorization、
     file-boundary enforcement、Runtime Pod loss 和 gateway routing 的 unit、integration 与 E2E

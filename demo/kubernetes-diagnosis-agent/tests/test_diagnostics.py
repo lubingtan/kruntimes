@@ -1,6 +1,7 @@
 import unittest
 
-from diagnostics import command_for
+from agent import _MAX_TOOL_CALLS, validate_tool_call
+from diagnostics import TOOL, command_for
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -21,6 +22,15 @@ class DiagnosticsTests(unittest.TestCase):
             command_for("workloads", {"kind": "pods; rm -rf /"})
         with self.assertRaises(ValueError):
             command_for("workloads", {"kind": "pods", "name": "../../secret"})
+
+    def test_tool_name_is_fixed(self):
+        self.assertEqual("collect_kubernetes_diagnostics", TOOL["name"])
+
+    def test_agent_rejects_unknown_or_unbounded_tool_calls(self):
+        with self.assertRaises(RuntimeError):
+            validate_tool_call("write_file", 0)
+        with self.assertRaises(RuntimeError):
+            validate_tool_call(TOOL["name"], _MAX_TOOL_CALLS)
 
 
 if __name__ == "__main__":

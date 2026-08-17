@@ -11,6 +11,8 @@ from diagnostics import TOOL, command_for
 from kruntimes.kubernetes import PortForwardGatewayTransport, from_incluster, from_kube_config
 from kruntimes.sandbox import Command, CreateOptions
 
+_MAX_TOOL_CALLS = 8
+
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -62,10 +64,11 @@ def run_diagnosis(client: Any, namespace: str, runtime: str, model: str) -> None
         while calls := [item for item in response.output if item.type == "function_call"]:
             tool_outputs = []
             for call in calls:
+                validate_tool_call(call.name, evidence_index)
                 command = command_for(namespace, json.loads(call.arguments))
                 result = sandbox.execute(Command(argv=command, timeout_millis=30_000))
                 output = (result.stdout + result.stderr)[:16_384]
-                evidence_path = f"evidence/{evidence_index:02d}-{call.name}.json"
+                evidence_path = f"evidence/{evidence_index:02d}.json"
                 sandbox.write_file(evidence_path, output, create_parents=True)
                 evidence_index += 1
                 tool_outputs.append({
@@ -95,6 +98,14 @@ def _openai_client() -> Any:
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is required")
     return OpenAI()
+
+
+def validate_tool_call(name: str, evidence_index: int) -> None:
+    """Keep model output inside the declared tool and bounded workspace plan."""
+    if name != TOOL["name"]:
+        raise RuntimeError(f"unsupported tool call {name!r}")
+    if evidence_index >= _MAX_TOOL_CALLS:
+        raise RuntimeError(f"diagnosis exceeded {_MAX_TOOL_CALLS} tool calls")
 
 
 if __name__ == "__main__":
