@@ -593,6 +593,8 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	if !strings.Contains(string(unauthenticated), "bearer token is required") {
 		t.Fatalf("unauthenticated response = %s", unauthenticated)
 	}
+	unauthorizedToken := sessionGatewayTokenWithoutRunAccess(t)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, unauthorizedToken, nil, http.StatusForbidden)
 
 	payload := []byte(`{"command":{"argv":["sh","-c","printf gateway-ok"]}}`)
 	operationResponse := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, payload, http.StatusOK)
@@ -612,6 +614,8 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 
 	writePayload := []byte(`{"writeFile":{"path":"notes/result.txt","contents":"Z2F0ZXdheS1maWxl","createParents":true}}`)
 	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, writePayload, http.StatusOK)
+	escapingWrite := []byte(`{"writeFile":{"path":"../outside.txt","contents":"ZXNjYXBl","createParents":true}}`)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, escapingWrite, http.StatusBadRequest)
 
 	filesResponse := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files?path=notes", token, nil, http.StatusOK)
 	var files struct {
@@ -756,12 +760,7 @@ func containsSessionCommandLogs(contents, runUID, message string) bool {
 func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {
 	t.Helper()
 	ctx := context.Background()
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "session-gateway-user-" + suffix, Namespace: testNamespace}}
-	if err := k8sClient.Create(ctx, serviceAccount); err != nil {
-		t.Fatalf("create gateway test ServiceAccount: %v", err)
-	}
-	t.Cleanup(func() { _ = k8sClient.Delete(ctx, serviceAccount) })
+	serviceAccount, token := newSessionGatewayServiceAccount(t)
 
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: serviceAccount.Name, Namespace: testNamespace},
@@ -786,6 +785,25 @@ func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(ctx, binding) })
 
+	return token
+}
+
+func sessionGatewayTokenWithoutRunAccess(t *testing.T) string {
+	t.Helper()
+	_, token := newSessionGatewayServiceAccount(t)
+	return token
+}
+
+func newSessionGatewayServiceAccount(t *testing.T) (*corev1.ServiceAccount, string) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "session-gateway-user-" + suffix, Namespace: testNamespace}}
+	if err := k8sClient.Create(ctx, serviceAccount); err != nil {
+		t.Fatalf("create gateway test ServiceAccount: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, serviceAccount) })
+
 	response, err := coreClientset.CoreV1().ServiceAccounts(testNamespace).CreateToken(ctx, serviceAccount.Name, &authenticationv1.TokenRequest{}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create gateway test ServiceAccount token: %v", err)
@@ -793,7 +811,7 @@ func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {
 	if response.Status.Token == "" {
 		t.Fatal("gateway test ServiceAccount token is empty")
 	}
-	return response.Status.Token
+	return serviceAccount, response.Status.Token
 }
 
 func waitForGatewayPod(t *testing.T) *corev1.Pod {
