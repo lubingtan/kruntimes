@@ -287,6 +287,18 @@ that when Bash, Python, or another existing Runtime cannot model the execution
 semantics you need. The protocol contract is covered in
 [Custom Runtime Development](custom-runtime.md).
 
+## Demo 4: Kubernetes Diagnosis Agent Preview
+
+The [Kubernetes Diagnosis Agent](../demo/kubernetes-diagnosis-agent/README.md)
+uses OpenAI tool calls with one Session-mode Run. It demonstrates multi-step
+commands, workspace evidence files, a final report, structured logs, and
+explicit session cleanup.
+
+The example deliberately uses a custom Python Runtime with namespace-scoped
+read-only Kubernetes RBAC. It is a trusted-workload preview, not a sandbox for
+untrusted model-generated code. The complete setup and security constraints are
+in the example README.
+
 ## Clean Up
 
 ```bash
