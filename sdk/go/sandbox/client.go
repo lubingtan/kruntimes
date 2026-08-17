@@ -18,6 +18,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
@@ -69,6 +72,59 @@ func New(config Config) (*Client, error) {
 		interval = defaultPollInterval
 	}
 	return &Client{runs: config.Runs, httpClient: config.HTTPClient, logReader: config.LogReader, bearerToken: config.BearerToken, pollInterval: interval}, nil
+}
+
+// NewFromRESTConfig constructs a Client from Kubernetes REST credentials.
+func NewFromRESTConfig(config *rest.Config, options Config) (*Client, error) {
+	if config == nil {
+		return nil, errors.New("Kubernetes REST config is required")
+	}
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("add kruntimes API scheme: %w", err)
+	}
+	if options.Runs == nil {
+		runs, err := client.New(config, client.Options{Scheme: scheme})
+		if err != nil {
+			return nil, fmt.Errorf("create Kubernetes Run client: %w", err)
+		}
+		options.Runs = runs
+	}
+	if options.HTTPClient == nil {
+		httpClient, err := rest.HTTPClientFor(config)
+		if err != nil {
+			return nil, fmt.Errorf("create Runtime gateway HTTP client: %w", err)
+		}
+		options.HTTPClient = httpClient
+	}
+	if options.LogReader == nil {
+		pods, err := corev1client.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("create Kubernetes Pod log client: %w", err)
+		}
+		options.LogReader = KubernetesLogReader{Pods: pods}
+	}
+	return New(options)
+}
+
+// NewInCluster constructs a Client from the in-cluster ServiceAccount.
+func NewInCluster(options Config) (*Client, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load in-cluster Kubernetes config: %w", err)
+	}
+	return NewFromRESTConfig(config, options)
+}
+
+// KubernetesLogReader reads runtimed logs through Kubernetes Pod log requests.
+type KubernetesLogReader struct{ Pods corev1client.CoreV1Interface }
+
+// Open implements LogReader.
+func (r KubernetesLogReader) Open(ctx context.Context, namespace, pod, container string) (io.ReadCloser, error) {
+	if r.Pods == nil {
+		return nil, errors.New("Kubernetes Pod log client is required")
+	}
+	return r.Pods.Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container}).Stream(ctx)
 }
 
 // CreateOptions defines a new Session-mode Run.
