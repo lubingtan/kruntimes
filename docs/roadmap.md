@@ -253,6 +253,8 @@ wiring from accumulating avoidable conflicts.
     enforcement, Runtime Pod loss, and gateway routing;
     - [x] verify per-session FIFO mutation ordering through the authenticated
       HTTP gateway in E2E;
+    - [x] verify that cancelling a Session Run terminates an active gateway
+      command and rejects subsequent gateway access in E2E;
   - [ ] v1.0: add at least one secure session backend, initially gVisor, for
     untrusted LLM-generated code;
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those

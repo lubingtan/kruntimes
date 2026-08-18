@@ -11,7 +11,9 @@ import (
 )
 
 func TestSetTerminalSetsCommonFieldsAndConditions(t *testing.T) {
-	run := &v1alpha1.Run{}
+	run := &v1alpha1.Run{Status: v1alpha1.RunStatus{Conditions: []metav1.Condition{{
+		Type: ConditionReady, Status: metav1.ConditionTrue, Reason: "SessionRegistered", Message: "session is ready",
+	}}}}
 	now := metav1.NewTime(time.Date(2026, time.June, 12, 12, 0, 0, 0, time.UTC))
 
 	SetTerminal(run, v1alpha1.RunFailed, "PodGone", "assigned pod was deleted", now)
@@ -25,7 +27,7 @@ func TestSetTerminalSetsCommonFieldsAndConditions(t *testing.T) {
 	if run.Status.CompletionTime == nil || !run.Status.CompletionTime.Equal(&now) {
 		t.Fatalf("completionTime = %v, want %v", run.Status.CompletionTime, now)
 	}
-	for _, conditionType := range []string{ConditionRunning, ConditionCompleted} {
+	for _, conditionType := range []string{ConditionReady, ConditionRunning, ConditionCompleted} {
 		condition := meta.FindStatusCondition(run.Status.Conditions, conditionType)
 		if condition == nil ||
 			condition.Status != metav1.ConditionFalse ||

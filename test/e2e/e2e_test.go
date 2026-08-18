@@ -518,6 +518,9 @@ func assertCancelledRun(t *testing.T, run *v1alpha1.Run) {
 	if completed.Status != metav1.ConditionFalse || completed.Reason != "Cancelled" {
 		t.Fatalf("expected Completed=False reason=Cancelled, got status=%s reason=%s", completed.Status, completed.Reason)
 	}
+	if ready := findRunCondition(run, runstatus.ConditionReady); ready != nil && ready.Status != metav1.ConditionFalse {
+		t.Fatalf("expected terminal Ready condition to be false, got status=%s reason=%s", ready.Status, ready.Reason)
+	}
 }
 
 func requestRunCancel(t *testing.T, run *v1alpha1.Run) {
@@ -704,6 +707,46 @@ func TestSessionGatewaySerializesMutations(t *testing.T) {
 	if string(file.Contents) != "second" {
 		t.Fatalf("serialized mutation result = %q, want second", file.Contents)
 	}
+}
+
+func TestSessionRunCancellationTerminatesActiveGatewayCommand(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-cancel-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-cancel-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create cancellation Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	commandURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	commandResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := gatewayRequest(ctx, http.MethodPost, commandURL+"/operations:execute", token,
+			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 20; printf completed > completed"]}}`), http.StatusOK)
+		commandResult <- err
+	}()
+
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/started", token, nil, http.StatusOK)
+	requestRunCancel(t, run)
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
+	assertCancelledRun(t, run)
+	if err := <-commandResult; err == nil {
+		t.Fatal("active Session command succeeded after its Run was cancelled")
+	}
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
 }
 
 func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
