@@ -47,7 +47,9 @@ session 失败，v0 不承诺 checkpoint、resume 或透明迁移。
 activity 后过期。Session 继续使用普通 Run 的 cancellation、deletion、TTL、authorization、endpoint
 和 assignment-UID fencing。注册在 `Ready` 前可以 retry，因为此时尚不存在可用的 session state；
 进入 Ready 后 assigned-Pod loss 是 terminal，client 必须创建新的 Session Run，而不能在空 workspace
-中静默继续。
+中静默继续。idle expiry 同样是 terminal：它会关闭本地 session、清理 ephemeral workspace，并记录为
+`RunTimeout`。重新打开或再次提交同一个 Run 不能恢复它；需要新 sandbox 的 client 必须创建新的
+Session Run。显式 suspend/resume 是独立的 v1 design item，不能从 timeout recovery 隐式推导。
 
 ## 服务与请求路径
 

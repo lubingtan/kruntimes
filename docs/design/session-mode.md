@@ -58,7 +58,11 @@ the normal Run cancellation, deletion, TTL, authorization, endpoint, and
 assignment-UID fencing rules. Registration can retry before `Ready`, when no
 usable session state exists. Once Ready, an assigned-Pod loss is terminal: the
 client must create a new Session Run rather than silently continuing in an
-empty workspace.
+empty workspace. Idle expiry is also terminal: it closes the local session,
+cleans its ephemeral workspace, and records `RunTimeout`. Reopening or
+resubmitting the same Run cannot restore it; a client that needs a new sandbox
+must create a new Session Run. Explicit suspend and resume semantics are a
+separate v1 design item, not an implicit consequence of timeout recovery.
 
 ## Services and Request Flow
 
