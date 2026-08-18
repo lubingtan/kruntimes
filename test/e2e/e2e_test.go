@@ -655,6 +655,57 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
 }
 
+func TestSessionGatewaySerializesMutations(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-fifo-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-fifo-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create FIFO Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	firstRequestURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	firstResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := gatewayRequest(ctx, http.MethodPost, firstRequestURL+"/operations:execute", token,
+			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 1; printf first > result.txt"]}}`), http.StatusOK)
+		firstResult <- err
+	}()
+
+	// Reading is not a mutation, so this confirms that the first command is
+	// active before the second mutation is submitted to the owner queue.
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/started", token, nil, http.StatusOK)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"writeFile":{"path":"result.txt","contents":"c2Vjb25k"}}`), http.StatusOK)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("execute first FIFO mutation: %v", err)
+	}
+
+	response := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/result.txt", token, nil, http.StatusOK)
+	var file struct {
+		Contents []byte `json:"contents"`
+	}
+	if err := json.Unmarshal(response, &file); err != nil {
+		t.Fatalf("decode FIFO result file: %v", err)
+	}
+	if string(file.Contents) != "second" {
+		t.Fatalf("serialized mutation result = %q, want second", file.Contents)
+	}
+}
+
 func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
 	runtimeName := fmt.Sprintf("sdk-session-gateway-%d", time.Now().UnixNano())
 	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
@@ -1076,6 +1127,32 @@ func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+func gatewayRequest(ctx context.Context, method, requestURL, token string, body []byte, expectedStatus int) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create gateway request: %w", err)
+	}
+	if len(body) > 0 {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("send gateway request: %w", err)
+	}
+	defer response.Body.Close()
+	contents, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read gateway response: %w", err)
+	}
+	if response.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("gateway response status = %d, want %d: %s", response.StatusCode, expectedStatus, contents)
+	}
+	return contents, nil
 }
 
 func forwardPodPort(ctx context.Context, namespace, podName string, localPort, remotePort int) (io.Closer, error) {

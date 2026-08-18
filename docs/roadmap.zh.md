@@ -209,6 +209,7 @@ controller wiring 累积不必要的冲突。
   - [ ] 增加 registration、ordering、timeout、cancellation、idle expiry、cleanup、authorization、
     file-boundary enforcement、Runtime Pod loss 和 gateway routing 的 unit、integration 与 E2E
     coverage；
+    - [x] 通过 authenticated HTTP gateway 的 E2E 验证每个 Session 的 FIFO mutation ordering；
   - [ ] v1.0：至少增加一个 secure session backend，初始目标为 gVisor，用于 untrusted
     LLM-generated code；
 - [ ] v0.x examples：增加 LLM agent 示例和 workflow 示例，并用这些示例反推缺失的

@@ -251,6 +251,8 @@ wiring from accumulating avoidable conflicts.
   - [ ] add unit, integration, and E2E coverage for registration, ordering,
     timeout, cancellation, idle expiry, cleanup, authorization, file-boundary
     enforcement, Runtime Pod loss, and gateway routing;
+    - [x] verify per-session FIFO mutation ordering through the authenticated
+      HTTP gateway in E2E;
   - [ ] v1.0: add at least one secure session backend, initially gVisor, for
     untrusted LLM-generated code;
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those
