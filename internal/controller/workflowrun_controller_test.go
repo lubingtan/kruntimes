@@ -1456,8 +1456,8 @@ func TestWorkflowRunReconcilerRequestsCancellationWithoutStartingNewJobs(t *test
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(activeRun), &updatedRun); err != nil {
 		t.Fatalf("get child run: %v", err)
 	}
-	if !updatedRun.Spec.CancelRequested {
-		t.Fatal("child run cancelRequested = false, want true")
+	if !updatedRun.Spec.HasImmediateTermination() {
+		t.Fatal("child run does not request immediate termination")
 	}
 	if patches != 1 {
 		t.Fatalf("child run patches = %d, want one idempotent cancellation request", patches)

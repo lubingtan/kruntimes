@@ -513,10 +513,6 @@ spec:
                       size(segment) == 0 || segment == ''.'' || segment == ''..'')'
                 maxItems: 32
                 type: array
-              cancelRequested:
-                description: CancelRequested is set to true to request cancellation
-                  of a running Run.
-                type: boolean
               env:
                 description: Env is the list of environment variables to set for execution.
                 items:
@@ -846,6 +842,21 @@ spec:
                   rule: '!has(self.inlinePath) || (!self.inlinePath.startsWith(''/'')
                     && !self.inlinePath.split(''/'').exists(segment, size(segment)
                     == 0 || segment == ''.'' || segment == ''..''))'
+              termination:
+                description: |-
+                  Termination requests a one-way termination transition. Immediate is valid
+                  for every Run mode; Drain is valid only for Session Runs.
+                properties:
+                  mode:
+                    description: Mode selects immediate cancellation or Session-specific
+                      graceful drain.
+                    enum:
+                    - Immediate
+                    - Drain
+                    type: string
+                required:
+                - mode
+                type: object
               timeout:
                 description: |-
                   Timeout is the maximum duration the run is allowed to run.
@@ -905,6 +916,9 @@ spec:
                 || has(self.source.inlinePath)'
             - message: session mode does not support spec.workspace
               rule: '!has(self.mode.session) || !has(self.workspace)'
+            - message: termination.mode Drain is only valid for session mode
+              rule: '!has(self.termination) || self.termination.mode != ''Drain''
+                || has(self.mode.session)'
             - message: runtime, source, mode, artifactInputs, env, timeout, retryPolicy,
                 and resources are immutable after Run creation
               rule: self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source)
@@ -921,9 +935,9 @@ spec:
               rule: has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace)
                 || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity)
                 && (!has(self.affinity) || self.affinity == oldSelf.affinity)
-            - message: cancelRequested may not transition from true to false
-              rule: '!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested ||
-                (has(self.cancelRequested) && self.cancelRequested)'
+            - message: termination may not be removed or changed once set
+              rule: '!has(oldSelf.termination) || (has(self.termination) && self.termination
+                == oldSelf.termination)'
           status:
             description: RunStatus defines the observed state of Run.
             properties:
@@ -1238,6 +1252,7 @@ spec:
                 - Scheduled
                 - Running
                 - Ready
+                - Finalizing
                 - Succeeded
                 - Failed
                 - Timeout

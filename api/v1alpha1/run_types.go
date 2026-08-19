@@ -9,7 +9,7 @@ import (
 )
 
 // RunPhase is the lifecycle phase of a Run.
-// +kubebuilder:validation:Enum=Pending;Scheduled;Running;Ready;Succeeded;Failed;Timeout;Cancelled
+// +kubebuilder:validation:Enum=Pending;Scheduled;Running;Ready;Finalizing;Succeeded;Failed;Timeout;Cancelled
 type RunPhase string
 
 const (
@@ -18,11 +18,14 @@ const (
 	RunRunning   RunPhase = "Running"
 	// RunReady is an active, non-terminal function or session Run that accepts
 	// data-plane requests.
-	RunReady     RunPhase = "Ready"
-	RunSucceeded RunPhase = "Succeeded"
-	RunFailed    RunPhase = "Failed"
-	RunTimeout   RunPhase = "Timeout"
-	RunCancelled RunPhase = "Cancelled"
+	RunReady RunPhase = "Ready"
+	// RunFinalizing is an active Session Run that has stopped accepting new
+	// operations while it drains and exports final artifacts.
+	RunFinalizing RunPhase = "Finalizing"
+	RunSucceeded  RunPhase = "Succeeded"
+	RunFailed     RunPhase = "Failed"
+	RunTimeout    RunPhase = "Timeout"
+	RunCancelled  RunPhase = "Cancelled"
 
 	// RunFunctionCleanupFinalizer ensures that a function registration is
 	// released before its Run is deleted.
@@ -59,6 +62,27 @@ type RunEndpoint struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=16384
 	CABundle []byte `json:"caBundle,omitempty"`
+}
+
+// RunTerminationMode describes how a Run is asked to terminate.
+// +kubebuilder:validation:Enum=Immediate;Drain
+type RunTerminationMode string
+
+const (
+	// RunTerminationImmediate stops the Run as soon as the runtime can apply
+	// cancellation. It is valid for every Run mode.
+	RunTerminationImmediate RunTerminationMode = "Immediate"
+	// RunTerminationDrain is valid only for Session Runs. It prevents new
+	// operations, drains accepted operations, and finalizes exported artifacts.
+	RunTerminationDrain RunTerminationMode = "Drain"
+)
+
+// +kubebuilder:object:generate=true
+// RunTermination requests a one-way termination transition.
+type RunTermination struct {
+	// Mode selects immediate cancellation or Session-specific graceful drain.
+	// +kubebuilder:validation:Required
+	Mode RunTerminationMode `json:"mode"`
 }
 
 // ArtifactType describes how an artifact is represented in storage.
@@ -418,9 +442,10 @@ type RunAffinityTerm struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.source) || !has(self.source.inlinePath) || (has(self.mode.function) && has(self.source.inline))",message="source.inlinePath is only valid for function mode with inline source"
 // +kubebuilder:validation:XValidation:rule="!has(self.mode.function) || !has(self.source) || !has(self.source.inline) || has(self.source.inlinePath)",message="function mode inline source requires source.inlinePath"
 // +kubebuilder:validation:XValidation:rule="!has(self.mode.session) || !has(self.workspace)",message="session mode does not support spec.workspace"
+// +kubebuilder:validation:XValidation:rule="!has(self.termination) || self.termination.mode != 'Drain' || has(self.mode.session)",message="termination.mode Drain is only valid for session mode"
 // +kubebuilder:validation:XValidation:rule="self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source) && (!has(self.source) || self.source == oldSelf.source) && self.mode == oldSelf.mode && has(self.artifactInputs) == has(oldSelf.artifactInputs) && (!has(self.artifactInputs) || self.artifactInputs == oldSelf.artifactInputs) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout) && has(self.retryPolicy) == has(oldSelf.retryPolicy) && (!has(self.retryPolicy) || self.retryPolicy == oldSelf.retryPolicy) && has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="runtime, source, mode, artifactInputs, env, timeout, retryPolicy, and resources are immutable after Run creation"
 // +kubebuilder:validation:XValidation:rule="has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity) && (!has(self.affinity) || self.affinity == oldSelf.affinity)",message="workspace and affinity are immutable after Run creation"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested || (has(self.cancelRequested) && self.cancelRequested)",message="cancelRequested may not transition from true to false"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.termination) || (has(self.termination) && self.termination == oldSelf.termination)",message="termination may not be removed or changed once set"
 type RunSpec struct {
 	// Runtime is the execution environment type (e.g., "python").
 	// It maps to the "runtime" label on Runtime Pods.
@@ -468,9 +493,10 @@ type RunSpec struct {
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
-	// CancelRequested is set to true to request cancellation of a running Run.
+	// Termination requests a one-way termination transition. Immediate is valid
+	// for every Run mode; Drain is valid only for Session Runs.
 	// +optional
-	CancelRequested bool `json:"cancelRequested,omitempty"`
+	Termination *RunTermination `json:"termination,omitempty"`
 
 	// RetryPolicy is the retry strategy for the Run. If nil, no retries are attempted.
 	// +optional
@@ -491,6 +517,18 @@ func (s RunSpec) EffectiveEntrypoint() string {
 		return s.Mode.Task.Entrypoint
 	}
 	return ""
+}
+
+// HasImmediateTermination reports whether the Run requested immediate
+// cancellation.
+func (s RunSpec) HasImmediateTermination() bool {
+	return s.Termination != nil && s.Termination.Mode == RunTerminationImmediate
+}
+
+// HasDrainTermination reports whether the Session Run requested graceful
+// completion.
+func (s RunSpec) HasDrainTermination() bool {
+	return s.Termination != nil && s.Termination.Mode == RunTerminationDrain
 }
 
 // EffectiveArgs returns the task args after applying the Run mode compatibility

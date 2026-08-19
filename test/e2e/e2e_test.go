@@ -529,7 +529,7 @@ func requestRunCancel(t *testing.T, run *v1alpha1.Run) {
 		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), run); err != nil {
 			t.Fatalf("get run for cancel: %v", err)
 		}
-		run.Spec.CancelRequested = true
+		run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 		if err := k8sClient.Update(context.Background(), run); err == nil {
 			return
 		}
@@ -1468,8 +1468,8 @@ func TestWorkflowRunCancellationPropagatesToActionChildRun(t *testing.T) {
 
 	actionRun := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: actionRunName, Namespace: testNamespace}}
 	waitForRunPhase(t, actionRun, 30*time.Second, v1alpha1.RunCancelled)
-	if !actionRun.Spec.CancelRequested {
-		t.Fatalf("Action child Run %s cancelRequested=false, want true", actionRun.Name)
+	if !actionRun.Spec.HasImmediateTermination() {
+		t.Fatalf("Action child Run %s does not request immediate termination", actionRun.Name)
 	}
 	waitForWorkflowRunPhase(t, workflowRun, 30*time.Second, v1alpha1.WorkflowCancelled)
 }

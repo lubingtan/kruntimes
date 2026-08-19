@@ -240,7 +240,7 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	if _, exists := c.activeRuns.Load(string(run.UID)); exists {
 		return ctrl.Result{}, nil
 	}
-	if run.Spec.CancelRequested {
+	if run.Spec.HasImmediateTermination() {
 		return c.applyTerminal(ctx, c.buildActiveRun(run), v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
 	ar := newActiveRun(run, time.Now())
@@ -419,7 +419,7 @@ func (c *Controller) reconcileRunning(ctx context.Context, run *v1alpha1.Run) (c
 	c.rleg.UpdateRun(run)
 
 	// Cancel takes priority.
-	if run.Spec.CancelRequested {
+	if run.Spec.HasImmediateTermination() {
 		return c.applyCancel(ctx, ar)
 	}
 
@@ -440,7 +440,7 @@ func (c *Controller) reconcileRunningSession(ctx context.Context, run *v1alpha1.
 	}
 	ar := value.(*activeRun)
 	ar.run = run
-	if run.Spec.CancelRequested {
+	if run.Spec.HasImmediateTermination() {
 		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
 	condition := meta.FindStatusCondition(run.Status.Conditions, runstatus.ConditionRunning)
@@ -463,7 +463,7 @@ func (c *Controller) reconcileReady(ctx context.Context, run *v1alpha1.Run) (ctr
 	}
 	ar := value.(*activeRun)
 	ar.run = run
-	if run.Spec.CancelRequested {
+	if run.Spec.HasImmediateTermination() {
 		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
 	now := time.Now()

@@ -1106,17 +1106,45 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 		})
 	}
 
-	t.Run("cancel-request-is-one-way", func(t *testing.T) {
+	t.Run("termination-request-is-one-way", func(t *testing.T) {
 		run := newRun(t)
 		if err := updateRun(run, func(run *v1alpha1.Run) {
-			run.Spec.CancelRequested = true
+			run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 		}); err != nil {
-			t.Fatalf("request run cancellation: %v", err)
+			t.Fatalf("request immediate run termination: %v", err)
 		}
 		if err := updateRun(run, func(run *v1alpha1.Run) {
-			run.Spec.CancelRequested = false
+			run.Spec.Termination = nil
 		}); !apierrors.IsInvalid(err) {
-			t.Fatalf("clearing run cancellation error = %v, want Invalid", err)
+			t.Fatalf("clearing run termination error = %v, want Invalid", err)
+		}
+	})
+
+	t.Run("drain-termination-requires-session-mode", func(t *testing.T) {
+		run := newRun(t)
+		if err := updateRun(run, func(run *v1alpha1.Run) {
+			run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain}
+		}); !apierrors.IsInvalid(err) {
+			t.Fatalf("request drain termination for task Run error = %v, want Invalid", err)
+		}
+	})
+
+	t.Run("drain-termination-is-one-way", func(t *testing.T) {
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "session-", Namespace: ns.Name},
+			Spec: v1alpha1.RunSpec{
+				Runtime:     "bash",
+				Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+				Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain},
+			},
+		}
+		if err := k8sClient.Create(ctx, run); err != nil {
+			t.Fatalf("create draining Session Run: %v", err)
+		}
+		if err := updateRun(run, func(run *v1alpha1.Run) {
+			run.Spec.Termination.Mode = v1alpha1.RunTerminationImmediate
+		}); !apierrors.IsInvalid(err) {
+			t.Fatalf("changing drain termination error = %v, want Invalid", err)
 		}
 	})
 

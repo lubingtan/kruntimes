@@ -27,7 +27,7 @@ func newCancelCmd(getter genericclioptions.RESTClientGetter, scheme *runtime.Sch
 			if err := c.Get(cmd.Context(), client.ObjectKey{Name: args[0], Namespace: namespace}, run); err != nil {
 				return fmt.Errorf("get run: %w", err)
 			}
-			run.Spec.CancelRequested = true
+			run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 			if err := c.Update(cmd.Context(), run); err != nil {
 				return fmt.Errorf("cancel run: %w", err)
 			}

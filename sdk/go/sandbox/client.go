@@ -219,16 +219,16 @@ func (s *Sandbox) Wait(ctx context.Context) error {
 	}
 }
 
-// Close requests normal Session Run cancellation and waits for its terminal
+// Close requests Session Run termination and waits for its terminal
 // lifecycle. It never calls Runtime Server CloseSession directly.
 func (s *Sandbox) Close(ctx context.Context) error {
 	if err := s.Refresh(ctx); err != nil {
 		return err
 	}
-	if !s.run.Spec.CancelRequested {
-		s.run.Spec.CancelRequested = true
+	if !s.run.Spec.HasImmediateTermination() {
+		s.run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 		if err := s.client.runs.Update(ctx, s.run); err != nil {
-			return fmt.Errorf("cancel Session Run: %w", err)
+			return fmt.Errorf("terminate Session Run: %w", err)
 		}
 	}
 	for {

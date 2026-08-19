@@ -633,8 +633,8 @@ func TestReconcileScheduledCancelBeforeClaim(t *testing.T) {
 			UID:       "scheduled-cancel-uid",
 		},
 		Spec: v1alpha1.RunSpec{
-			Runtime:         "bash",
-			CancelRequested: true,
+			Runtime:     "bash",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate},
 		},
 		Status: v1alpha1.RunStatus{
 			Phase:       v1alpha1.RunScheduled,
@@ -1158,9 +1158,9 @@ func TestReadySessionCancellationClosesRuntimeSession(t *testing.T) {
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
 		Spec: v1alpha1.RunSpec{
-			Runtime:         "bash",
-			CancelRequested: true,
-			Mode:            v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+			Runtime:     "bash",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate},
+			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
 		},
 		Status: v1alpha1.RunStatus{
 			Phase:          v1alpha1.RunReady,

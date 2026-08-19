@@ -225,11 +225,12 @@ class Sandbox:
             _sleep_until(deadline, self._client._poll_interval_seconds)
 
     def close(self, timeout_seconds: float | None = None) -> None:
-        """Request normal cancellation and wait for terminal lifecycle completion."""
+        """Request Session termination and wait for terminal lifecycle completion."""
         self.refresh()
         spec = dict(self._run.get("spec", {}))
-        if not spec.get("cancelRequested", False):
-            spec["cancelRequested"] = True
+        termination = spec.get("termination") or {}
+        if termination.get("mode") != "Immediate":
+            spec["termination"] = {"mode": "Immediate"}
             self._run["spec"] = spec
             metadata = _metadata(self._run)
             self._run = self._client._runs.replace(_namespace(metadata), _name(metadata), self._run)

@@ -67,7 +67,7 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if run.Spec.Runtime == "" {
 		return ctrl.Result{}, nil
 	}
-	if run.Spec.CancelRequested {
+	if run.Spec.HasImmediateTermination() {
 		return r.applyCancelled(ctx, &run)
 	}
 	request, err := run.Spec.ResourceRequests()
