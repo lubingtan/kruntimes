@@ -32,6 +32,18 @@ type RunSessionMode struct {
 }
 ```
 
+Run termination is an independent, monotonic control-plane request:
+
+```yaml
+spec:
+  termination:
+    mode: Drain # or Immediate
+```
+
+`Immediate` cancels work. `Drain` is valid only for Session Runs and requests a
+successful finalization after already accepted operations complete. Once set,
+the termination request cannot be removed or changed.
+
 Session Runs use the existing `Pending -> Scheduled -> Running -> Ready`
 lifecycle. `Ready` means the owning runtimed has registered a session with the
 local Runtime Server and accepts session operations. It remains active and
@@ -67,6 +79,37 @@ cleans its ephemeral workspace, and records `RunTimeout`. Reopening or
 resubmitting the same Run cannot restore it; a client that needs a new sandbox
 must create a new Session Run. Explicit suspend and resume semantics are a
 separate v1 design item, not an implicit consequence of timeout recovery.
+
+## Completion and Artifact Export
+
+Cancellation and successful sandbox completion use the same monotonic
+`spec.termination` request with distinct modes. `Immediate` is terminal
+cancellation. `Drain` is the normal end of useful Session work. The SDK's
+successful `Close` helper sets `termination.mode: Drain`; its `Cancel` helper
+sets `termination.mode: Immediate`. The alpha API replaces the older
+`cancelRequested` boolean rather than carrying both controls.
+
+When completion is requested, the controller transitions the Run from `Ready`
+to the active `Finalizing` phase. The gateway rejects new operations in that
+phase. Owner runtimed drains already accepted operations up to their individual
+operation deadlines, then closes the local Runtime Server session. This freezes
+the ephemeral workspace before final collection.
+
+If the Runtime has an ArtifactStore, runtimed creates `$KRUNTIME_ARTIFACTS_DIR`
+when it prepares the Session workspace. A client writes explicitly exported
+files there. After the local session is closed, runtimed validates and uploads
+those files using the ordinary Run ArtifactStore contract, records the compact
+refs in `Run.status.artifactRefs`, and only then transitions the Run to
+`Succeeded`. It never writes command history, arbitrary file contents, or
+unbounded output into Run status.
+
+An ArtifactStore transport failure leaves the Run in `Finalizing`, retains the
+local workspace, and is retried. An invalid artifact is terminal `Failed` with
+an artifact-specific reason. `Immediate` termination requested during
+finalization wins: it stops draining and artifact export, closes the session,
+and records `Cancelled`. Timeout and assigned-Pod loss likewise retain their
+existing terminal semantics; they do not claim a successful export of an
+incomplete workspace.
 
 ## Services and Request Flow
 
@@ -230,7 +273,8 @@ Both SDKs expose the same lifecycle and operations:
 | `Execute` | send exactly one command or file mutation through the Run endpoint; never retry a mutation implicitly |
 | `ReadFile`, `ListFiles`, `WriteFile`, `CreateDirectory`, `DeleteFile`, `RenameFile` | use the bounded, workspace-relative gateway operations |
 | `Logs` | read the assigned runtimed container log and filter the structured lines for the immutable Run UID; it does not introduce a gateway log store |
-| `Close` | set `spec.cancelRequested` and wait for the Run terminal lifecycle; runtimed performs queue fencing, Runtime Server close, workspace cleanup, and capacity release |
+| `Close` | set `spec.termination.mode: Drain` and wait for finalization, artifact export, and the successful terminal lifecycle |
+| `Cancel` | set `spec.termination.mode: Immediate` and wait for cancellation, Runtime Server close, workspace cleanup, and capacity release |
 
 `Open` and every data-plane call derive the endpoint from the current Run
 status. The SDK rejects a non-Session Run, a Run that is not `Ready`, or an

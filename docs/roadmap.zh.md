@@ -201,7 +201,17 @@ controller wiring 累积不必要的冲突。
     - [ ] 定义 backend-specific 的 graceful process-termination 配置。不能在没有 reviewed
       Runtime Server contract 的情况下，将一个通用 setting 注入任意 custom Runtime image；
   - [ ] 将 operation history 与 audit events 写到 structured external logs；Run status 只保留
-    有界 readiness/endpoint 数据，大输出通过 ArtifactStore 导出；
+    有界 readiness、endpoint 与 artifact reference 数据，大输出通过 ArtifactStore 导出；
+    - [ ] 用单调的 `termination.mode` API 替换 `cancelRequested`：`Immediate` 用于 cancellation，
+      仅 Session 合法的 `Drain` 用于正常 completion；实现 `Ready -> Finalizing -> Succeeded` lifecycle，
+      以及彼此独立的 SDK `Close` 和 `Cancel` helper；
+    - [ ] fence 新 gateway operation、drain 已接受的 operation，并在收集最终 artifact 前关闭本地
+      Runtime Server；
+    - [ ] 仅在 Session Run 的 Runtime 配置 ArtifactStore 时提供 `$KRUNTIME_ARTIFACTS_DIR`；校验并上传
+      最终文件、在 status 保留 compact ref、在 Finalizing 重试 transient store failure，并确定性地使
+      invalid artifact 失败；
+    - [ ] 增加 successful completion/export、finalization 期间 cancellation、transient store retry、
+      invalid artifact 与 Runtime Pod loss 的测试覆盖；
   - [x] 增加 Python 和 Go SDK：create/open/wait/execute/files/logs/close helpers、typed errors、
     direct in-cluster access 与 local port-forward support；
   - [x] 增加 Kubernetes diagnosis agent 示例，使用 Session Run 实现 multi-step scripts、files、

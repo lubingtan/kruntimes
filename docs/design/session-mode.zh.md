@@ -29,6 +29,17 @@ type RunSessionMode struct {
 }
 ```
 
+Run termination 是独立且单调的 control-plane 请求：
+
+```yaml
+spec:
+  termination:
+    mode: Drain # 或 Immediate
+```
+
+`Immediate` 取消工作。`Drain` 只对 Session Run 合法，表示已接受的 operation 完成后成功 finalization。
+termination request 一旦设置，不能删除或更改。
+
 Session 使用已有的 `Pending -> Scheduled -> Running -> Ready` lifecycle。`Ready` 表示 owning
 runtimed 已在本地 Runtime Server 注册 session 并接受 operation；它是 active phase 并持续占用
 Runtime capacity。
@@ -53,6 +64,28 @@ activity 后过期。Session 继续使用普通 Run 的 cancellation、deletion�
 中静默继续。idle expiry 同样是 terminal：它会关闭本地 session、清理 ephemeral workspace，并记录为
 `RunTimeout`。重新打开或再次提交同一个 Run 不能恢复它；需要新 sandbox 的 client 必须创建新的
 Session Run。显式 suspend/resume 是独立的 v1 design item，不能从 timeout recovery 隐式推导。
+
+## Completion 与 Artifact Export
+
+cancellation 与成功完成 sandbox 使用同一个单调的 `spec.termination` request，但 mode 不同。
+`Immediate` 表示 terminal cancellation；`Drain` 表示正常结束已完成的 Session 工作。SDK 成功的 `Close`
+helper 设置 `termination.mode: Drain`；`Cancel` helper 设置 `termination.mode: Immediate`。alpha API
+直接替换较早的 `cancelRequested` boolean，而不是同时保留两个 control。
+
+收到 completion 请求后，controller 将 Run 从 `Ready` transition 到 active 的 `Finalizing` phase。
+gateway 在该 phase 拒绝新的 operation。owner runtimed 会在每个 operation 自身 deadline 内 drain 已被
+接受的 operation，然后关闭本地 Runtime Server session。这样会在最终收集前冻结 ephemeral workspace。
+
+若 Runtime 配置了 ArtifactStore，runtimed 会在准备 Session workspace 时创建
+`$KRUNTIME_ARTIFACTS_DIR`。client 将显式需要导出的文件写入该目录。关闭本地 session 后，runtimed
+使用普通 Run ArtifactStore contract 校验并上传这些文件，将 compact ref 写入
+`Run.status.artifactRefs`，之后才将 Run transition 到 `Succeeded`。command history、任意文件内容和
+unbounded output 不会写入 Run status。
+
+ArtifactStore transport failure 会使 Run 保持 `Finalizing`，保留 local workspace 并重试。invalid artifact
+则以 artifact-specific reason 进入 terminal `Failed`。若 finalization 期间请求 `Immediate` termination，
+则它优先：停止 drain 和 artifact export、关闭 session，并记录 `Cancelled`。timeout 与 assigned-Pod loss
+同样保持其已有 terminal 语义；它们不会将不完整 workspace 标记为成功导出。
 
 ## 服务与请求路径
 
@@ -185,7 +218,8 @@ Sandbox resource，也不会绕过 gateway。
 | `Execute` | 通过 Run endpoint 发送恰好一个 command 或 file mutation；绝不隐式重试 mutation |
 | `ReadFile`、`ListFiles`、`WriteFile`、`CreateDirectory`、`DeleteFile`、`RenameFile` | 使用有界且 workspace-relative 的 gateway operations |
 | `Logs` | 读取 assigned runtimed container log，并按不可变 Run UID 过滤结构化日志行；不引入 gateway log store |
-| `Close` | 设置 `spec.cancelRequested` 并等待 Run terminal lifecycle；runtimed 负责 queue fencing、Runtime Server close、workspace cleanup 与 capacity release |
+| `Close` | 设置 `spec.termination.mode: Drain`，等待 finalization、artifact export 和成功的 terminal lifecycle |
+| `Cancel` | 设置 `spec.termination.mode: Immediate`，等待 cancellation、Runtime Server close、workspace cleanup 与 capacity release |
 
 `Open` 和每次 data-plane call 都从当前 Run status 推导 endpoint。SDK 会拒绝非 Session Run、未处于
 `Ready` 的 Run，或 endpoint Run UID 与已打开 Run 不匹配的情况。HTTP failures 以保留 status code 和
