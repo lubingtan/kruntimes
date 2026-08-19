@@ -2073,6 +2073,41 @@ func TestRunStagesArtifactInputs(t *testing.T) {
 	}
 	waitForRun(t, consumer, 30*time.Second)
 
+	sessionConsumer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-artifact-consumer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			ArtifactInputs: []v1alpha1.ArtifactInput{
+				{Ref: report, Path: "inputs/report.txt"},
+				{Ref: bundle, Path: "inputs/bundle"},
+			},
+			Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), sessionConsumer); err != nil {
+		t.Fatalf("create Session artifact consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), sessionConsumer) })
+	waitForRunPhase(t, sessionConsumer, 30*time.Second, v1alpha1.RunReady)
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), sessionConsumer.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, sessionConsumer)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["sh","-c","printf '%s:%s' \"$(cat inputs/report.txt)\" \"$(cat inputs/bundle/data.txt)\""]}}`), http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(response, &operation); err != nil {
+		t.Fatalf("decode Session artifact input response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "report:nested" {
+		t.Fatalf("Session artifact input result = %#v, want report:nested", operation.Command)
+	}
+	requestRunCancel(t, sessionConsumer)
+	waitForRunPhase(t, sessionConsumer, 20*time.Second, v1alpha1.RunCancelled)
+
 	missing := report.DeepCopy()
 	missing.Name = "missing.txt"
 	missing.Location.Filesystem.Path = filepath.ToSlash(filepath.Join("namespaces", testNamespace, "runs", "missing", missing.Name))
