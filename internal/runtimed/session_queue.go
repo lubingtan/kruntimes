@@ -30,8 +30,9 @@ type SessionOperationQueue struct {
 }
 
 type sessionOperationQueueEntry struct {
-	jobs   chan sessionOperationJob
-	closed bool
+	jobs     chan sessionOperationJob
+	closed   bool
+	draining bool
 
 	mu           sync.Mutex
 	activeCancel context.CancelFunc
@@ -134,9 +135,9 @@ func (q *SessionOperationQueue) Execute(
 		q.sessions[uid] = entry
 		go entry.run(timeout)
 	}
-	if entry.closed {
+	if !entry.accepting() {
 		q.mu.Unlock()
-		return nil, status.Error(codes.FailedPrecondition, "session is closing")
+		return nil, status.Error(codes.FailedPrecondition, "session is finalizing")
 	}
 	job := sessionOperationJob{
 		ctx:     ctx,
@@ -159,6 +160,22 @@ func (q *SessionOperationQueue) Execute(
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}
+}
+
+// Drain prevents new operations for a Session Run while allowing operations
+// already accepted into its FIFO queue to finish. It reports whether there is
+// no accepted work remaining. A missing queue entry is already drained.
+func (q *SessionOperationQueue) Drain(runUID string) bool {
+	if q == nil || runUID == "" {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	entry := q.sessions[runUID]
+	if entry == nil {
+		return true
+	}
+	return entry.beginDrain()
 }
 
 // Close prevents new work for a Session Run, cancels the active operation, and
@@ -275,6 +292,19 @@ func (e *sessionOperationQueueEntry) isClosed() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.closed
+}
+
+func (e *sessionOperationQueueEntry) accepting() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return !e.closed && !e.draining
+}
+
+func (e *sessionOperationQueueEntry) beginDrain() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.draining = true
+	return e.pending == 0
 }
 
 func (e *sessionOperationQueueEntry) markClosed() {

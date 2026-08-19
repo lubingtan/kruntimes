@@ -538,6 +538,21 @@ func requestRunCancel(t *testing.T, run *v1alpha1.Run) {
 	t.Fatalf("failed to request cancellation for run %s", run.Name)
 }
 
+func requestRunDrain(t *testing.T, run *v1alpha1.Run) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), run); err != nil {
+			t.Fatalf("get run for drain: %v", err)
+		}
+		run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain}
+		if err := k8sClient.Update(context.Background(), run); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("failed to request drain for run %s", run.Name)
+}
+
 func waitForRunDeleted(t *testing.T, run *v1alpha1.Run, timeout time.Duration) {
 	t.Helper()
 
@@ -759,6 +774,48 @@ func TestSessionRunCancellationTerminatesActiveGatewayCommand(t *testing.T) {
 		t.Fatal("active Session command succeeded after its Run was cancelled")
 	}
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestSessionRunDrainCompletesAcceptedGatewayCommand(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-drain-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-drain-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create draining Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	commandResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := gatewayRequest(ctx, http.MethodPost, baseURL+"/operations:execute", token,
+			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 15; printf completed > completed"]}}`), http.StatusOK)
+		commandResult <- err
+	}()
+
+	// A successful read proves runtimed accepted the command before Drain
+	// fenced later operations.
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/started", token, nil, http.StatusOK)
+	requestRunDrain(t, run)
+	waitForRunPhase(t, run, 10*time.Second, v1alpha1.RunFinalizing)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"writeFile":{"path":"rejected.txt","contents":"cmVqZWN0ZWQ="}}`), http.StatusConflict)
+	if err := <-commandResult; err != nil {
+		t.Fatalf("accepted Session command did not complete during Drain: %v", err)
+	}
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunSucceeded)
 }
 
 func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {

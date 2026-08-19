@@ -1143,8 +1143,13 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 		}
 		if err := updateRun(run, func(run *v1alpha1.Run) {
 			run.Spec.Termination.Mode = v1alpha1.RunTerminationImmediate
+		}); err != nil {
+			t.Fatalf("escalating drain termination error = %v", err)
+		}
+		if err := updateRun(run, func(run *v1alpha1.Run) {
+			run.Spec.Termination.Mode = v1alpha1.RunTerminationDrain
 		}); !apierrors.IsInvalid(err) {
-			t.Fatalf("changing drain termination error = %v, want Invalid", err)
+			t.Fatalf("downgrading immediate termination error = %v, want Invalid", err)
 		}
 	})
 

@@ -78,7 +78,9 @@ const (
 )
 
 // +kubebuilder:object:generate=true
-// RunTermination requests a one-way termination transition.
+// RunTermination requests an irreversible termination transition. A Session
+// Run may escalate Drain to Immediate, but cannot remove or downgrade a
+// request.
 type RunTermination struct {
 	// Mode selects immediate cancellation or Session-specific graceful drain.
 	// +kubebuilder:validation:Required
@@ -445,7 +447,7 @@ type RunAffinityTerm struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.termination) || self.termination.mode != 'Drain' || has(self.mode.session)",message="termination.mode Drain is only valid for session mode"
 // +kubebuilder:validation:XValidation:rule="self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source) && (!has(self.source) || self.source == oldSelf.source) && self.mode == oldSelf.mode && has(self.artifactInputs) == has(oldSelf.artifactInputs) && (!has(self.artifactInputs) || self.artifactInputs == oldSelf.artifactInputs) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout) && has(self.retryPolicy) == has(oldSelf.retryPolicy) && (!has(self.retryPolicy) || self.retryPolicy == oldSelf.retryPolicy) && has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="runtime, source, mode, artifactInputs, env, timeout, retryPolicy, and resources are immutable after Run creation"
 // +kubebuilder:validation:XValidation:rule="has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity) && (!has(self.affinity) || self.affinity == oldSelf.affinity)",message="workspace and affinity are immutable after Run creation"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.termination) || (has(self.termination) && self.termination == oldSelf.termination)",message="termination may not be removed or changed once set"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.termination) || (has(self.termination) && (self.termination == oldSelf.termination || (oldSelf.termination.mode == 'Drain' && self.termination.mode == 'Immediate')))",message="termination may not be removed, downgraded, or changed except from Drain to Immediate"
 type RunSpec struct {
 	// Runtime is the execution environment type (e.g., "python").
 	// It maps to the "runtime" label on Runtime Pods.
@@ -493,8 +495,9 @@ type RunSpec struct {
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
-	// Termination requests a one-way termination transition. Immediate is valid
-	// for every Run mode; Drain is valid only for Session Runs.
+	// Termination requests an irreversible termination transition. Immediate is
+	// valid for every Run mode; Drain is valid only for Session Runs and may be
+	// escalated to Immediate.
 	// +optional
 	Termination *RunTermination `json:"termination,omitempty"`
 

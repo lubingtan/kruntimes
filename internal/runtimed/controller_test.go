@@ -1189,6 +1189,98 @@ func TestReadySessionCancellationClosesRuntimeSession(t *testing.T) {
 	}
 }
 
+func TestReadySessionDrainFinalizesAfterAcceptedOperations(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:     "bash",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain},
+			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunReady,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	operations := NewSessionOperationQueue(1, time.Minute)
+	if err := operations.Ensure(run, time.Now()); err != nil {
+		t.Fatalf("ensure Session operation queue: %v", err)
+	}
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient, SessionOperations: operations}
+	c.activeRuns.Store(string(run.UID), newActiveRun(run, time.Now()))
+
+	if _, err := c.reconcileReady(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReady: %v", err)
+	}
+	var finalizing v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &finalizing); err != nil {
+		t.Fatalf("get finalizing Run: %v", err)
+	}
+	if finalizing.Status.Phase != v1alpha1.RunFinalizing {
+		t.Fatalf("phase = %s, want Finalizing", finalizing.Status.Phase)
+	}
+	if len(sessionClient.closeRequests) != 0 {
+		t.Fatalf("CloseSession requests = %d before drain completion, want 0", len(sessionClient.closeRequests))
+	}
+
+	if _, err := c.reconcileFinalizing(t.Context(), &finalizing); err != nil {
+		t.Fatalf("reconcileFinalizing: %v", err)
+	}
+	var completed v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &completed); err != nil {
+		t.Fatalf("get completed Run: %v", err)
+	}
+	if completed.Status.Phase != v1alpha1.RunSucceeded {
+		t.Fatalf("phase = %s, want Succeeded", completed.Status.Phase)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+}
+
+func TestLateSessionRegistrationClosesFinalizingSession(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:     "bash",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain},
+			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunFinalizing,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if err := c.markSessionReady(t.Context(), ar); err != nil {
+		t.Fatalf("markSessionReady: %v", err)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+}
+
 func TestSessionCloseTimeoutUsesConfiguredValue(t *testing.T) {
 	configured := 17 * time.Second
 	if got := (&Controller{SessionCloseTimeout: configured}).sessionCloseTimeout(); got != configured {

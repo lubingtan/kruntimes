@@ -41,8 +41,9 @@ spec:
 ```
 
 `Immediate` cancels work. `Drain` is valid only for Session Runs and requests a
-successful finalization after already accepted operations complete. Once set,
-the termination request cannot be removed or changed.
+successful finalization after already accepted operations complete. A request
+cannot be removed or downgraded; a draining Session may be escalated to
+`Immediate` when it must stop without exporting a successful result.
 
 Session Runs use the existing `Pending -> Scheduled -> Running -> Ready`
 lifecycle. `Ready` means the owning runtimed has registered a session with the

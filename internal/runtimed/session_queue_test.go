@@ -172,6 +172,59 @@ func TestSessionOperationQueueCloseCancelsActiveAndQueuedMutations(t *testing.T)
 	}
 }
 
+func TestSessionOperationQueueDrainCompletesAcceptedMutations(t *testing.T) {
+	queue := NewSessionOperationQueue(2, time.Minute)
+	run := queuedSessionRun("session")
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+
+	go func() {
+		_, err := queue.Execute(t.Context(), run, func(context.Context) (*pb.ExecuteSessionOperationResponse, error) {
+			close(firstStarted)
+			<-releaseFirst
+			return &pb.ExecuteSessionOperationResponse{}, nil
+		})
+		firstDone <- err
+	}()
+	<-firstStarted
+	go func() {
+		_, err := queue.Execute(t.Context(), run, func(context.Context) (*pb.ExecuteSessionOperationResponse, error) {
+			close(secondStarted)
+			return &pb.ExecuteSessionOperationResponse{}, nil
+		})
+		secondDone <- err
+	}()
+	waitForQueueDepth(t, queue, string(run.UID), 1)
+
+	if queue.Drain(string(run.UID)) {
+		t.Fatal("Drain() = true with accepted operations, want false")
+	}
+	if _, err := queue.Execute(t.Context(), run, func(context.Context) (*pb.ExecuteSessionOperationResponse, error) {
+		return &pb.ExecuteSessionOperationResponse{}, nil
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("Execute() after Drain code = %s, want %s", status.Code(err), codes.FailedPrecondition)
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Execute() error = %v", err)
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued mutation did not execute while draining")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if !queue.Drain(string(run.UID)) {
+		t.Fatal("Drain() = false after accepted operations completed, want true")
+	}
+}
+
 func TestSessionOperationQueueAppliesSessionOperationTimeout(t *testing.T) {
 	queue := NewSessionOperationQueue(1, time.Minute)
 	run := queuedSessionRun("session")

@@ -38,7 +38,7 @@ spec:
 ```
 
 `Immediate` 取消工作。`Drain` 只对 Session Run 合法，表示已接受的 operation 完成后成功 finalization。
-termination request 一旦设置，不能删除或更改。
+termination request 一旦设置，不能删除或降级；draining Session 可以升级为 `Immediate`，以在不成功导出结果时停止。
 
 Session 使用已有的 `Pending -> Scheduled -> Running -> Ready` lifecycle。`Ready` 表示 owning
 runtimed 已在本地 Runtime Server 注册 session 并接受 operation；它是 active phase 并持续占用

@@ -228,6 +228,8 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return c.reconcileRunning(ctx, &run)
 	case v1alpha1.RunReady:
 		return c.reconcileReady(ctx, &run)
+	case v1alpha1.RunFinalizing:
+		return c.reconcileFinalizing(ctx, &run)
 	}
 	return ctrl.Result{}, nil
 }
@@ -443,6 +445,9 @@ func (c *Controller) reconcileRunningSession(ctx context.Context, run *v1alpha1.
 	if run.Spec.HasImmediateTermination() {
 		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
+	if run.Spec.HasDrainTermination() {
+		return c.beginSessionFinalization(ctx, ar)
+	}
 	condition := meta.FindStatusCondition(run.Status.Conditions, runstatus.ConditionRunning)
 	if condition != nil && condition.Status == metav1.ConditionFalse {
 		return c.reconcileRetryBackoff(ctx, ar)
@@ -465,6 +470,9 @@ func (c *Controller) reconcileReady(ctx context.Context, run *v1alpha1.Run) (ctr
 	ar.run = run
 	if run.Spec.HasImmediateTermination() {
 		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
+	if run.Spec.HasDrainTermination() {
+		return c.beginSessionFinalization(ctx, ar)
 	}
 	now := time.Now()
 	requeueAfter := activeRunRequeueAfter(ar)
@@ -804,7 +812,7 @@ func (c *Controller) releaseActiveRun(ctx context.Context, ar *activeRun) {
 	c.removeActiveRunClaim(uid)
 	c.recordActiveRuns(run.Spec.Runtime)
 	if run.Spec.Mode.Session != nil {
-		c.closeRuntimeSession(ctx, run)
+		c.closeActiveSession(ctx, ar)
 	} else {
 		c.releaseExecution(ctx, uid)
 	}

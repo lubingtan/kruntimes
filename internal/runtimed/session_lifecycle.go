@@ -97,6 +97,9 @@ func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error 
 		return client.IgnoreNotFound(err)
 	}
 	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
+		// Registration can finish after termination moved the Run out of
+		// Running. Do not leave that late Runtime Server session registered.
+		c.closeActiveSession(ctx, ar)
 		return nil
 	}
 	run.Status.Phase = v1alpha1.RunReady
@@ -208,6 +211,64 @@ func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1
 
 func (c *Controller) closeSessionAndApplyTerminal(ctx context.Context, ar *activeRun, phase v1alpha1.RunPhase, reason, message string) (ctrl.Result, error) {
 	return c.applyTerminal(ctx, ar, phase, reason, message)
+}
+
+// beginSessionFinalization fences new gateway operations by moving the Run to
+// Finalizing. Owner runtimed then drains operations already accepted by its
+// local FIFO queue before closing the Runtime Server session.
+func (c *Controller) beginSessionFinalization(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
+	if ar == nil || ar.run == nil || ar.run.Spec.Mode.Session == nil {
+		return ctrl.Result{}, fmt.Errorf("Session Run is required for finalization")
+	}
+	run := ar.run
+	if run.Status.Phase != v1alpha1.RunRunning && run.Status.Phase != v1alpha1.RunReady {
+		return ctrl.Result{}, nil
+	}
+	run.Status.Phase = v1alpha1.RunFinalizing
+	run.Status.Message = "session finalization requested"
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+		Type:               runstatus.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "Finalizing",
+		Message:            "session is no longer accepting new operations",
+		LastTransitionTime: metav1.Now(),
+	})
+	if err := c.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (c *Controller) reconcileFinalizing(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	if run.Spec.Mode.Session == nil {
+		return c.applyTerminal(ctx, c.buildActiveRun(run), v1alpha1.RunFailed, runretry.ReasonExecutionLost, "non-Session Run entered Finalizing")
+	}
+	uid := string(run.UID)
+	value, exists := c.activeRuns.Load(uid)
+	if !exists {
+		return c.reconcileSessionRecovery(ctx, run)
+	}
+	ar := value.(*activeRun)
+	ar.run = run
+	if run.Spec.HasImmediateTermination() {
+		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
+	now := time.Now()
+	if !ar.deadline.IsZero() && !now.Before(ar.deadline) {
+		return c.closeSessionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, fmt.Sprintf("timeout after %s", run.Spec.Timeout.Duration))
+	}
+	if c.SessionOperations != nil && !c.SessionOperations.Drain(uid) {
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+	}
+	c.closeActiveSession(ctx, ar)
+	return c.applyTerminal(ctx, ar, v1alpha1.RunSucceeded, "SessionCompleted", "session finalized")
+}
+
+func (c *Controller) closeActiveSession(ctx context.Context, ar *activeRun) {
+	if ar == nil || ar.run == nil || !ar.sessionClosed.CompareAndSwap(false, true) {
+		return
+	}
+	c.closeRuntimeSession(ctx, ar.run)
 }
 
 func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run) {

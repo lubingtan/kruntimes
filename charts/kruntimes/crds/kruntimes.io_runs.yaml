@@ -844,8 +844,9 @@ spec:
                     == 0 || segment == ''.'' || segment == ''..''))'
               termination:
                 description: |-
-                  Termination requests a one-way termination transition. Immediate is valid
-                  for every Run mode; Drain is valid only for Session Runs.
+                  Termination requests an irreversible termination transition. Immediate is
+                  valid for every Run mode; Drain is valid only for Session Runs and may be
+                  escalated to Immediate.
                 properties:
                   mode:
                     description: Mode selects immediate cancellation or Session-specific
@@ -935,9 +936,11 @@ spec:
               rule: has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace)
                 || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity)
                 && (!has(self.affinity) || self.affinity == oldSelf.affinity)
-            - message: termination may not be removed or changed once set
-              rule: '!has(oldSelf.termination) || (has(self.termination) && self.termination
-                == oldSelf.termination)'
+            - message: termination may not be removed, downgraded, or changed except
+                from Drain to Immediate
+              rule: '!has(oldSelf.termination) || (has(self.termination) && (self.termination
+                == oldSelf.termination || (oldSelf.termination.mode == ''Drain'' &&
+                self.termination.mode == ''Immediate'')))'
           status:
             description: RunStatus defines the observed state of Run.
             properties:
