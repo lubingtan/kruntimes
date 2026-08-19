@@ -575,6 +575,9 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 		Spec: v1alpha1.RunSpec{
 			Runtime: runtimeName,
 			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+			Env: []corev1.EnvVar{
+				{Name: "KRUNTIMES_SESSION_DEFAULT", Value: "registration"},
+			},
 		},
 	}
 	if err := k8sClient.Create(context.Background(), run); err != nil {
@@ -622,6 +625,15 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 		t.Fatalf("Session command result = %#v, want successful gateway-ok output", operation.Command)
 	}
 	waitForSessionCommandLogs(t, run, "gateway-ok")
+
+	envPayload := []byte(`{"command":{"argv":["sh","-c","printf '%s:%s' \"$KRUNTIMES_SESSION_DEFAULT\" \"$KRUNTIMES_SESSION_COMMAND\""],"env":{"KRUNTIMES_SESSION_COMMAND":"command"}}}`)
+	envResponse := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, envPayload, http.StatusOK)
+	if err := json.Unmarshal(envResponse, &operation); err != nil {
+		t.Fatalf("decode Session environment response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "registration:command" {
+		t.Fatalf("Session command environment result = %#v, want registration:command", operation.Command)
+	}
 
 	writePayload := []byte(`{"writeFile":{"path":"notes/result.txt","contents":"Z2F0ZXdheS1maWxl","createParents":true}}`)
 	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, writePayload, http.StatusOK)
