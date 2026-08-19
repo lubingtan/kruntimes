@@ -373,6 +373,7 @@ class PythonRuntime(
             entry = {
                 "identity": self._clone_session_identity(identity),
                 "working_dir": working_dir,
+                "env": dict(request.env),
                 "state": runtime_pb2.SESSION_STATE_READY,
                 "last_activity_unix_nano": time.time_ns(),
             }
@@ -421,6 +422,7 @@ class PythonRuntime(
 
         command = ["bash", "-c", request.shell] if request.shell else list(request.argv)
         env = os.environ.copy()
+        env.update(entry["env"])
         env.update(request.env)
         stdout = BoundedBuffer(self.output_limit)
         stderr = BoundedBuffer(self.output_limit)

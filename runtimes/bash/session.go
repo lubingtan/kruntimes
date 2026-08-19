@@ -24,15 +24,16 @@ import (
 // sessionEntry is Runtime Server-local state. runtimed owns the operation
 // queue, so this entry only records the fenced workspace lifecycle.
 type sessionEntry struct {
-	mu       sync.RWMutex
-	identity *pb.SessionIdentity
-	workDir  string
-	state    pb.SessionState
-	activity time.Time
+	mu         sync.RWMutex
+	identity   *pb.SessionIdentity
+	workDir    string
+	sessionEnv map[string]string
+	state      pb.SessionState
+	activity   time.Time
 }
 
-func (s *Server) RegisterSession(_ context.Context, req *pb.RegisterSessionRequest) (*pb.SessionStatus, error) {
-	identity, workingDir, err := s.validateSessionRegistration(req)
+func (s *Server) RegisterSession(_ context.Context, registration *pb.RegisterSessionRequest) (*pb.SessionStatus, error) {
+	identity, workingDir, err := s.validateSessionRegistration(registration)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -48,10 +49,11 @@ func (s *Server) RegisterSession(_ context.Context, req *pb.RegisterSessionReque
 	}
 
 	entry := &sessionEntry{
-		identity: cloneSessionIdentity(identity),
-		workDir:  workingDir,
-		state:    pb.SessionState_SESSION_STATE_READY,
-		activity: time.Now(),
+		identity:   cloneSessionIdentity(identity),
+		workDir:    workingDir,
+		sessionEnv: maps.Clone(registration.Env),
+		state:      pb.SessionState_SESSION_STATE_READY,
+		activity:   time.Now(),
 	}
 	s.mu.Lock()
 	s.sessions[identity.RunUid] = entry
@@ -104,26 +106,26 @@ func (s *Server) ExecuteSessionOperation(ctx context.Context, req *pb.ExecuteSes
 	return &pb.ExecuteSessionOperationResponse{}, nil
 }
 
-func (s *Server) executeSessionCommand(ctx context.Context, entry *sessionEntry, req *pb.SessionCommand) (*pb.SessionCommandResult, error) {
-	if (len(req.Argv) == 0) == (req.Shell == "") {
+func (s *Server) executeSessionCommand(ctx context.Context, entry *sessionEntry, commandRequest *pb.SessionCommand) (*pb.SessionCommandResult, error) {
+	if (len(commandRequest.Argv) == 0) == (commandRequest.Shell == "") {
 		return nil, status.Error(codes.InvalidArgument, "exactly one of argv or shell is required")
 	}
-	workingDir, err := sessionPath(entry, req.WorkingDirectory, true)
+	workingDir, err := sessionPath(entry, commandRequest.WorkingDirectory, true)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	commandCtx, cancel := sessionCommandContext(ctx, req.TimeoutMillis)
+	commandCtx, cancel := sessionCommandContext(ctx, commandRequest.TimeoutMillis)
 	defer cancel()
-	command := sessionCommand(commandCtx, req)
+	command := sessionCommand(commandCtx, commandRequest)
 	command.Dir = workingDir
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Stdin = bytes.NewReader(req.Stdin)
+	command.Stdin = bytes.NewReader(commandRequest.Stdin)
 	stdout := newBoundedBuffer(s.outputLimit)
 	stderr := newBoundedBuffer(s.outputLimit)
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	command.Env = sessionCommandEnv(req.Env)
+	command.Env = sessionCommandEnv(entry.sessionEnv, commandRequest.Env)
 
 	if err := command.Start(); err != nil {
 		return nil, status.Errorf(codes.Internal, "start session command: %v", err)
@@ -406,7 +408,7 @@ func sessionCommandContext(ctx context.Context, timeoutMillis int64) (context.Co
 	return context.WithTimeout(ctx, time.Duration(timeoutMillis)*time.Millisecond)
 }
 
-func sessionCommandEnv(overrides map[string]string) []string {
+func sessionCommandEnv(sessionEnv, commandEnv map[string]string) []string {
 	env := make(map[string]string)
 	for _, item := range os.Environ() {
 		name, value, ok := strings.Cut(item, "=")
@@ -414,7 +416,10 @@ func sessionCommandEnv(overrides map[string]string) []string {
 			env[name] = value
 		}
 	}
-	for name, value := range overrides {
+	for name, value := range sessionEnv {
+		env[name] = value
+	}
+	for name, value := range commandEnv {
 		env[name] = value
 	}
 	names := slices.Sorted(maps.Keys(env))

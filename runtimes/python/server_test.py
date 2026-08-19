@@ -72,7 +72,7 @@ class TestPythonRuntime(unittest.TestCase):
         )
         return response.registration
 
-    def _register_session(self, working_dir, run_uid="session-run", pod_uid="pod-a"):
+    def _register_session(self, working_dir, run_uid="session-run", pod_uid="pod-a", env=None):
         return self.session_stub.RegisterSession(
             runtime_pb2.RegisterSessionRequest(
                 identity=runtime_pb2.SessionIdentity(
@@ -80,6 +80,7 @@ class TestPythonRuntime(unittest.TestCase):
                     assigned_pod_uid=pod_uid,
                 ),
                 working_dir=working_dir,
+                env=env or {},
             )
         )
 
@@ -118,7 +119,9 @@ class TestPythonRuntime(unittest.TestCase):
 
     def test_session_executes_commands_and_confines_files(self):
         session_dir = self._prepare_inline("# session")
-        self._register_session(session_dir)
+        self._register_session(
+            session_dir, env={"KRUNTIMES_SESSION_DEFAULT": "session"}
+        )
         identity = runtime_pb2.SessionIdentity(
             run_uid="session-run",
             assigned_pod_uid="pod-a",
@@ -165,13 +168,13 @@ class TestPythonRuntime(unittest.TestCase):
             runtime_pb2.ExecuteSessionOperationRequest(
                 identity=identity,
                 command=runtime_pb2.SessionCommand(
-                    argv=["bash", "-c", "printf '%s:' \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"],
+                    argv=["bash", "-c", "printf '%s:%s:' \"$KRUNTIMES_SESSION_DEFAULT\" \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"],
                     env={"KRUNTIMES_SESSION_TEST": "environment"},
                 ),
             )
         )
         self.assertEqual(operation.command.exit_code, 0)
-        self.assertEqual(operation.command.stdout, b"environment:hello\n")
+        self.assertEqual(operation.command.stdout, b"session:environment:hello\n")
         self.assertFalse(operation.command.timed_out)
         self.session_stub.ExecuteSessionOperation(
             runtime_pb2.ExecuteSessionOperationRequest(

@@ -43,6 +43,9 @@ Run 不得设置 `spec.workspace`：v0 为其在 assigned Runtime Pod 创建按 
 workspace。同一 Pod 上的操作之间保留文件、已安装依赖和 process-visible state；Pod 丢失会使
 session 失败，v0 不承诺 checkpoint、resume 或透明迁移。
 
+`Run.spec.env` 会在 registration 时被固定，并提供给每个 session command。command 可以提供自己的
+environment map；其中的值只对该 command 覆盖已注册的值。
+
 `Run.spec.timeout` 限制整个 reservation。`idleTimeoutSeconds` 在没有 accepted mutation 或 command
 activity 后过期。Session 继续使用普通 Run 的 cancellation、deletion、TTL、authorization、endpoint
 和 assignment-UID fencing。注册在 `Ready` 前可以 retry，因为此时尚不存在可用的 session state；

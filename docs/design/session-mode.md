@@ -52,6 +52,10 @@ Files, installed dependencies, and process-visible state persist across session
 operations on that Pod. Pod loss fails the session; v0 has no checkpoint,
 resume, or transparent migration promise.
 
+`Run.spec.env` is captured during registration and is available to every
+session command. A command may supply its own environment map; those values
+override the registered values for that command only.
+
 `Run.spec.timeout` bounds the entire reservation. `idleTimeoutSeconds` expires
 the session after no accepted mutation or command activity. A Session Run uses
 the normal Run cancellation, deletion, TTL, authorization, endpoint, and

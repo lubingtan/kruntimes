@@ -242,7 +242,13 @@ func TestSessionRuntimeExecutesCommandsAndConfinesFiles(t *testing.T) {
 	defer cleanup()
 
 	identity := &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"}
-	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}); err != nil {
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{
+		Identity:   identity,
+		WorkingDir: workDir,
+		Env: map[string]string{
+			"KRUNTIMES_SESSION_DEFAULT": "session",
+		},
+	}); err != nil {
 		t.Fatalf("RegisterSession: %v", err)
 	}
 	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{Identity: identity}); status.Code(err) != codes.InvalidArgument {
@@ -288,14 +294,14 @@ func TestSessionRuntimeExecutesCommandsAndConfinesFiles(t *testing.T) {
 	operation, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
 		Identity: identity,
 		Operation: &pb.ExecuteSessionOperationRequest_Command{Command: &pb.SessionCommand{
-			Argv: []string{"bash", "-c", "printf '%s:' \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"},
+			Argv: []string{"bash", "-c", "printf '%s:%s:' \"$KRUNTIMES_SESSION_DEFAULT\" \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"},
 			Env:  map[string]string{"KRUNTIMES_SESSION_TEST": "environment"},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("ExecuteSessionOperation command: %v", err)
 	}
-	if operation.Command == nil || operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "environment:hello\n" || operation.Command.TimedOut {
+	if operation.Command == nil || operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "session:environment:hello\n" || operation.Command.TimedOut {
 		t.Fatalf("command result = %#v", operation)
 	}
 	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
