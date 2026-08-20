@@ -185,6 +185,12 @@ authorization errors. Set either `--authorization-cache-ttl=0` or
 can take up to the configured TTL to affect an already cached successful
 decision.
 
+Each Runtime gateway Pod accepts at most 128 concurrent HTTP requests by
+default. Admission is non-blocking: a request above the per-Pod limit receives
+`429 Too Many Requests` instead of waiting in an unbounded gateway queue.
+Health checks do not consume a request slot. The Helm value
+`gateway.maxConcurrentRequests` configures the limit for every gateway Pod.
+
 The gateway server maps the following HTTP API operations to `SessionRuntime`
 gRPC methods:
 

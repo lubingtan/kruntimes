@@ -82,6 +82,7 @@ gateway:
   probePort: 8086
   authorizationCacheTTL: 30s
   authorizationCacheCapacity: 1024
+  maxConcurrentRequests: 128
   podAnnotations: {}
   podSecurityContext:
     seccompProfile:

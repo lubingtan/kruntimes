@@ -143,6 +143,10 @@ authorization error。将 `--authorization-cache-ttl=0` 或
 `--authorization-cache-capacity=0` 任一设为零即可禁用 cache。已缓存成功 decision 最多会在配置的 TTL 内继续
 生效，因此 authorization change 在这段时间后才会影响该 decision。
 
+每个 Runtime gateway Pod 默认最多接受 128 个并发 HTTP request。admission 不会等待：超过单个 Pod limit 的
+request 立即返回 `429 Too Many Requests`，不会在 gateway queue 中无限等待。health check 不消耗 request slot。
+Helm value `gateway.maxConcurrentRequests` 为每个 gateway Pod 配置该 limit。
+
 gateway server 将下列 HTTP API operation 映射到 `SessionRuntime` gRPC method：
 
 | HTTP API | `SessionRuntime` method | 行为 |

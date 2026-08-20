@@ -36,6 +36,7 @@ func main() {
 		httpAddr                   string
 		authorizationCacheTTL      time.Duration
 		authorizationCacheCapacity int
+		maxConcurrentRequests      int
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8085", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8086", "The address the health probe endpoint binds to.")
@@ -43,6 +44,7 @@ func main() {
 	defaultAuthorizationCache := gateway.DefaultAuthorizationCacheOptions()
 	flag.DurationVar(&authorizationCacheTTL, "authorization-cache-ttl", defaultAuthorizationCache.TTL, "How long successful bearer-token authorization decisions remain cached; zero disables caching.")
 	flag.IntVar(&authorizationCacheCapacity, "authorization-cache-capacity", defaultAuthorizationCache.Capacity, "Maximum successful bearer-token authorization decisions retained; zero disables caching.")
+	flag.IntVar(&maxConcurrentRequests, "max-concurrent-requests", gateway.DefaultMaxConcurrentRequests, "Maximum concurrent HTTP requests handled by one gateway Pod.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -80,8 +82,9 @@ func main() {
 			gateway.KubernetesAuthorizer{Client: kubernetes.NewForConfigOrDie(config)},
 			gateway.AuthorizationCacheOptions{Capacity: authorizationCacheCapacity, TTL: authorizationCacheTTL},
 		),
-		Dialer:  gateway.GRPCDialer{},
-		Address: httpAddr,
+		Dialer:                gateway.GRPCDialer{},
+		Address:               httpAddr,
+		MaxConcurrentRequests: maxConcurrentRequests,
 	}); err != nil {
 		ctrl.Log.WithName("setup").Error(err, "unable to add Runtime gateway server")
 		os.Exit(1)

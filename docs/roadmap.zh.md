@@ -174,7 +174,8 @@ controller wiring 累积不必要的冲突。
   - [x] 通过 Kubernetes TokenReview authenticate caller token，并通过 SubjectAccessReview
     authorize target Run；
   - [x] 增加 bounded authorization decision cache；
-  - [ ] 执行 TLS、request、response、concurrency 和 proxy-loop limits；
+  - [x] 执行每个 gateway 的有界 HTTP request concurrency limit；
+  - [ ] 执行 chart-managed TLS，并 review 显式的 request 和 response limits；
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
   [Session Mode 设计](design/session-mode.zh.md) 使用 `Run.spec.mode.session`、由共享 gateway

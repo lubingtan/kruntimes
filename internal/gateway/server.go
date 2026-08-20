@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -26,6 +27,9 @@ const (
 	defaultRuntimeServicePort = 9093
 	maxRequestBodyBytes       = 1 << 20
 	runtimeIndexField         = "spec.runtime"
+
+	// DefaultMaxConcurrentRequests is the per-gateway-Pod HTTP request limit.
+	DefaultMaxConcurrentRequests = 128
 )
 
 // Authorizer verifies that a request principal may access a Session Run.
@@ -48,6 +52,11 @@ type Server struct {
 	Address      string
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+
+	// MaxConcurrentRequests bounds requests handled by one gateway Pod. Values
+	// less than one use the default. Health checks do not consume this limit.
+	MaxConcurrentRequests int
+	requestLimiter        gatewayRequestLimiter
 }
 
 // Start implements manager.Runnable and serves the HTTP gateway until ctx ends.
@@ -87,6 +96,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if !s.requestLimiter.tryAcquire(s.maxConcurrentRequests()) {
+		writeError(w, http.StatusTooManyRequests, "gateway request concurrency limit reached")
+		return
+	}
+	defer s.requestLimiter.release()
 
 	namespace, runtimeName, runUID, suffix, ok := sessionRoute(r.URL.Path)
 	if !ok {
@@ -119,6 +133,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func (s *Server) maxConcurrentRequests() int {
+	if s.MaxConcurrentRequests > 0 {
+		return s.MaxConcurrentRequests
+	}
+	return DefaultMaxConcurrentRequests
+}
+
+type gatewayRequestLimiter struct {
+	once   sync.Once
+	tokens chan struct{}
+}
+
+func (l *gatewayRequestLimiter) tryAcquire(limit int) bool {
+	l.once.Do(func() {
+		l.tokens = make(chan struct{}, limit)
+	})
+	select {
+	case l.tokens <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *gatewayRequestLimiter) release() {
+	<-l.tokens
 }
 
 func (s *Server) getSessionStatus(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run) {

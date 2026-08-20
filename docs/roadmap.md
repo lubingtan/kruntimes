@@ -203,7 +203,8 @@ wiring from accumulating avoidable conflicts.
   - [x] authenticate caller tokens through Kubernetes TokenReview and authorize
     the target Run through SubjectAccessReview;
   - [x] add a bounded authorization decision cache;
-  - [ ] enforce TLS, request, response, concurrency, and proxy-loop limits;
+  - [x] enforce a bounded per-gateway HTTP request concurrency limit;
+  - [ ] enforce chart-managed TLS and review explicit request and response limits;
 - [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
   The accepted [Session Mode design](design/session-mode.md) uses

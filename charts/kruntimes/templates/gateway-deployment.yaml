@@ -62,6 +62,7 @@ spec:
             - --health-probe-bind-address={{ .Values.gateway.probeBindAddress }}
             - --authorization-cache-ttl={{ .Values.gateway.authorizationCacheTTL }}
             - --authorization-cache-capacity={{ .Values.gateway.authorizationCacheCapacity }}
+            - --max-concurrent-requests={{ .Values.gateway.maxConcurrentRequests }}
           ports:
             - containerPort: {{ .Values.gateway.httpPort }}
               name: http

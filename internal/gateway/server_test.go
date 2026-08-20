@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -93,6 +94,53 @@ func TestGatewayRejectsInvalidOperationShape(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGatewayLimitsConcurrentRequests(t *testing.T) {
+	run := readySessionRun()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	client := &fakeSessionRuntimeClient{status: func(_ context.Context, _ *pb.GetSessionStatusRequest, _ ...grpc.CallOption) (*pb.SessionStatus, error) {
+		close(started)
+		<-release
+		return &pb.SessionStatus{State: pb.SessionState_SESSION_STATE_READY}, nil
+	}}
+	server := testServer(t, run, allowAuthorizer{}, &fakeDialer{client: client})
+	server.MaxConcurrentRequests = 1
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/sessions/session-uid", nil))
+		firstDone <- response
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not reach the Runtime Service")
+	}
+
+	health := httptest.NewRecorder()
+	server.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", health.Code, http.StatusOK)
+	}
+
+	second := httptest.NewRecorder()
+	server.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/sessions/session-uid", nil))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, body = %s", second.Code, second.Body.String())
+	}
+
+	close(release)
+	select {
+	case first := <-firstDone:
+		if first.Code != http.StatusOK {
+			t.Fatalf("first request status = %d, body = %s", first.Code, first.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete")
 	}
 }
 
