@@ -268,6 +268,23 @@ func (c *Controller) reconcileFinalizing(ctx context.Context, run *v1alpha1.Run)
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
 	c.closeActiveSession(ctx, ar)
+	return c.completeFinalizingSession(ctx, ar)
+}
+
+// completeFinalizingSession exports the immutable final artifact directory
+// only after the local Session Runtime has stopped accepting operations.
+// Transient store errors leave the Run Finalizing so the same directory can be
+// retried without admitting further gateway work.
+func (c *Controller) completeFinalizingSession(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
+	artifactRefs, err := c.collectArtifacts(ctx, ar)
+	if err != nil {
+		if isArtifactInvalid(err) {
+			return c.applyTerminal(ctx, ar, v1alpha1.RunFailed, "ArtifactInvalid", err.Error())
+		}
+		c.Log.Error(err, "Session artifact collection failed; retrying", "run", client.ObjectKeyFromObject(ar.run))
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	ar.run.Status.ArtifactRefs = artifactRefs
 	return c.applyTerminal(ctx, ar, v1alpha1.RunSucceeded, "SessionCompleted", "session finalized")
 }
 

@@ -1252,6 +1252,168 @@ func TestReadySessionDrainFinalizesAfterAcceptedOperations(t *testing.T) {
 	}
 }
 
+func TestFinalizingSessionExportsArtifacts(t *testing.T) {
+	setTestWorkspace(t)
+	run, ar, c, k8sClient, sessionClient, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{})
+	if err := os.MkdirAll(ar.artifactDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ar.artifactDir, "report.txt"), []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if result, err := c.reconcileFinalizing(t.Context(), run); err != nil || !result.IsZero() {
+		t.Fatalf("reconcileFinalizing = (%#v, %v), want success", result, err)
+	}
+	var completed v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Phase != v1alpha1.RunSucceeded || len(completed.Status.ArtifactRefs) != 1 || completed.Status.ArtifactRefs[0].Name != "report.txt" {
+		t.Fatalf("completed status = %#v", completed.Status)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+	if len(store.puts) != 1 {
+		t.Fatalf("artifact uploads = %d, want 1", len(store.puts))
+	}
+}
+
+func TestFinalizingSessionRetriesTransientArtifactStoreFailure(t *testing.T) {
+	setTestWorkspace(t)
+	run, ar, c, k8sClient, sessionClient, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{failAt: 1})
+	if err := os.MkdirAll(ar.artifactDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ar.artifactDir, "report.txt"), []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := c.reconcileFinalizing(t.Context(), run)
+	if err != nil || result.RequeueAfter <= 0 {
+		t.Fatalf("first reconcile = (%#v, %v), want requeue", result, err)
+	}
+	var retrying v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &retrying); err != nil {
+		t.Fatal(err)
+	}
+	if retrying.Status.Phase != v1alpha1.RunFinalizing || len(retrying.Status.ArtifactRefs) != 0 {
+		t.Fatalf("status after transient store failure = %#v", retrying.Status)
+	}
+
+	store.failAt = 0
+	store.puts = nil
+	if result, err := c.reconcileFinalizing(t.Context(), &retrying); err != nil || !result.IsZero() {
+		t.Fatalf("retry reconcile = (%#v, %v), want success", result, err)
+	}
+	var completed v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Phase != v1alpha1.RunSucceeded || len(completed.Status.ArtifactRefs) != 1 {
+		t.Fatalf("completed status = %#v", completed.Status)
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want one durable close", len(sessionClient.closeRequests))
+	}
+}
+
+func TestFinalizingSessionFailsForInvalidArtifact(t *testing.T) {
+	setTestWorkspace(t)
+	run, ar, c, k8sClient, _, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{})
+	if err := os.MkdirAll(ar.artifactDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(ar.artifactDir, "target")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(ar.artifactDir, "invalid-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if result, err := c.reconcileFinalizing(t.Context(), run); err != nil || !result.IsZero() {
+		t.Fatalf("reconcileFinalizing = (%#v, %v), want terminal failure", result, err)
+	}
+	var failed v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &failed); err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status.Phase != v1alpha1.RunFailed {
+		t.Fatalf("phase = %s, want Failed", failed.Status.Phase)
+	}
+	if condition := findCondition(failed.Status.Conditions, "Completed"); condition == nil || condition.Reason != "ArtifactInvalid" {
+		t.Fatalf("Completed condition = %#v, want ArtifactInvalid", condition)
+	}
+	if len(store.puts) != 0 {
+		t.Fatalf("artifact uploads = %d, want 0", len(store.puts))
+	}
+}
+
+func TestFinalizingSessionImmediateTerminationSkipsArtifactExport(t *testing.T) {
+	setTestWorkspace(t)
+	run, ar, c, k8sClient, sessionClient, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{})
+	run.Spec.Termination.Mode = v1alpha1.RunTerminationImmediate
+	if err := os.MkdirAll(ar.artifactDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ar.artifactDir, "report.txt"), []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if result, err := c.reconcileFinalizing(t.Context(), run); err != nil || !result.IsZero() {
+		t.Fatalf("reconcileFinalizing = (%#v, %v), want cancellation", result, err)
+	}
+	var cancelled v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &cancelled); err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status.Phase != v1alpha1.RunCancelled {
+		t.Fatalf("phase = %s, want Cancelled", cancelled.Status.Phase)
+	}
+	if len(store.puts) != 0 {
+		t.Fatalf("artifact uploads = %d, want 0", len(store.puts))
+	}
+	if len(sessionClient.closeRequests) != 1 {
+		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
+	}
+}
+
+func newFinalizingSessionForArtifactTest(t *testing.T, store *fakeArtifactStore) (*v1alpha1.Run, *activeRun, *Controller, client.Client, *fakeSessionRuntimeClient, *fakeArtifactStore) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:     "bash",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain},
+			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunFinalizing,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{
+		Client:            k8sClient,
+		PodName:           "runtime-pod",
+		sessionCli:        sessionClient,
+		ArtifactStore:     store,
+		ArtifactStoreSpec: artifactTestStoreSpec(),
+	}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+	return run, ar, c, k8sClient, sessionClient, store
+}
+
 func TestLateSessionRegistrationClosesFinalizingSession(t *testing.T) {
 	setTestWorkspace(t)
 	scheme := runtime.NewScheme()
