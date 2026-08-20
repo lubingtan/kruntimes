@@ -37,7 +37,7 @@ func (c *Controller) startSessionRegistrationAsync(ar *activeRun) {
 		if value, exists := c.activeRuns.Load(uid); !exists || value != ar {
 			// The Run was cancelled or deleted while local registration was in
 			// flight. Do not leave a session behind after its owner released it.
-			c.closeRuntimeSession(ctx, ar.run)
+			c.closeActiveSession(ctx, ar)
 			return
 		}
 		if err := c.markSessionReady(ctx, ar); err != nil {
@@ -267,7 +267,10 @@ func (c *Controller) reconcileFinalizing(ctx context.Context, run *v1alpha1.Run)
 	if c.SessionOperations != nil && !c.SessionOperations.Drain(uid) {
 		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
-	c.closeActiveSession(ctx, ar)
+	if err := c.ensureActiveSessionClosed(ctx, ar); err != nil {
+		c.Log.Error(err, "failed to close Session before artifact export; retrying", "run", client.ObjectKeyFromObject(ar.run))
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	return c.completeFinalizingSession(ctx, ar)
 }
 
@@ -289,33 +292,51 @@ func (c *Controller) completeFinalizingSession(ctx context.Context, ar *activeRu
 }
 
 func (c *Controller) closeActiveSession(ctx context.Context, ar *activeRun) {
-	if ar == nil || ar.run == nil || !ar.sessionClosed.CompareAndSwap(false, true) {
-		return
+	if err := c.ensureActiveSessionClosed(ctx, ar); err != nil {
+		c.Log.Error(err, "failed to close Runtime Server session", "run", client.ObjectKeyFromObject(ar.run))
 	}
-	c.closeRuntimeSession(ctx, ar.run)
 }
 
-func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run) {
+// ensureActiveSessionClosed closes the Runtime Server session exactly once.
+// A Finalizing Run must observe a successful close before its artifact
+// directory becomes immutable and safe to export.
+func (c *Controller) ensureActiveSessionClosed(ctx context.Context, ar *activeRun) error {
+	if ar == nil || ar.run == nil {
+		return nil
+	}
+	ar.sessionCloseMu.Lock()
+	defer ar.sessionCloseMu.Unlock()
+	if ar.sessionClosed.Load() {
+		return nil
+	}
+	if err := c.closeRuntimeSession(ctx, ar.run); err != nil {
+		return err
+	}
+	ar.sessionClosed.Store(true)
+	return nil
+}
+
+func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run) error {
 	if run == nil {
-		return
+		return nil
 	}
 	if c.SessionOperations != nil {
 		c.SessionOperations.Close(string(run.UID))
 	}
 	if c.sessionCli == nil {
-		return
+		return nil
 	}
 	identity, err := sessionIdentityForRun(run)
 	if err != nil {
-		c.Log.Error(err, "failed to build SessionRuntime close request", "run", client.ObjectKeyFromObject(run))
-		return
+		return fmt.Errorf("build SessionRuntime close request: %w", err)
 	}
 	closeCtx, cancel := context.WithTimeout(ctx, c.sessionCloseTimeout())
 	defer cancel()
 	_, err = c.sessionCli.CloseSession(closeCtx, &pb.CloseSessionRequest{Identity: identity})
 	if err != nil && status.Code(err) != codes.NotFound && status.Code(err) != codes.Unimplemented {
-		c.Log.Error(err, "failed to close Runtime Server session", "run", client.ObjectKeyFromObject(run))
+		return fmt.Errorf("close Runtime Server session: %w", err)
 	}
+	return nil
 }
 
 func (c *Controller) sessionCloseTimeout() time.Duration {

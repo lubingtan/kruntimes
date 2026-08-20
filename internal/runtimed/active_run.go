@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,7 @@ type activeRun struct {
 	start                  time.Time
 	started                atomic.Bool
 	prepared               atomic.Bool
+	sessionCloseMu         sync.Mutex
 	sessionClosed          atomic.Bool
 }
 

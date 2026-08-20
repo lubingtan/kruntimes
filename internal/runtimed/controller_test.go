@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1319,6 +1320,45 @@ func TestFinalizingSessionRetriesTransientArtifactStoreFailure(t *testing.T) {
 	}
 }
 
+func TestFinalizingSessionRetriesRuntimeServerCloseBeforeArtifactExport(t *testing.T) {
+	setTestWorkspace(t)
+	run, ar, c, k8sClient, sessionClient, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{})
+	sessionClient.closeErr = errors.New("runtime server unavailable")
+	if err := os.MkdirAll(ar.artifactDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ar.artifactDir, "report.txt"), []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := c.reconcileFinalizing(t.Context(), run)
+	if err != nil || result.RequeueAfter <= 0 {
+		t.Fatalf("first reconcile = (%#v, %v), want requeue", result, err)
+	}
+	var retrying v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &retrying); err != nil {
+		t.Fatal(err)
+	}
+	if retrying.Status.Phase != v1alpha1.RunFinalizing || len(store.puts) != 0 {
+		t.Fatalf("close failure exported artifacts or changed phase: %#v, uploads=%d", retrying.Status, len(store.puts))
+	}
+
+	sessionClient.closeErr = nil
+	if result, err := c.reconcileFinalizing(t.Context(), &retrying); err != nil || !result.IsZero() {
+		t.Fatalf("retry reconcile = (%#v, %v), want success", result, err)
+	}
+	var completed v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Phase != v1alpha1.RunSucceeded || len(completed.Status.ArtifactRefs) != 1 {
+		t.Fatalf("completed status = %#v", completed.Status)
+	}
+	if len(sessionClient.closeRequests) != 2 {
+		t.Fatalf("CloseSession requests = %d, want 2", len(sessionClient.closeRequests))
+	}
+}
+
 func TestFinalizingSessionFailsForInvalidArtifact(t *testing.T) {
 	setTestWorkspace(t)
 	run, ar, c, k8sClient, _, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{})
@@ -1931,6 +1971,7 @@ type fakeSessionRuntimeClient struct {
 	status          *pb.SessionStatus
 	statusErr       error
 	closeRequests   []*pb.CloseSessionRequest
+	closeErr        error
 }
 
 func (f *fakeSessionRuntimeClient) RegisterSession(_ context.Context, request *pb.RegisterSessionRequest, _ ...grpc.CallOption) (*pb.SessionStatus, error) {
@@ -1953,6 +1994,9 @@ func (f *fakeSessionRuntimeClient) GetSessionStatus(context.Context, *pb.GetSess
 
 func (f *fakeSessionRuntimeClient) CloseSession(_ context.Context, request *pb.CloseSessionRequest, _ ...grpc.CallOption) (*pb.CloseSessionResponse, error) {
 	f.closeRequests = append(f.closeRequests, request)
+	if f.closeErr != nil {
+		return nil, f.closeErr
+	}
 	return &pb.CloseSessionResponse{Identity: request.Identity}, nil
 }
 
