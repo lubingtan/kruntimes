@@ -2087,6 +2087,63 @@ func TestFilesystemArtifacts(t *testing.T) {
 	assertFilesystemArtifactMissing(t, claimName, report.Location.Filesystem.Path)
 }
 
+func TestSessionRunExportsArtifactsOnDrain(t *testing.T) {
+	runtimeName := "bash-session-artifacts"
+	claimName := "e2e-session-artifacts"
+	ensureFilesystemRuntime(t, runtimeName, claimName)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-artifacts-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create Session artifact Run: %v", err)
+	}
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["sh","-c","printf session-report > \"$KRUNTIME_ARTIFACTS_DIR/report.txt\"; printf done"]}}`), http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(response, &operation); err != nil {
+		t.Fatalf("decode Session artifact command response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "done" {
+		t.Fatalf("Session artifact command = %#v, want successful done output", operation.Command)
+	}
+
+	requestRunDrain(t, run)
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunSucceeded)
+	if run.Status.ArtifactStore == nil || run.Status.ArtifactStore.Filesystem == nil ||
+		run.Status.ArtifactStore.Filesystem.VolumeClaimName != claimName {
+		t.Fatalf("artifact store cleanup snapshot = %#v", run.Status.ArtifactStore)
+	}
+	if len(run.Status.ArtifactRefs) != 1 || run.Status.ArtifactRefs[0].Name != "report.txt" {
+		t.Fatalf("artifact refs = %#v, want report.txt", run.Status.ArtifactRefs)
+	}
+
+	destination := filepath.Join(t.TempDir(), "report.txt")
+	if _, err := krt.DownloadArtifact(t.Context(), k8sClient, restConfig, testNamespace, run.Name, "report.txt", destination, 19095); err != nil {
+		t.Fatalf("download Session artifact: %v", err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "session-report" {
+		t.Fatalf("downloaded Session artifact = %q, want session-report", contents)
+	}
+}
+
 func TestRunStagesArtifactInputs(t *testing.T) {
 	runtimeName := "bash-artifact-inputs"
 	claimName := "e2e-artifact-inputs"
