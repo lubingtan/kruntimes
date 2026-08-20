@@ -173,7 +173,7 @@ controller wiring 累积不必要的冲突。
   - [x] 使用 immutable Run UID 和 assigned Pod UID fence routing，在转发前拒绝 stale assignment；
   - [x] 通过 Kubernetes TokenReview authenticate caller token，并通过 SubjectAccessReview
     authorize target Run；
-  - [ ] 增加 bounded authorization decision cache；
+  - [x] 增加 bounded authorization decision cache；
   - [ ] 执行 TLS、request、response、concurrency 和 proxy-loop limits；
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的

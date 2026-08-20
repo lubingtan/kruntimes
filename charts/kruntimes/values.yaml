@@ -80,6 +80,8 @@ gateway:
   httpPort: 8084
   metricsPort: 8085
   probePort: 8086
+  authorizationCacheTTL: 30s
+  authorizationCacheCapacity: 1024
   podAnnotations: {}
   podSecurityContext:
     seccompProfile:

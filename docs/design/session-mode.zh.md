@@ -135,6 +135,14 @@ assignment 的 Session Run；若其 Pod UID 不是 assigned Pod UID，则将同�
 owner runtimed。forwarding marker 防止 loop。owner runtimed 完成 queue admission，再通过 local
 `SessionRuntime` gRPC 调用 colocated Runtime Server。
 
+在转发 HTTP request 前，gateway 使用 Kubernetes `TokenReview` authenticate bearer token，并通过
+`SubjectAccessReview` authorize 对精确目标 Run 的访问。为限制这些 Kubernetes control-plane 请求，gateway
+默认将成功 decision cache 30 秒。这个 in-memory cache 最多保存 1024 条 entry；每个 key 由 bearer token 的
+SHA-256 digest、Run namespace、name 以及 immutable UID 组成。它不会保存 bearer token、denied decision 或
+authorization error。将 `--authorization-cache-ttl=0` 或
+`--authorization-cache-capacity=0` 任一设为零即可禁用 cache。已缓存成功 decision 最多会在配置的 TTL 内继续
+生效，因此 authorization change 在这段时间后才会影响该 decision。
+
 gateway server 将下列 HTTP API operation 映射到 `SessionRuntime` gRPC method：
 
 | HTTP API | `SessionRuntime` method | 行为 |

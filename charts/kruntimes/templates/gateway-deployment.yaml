@@ -60,6 +60,8 @@ spec:
             - --http-bind-address={{ .Values.gateway.httpBindAddress }}
             - --metrics-bind-address={{ .Values.gateway.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.gateway.probeBindAddress }}
+            - --authorization-cache-ttl={{ .Values.gateway.authorizationCacheTTL }}
+            - --authorization-cache-capacity={{ .Values.gateway.authorizationCacheCapacity }}
           ports:
             - containerPort: {{ .Values.gateway.httpPort }}
               name: http

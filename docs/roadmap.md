@@ -202,7 +202,7 @@ wiring from accumulating avoidable conflicts.
     stale assignments before forwarding;
   - [x] authenticate caller tokens through Kubernetes TokenReview and authorize
     the target Run through SubjectAccessReview;
-  - [ ] add a bounded authorization decision cache;
+  - [x] add a bounded authorization decision cache;
   - [ ] enforce TLS, request, response, concurrency, and proxy-loop limits;
 - [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.

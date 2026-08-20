@@ -174,6 +174,17 @@ runtimed in the same Runtime. A forwarding marker prevents loops. The owner
 runtimed performs queue admission and invokes its colocated Runtime Server over
 local `SessionRuntime` gRPC.
 
+Before forwarding an HTTP request, the gateway authenticates its bearer token
+with Kubernetes `TokenReview` and authorizes access to the exact Run with
+`SubjectAccessReview`. To bound this control-plane work, it caches successful
+decisions for 30 seconds by default. The in-memory cache is capped at 1024
+entries and keys each decision by a SHA-256 token digest plus the Run namespace,
+name, and immutable UID. It never retains bearer tokens, denied decisions, or
+authorization errors. Set either `--authorization-cache-ttl=0` or
+`--authorization-cache-capacity=0` to disable the cache. Authorization changes
+can take up to the configured TTL to affect an already cached successful
+decision.
+
 The gateway server maps the following HTTP API operations to `SessionRuntime`
 gRPC methods:
 
