@@ -242,17 +242,17 @@ wiring from accumulating avoidable conflicts.
   - [ ] keep operation history and audit events in structured external logs,
     retain only bounded readiness, endpoint, and artifact-reference data in Run
     status, and export large outputs through ArtifactStore;
-    - [ ] replace `cancelRequested` with a monotonic `termination.mode` API:
+    - [x] replace `cancelRequested` with a monotonic `termination.mode` API:
       `Immediate` for cancellation and Session-only `Drain` for normal
       completion; implement `Ready -> Finalizing -> Succeeded` and distinct SDK
       `Close` and `Cancel` helpers;
-    - [ ] fence new gateway operations, drain already accepted operations, and
+    - [x] fence new gateway operations, drain already accepted operations, and
       close the local Runtime Server before collecting final artifacts;
-    - [ ] provide `$KRUNTIME_ARTIFACTS_DIR` only for Session Runs whose Runtime
+    - [x] provide `$KRUNTIME_ARTIFACTS_DIR` only for Session Runs whose Runtime
       has an ArtifactStore; validate and upload final files, retain compact refs
       in status, retry transient store failures while Finalizing, and fail
       invalid artifacts deterministically;
-    - [ ] cover successful completion/export, cancellation during finalization,
+    - [x] cover successful completion/export, cancellation during finalization,
       transient store retry, invalid artifacts, and Runtime Pod loss in tests;
   - [x] add Python and Go SDKs with create/open/wait/execute/files/logs/close
     helpers, typed errors, direct in-cluster access, and local port-forward
