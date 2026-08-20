@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -129,7 +130,7 @@ func TestSandboxCloseRequestsDrain(t *testing.T) {
 }
 
 func TestSandboxCancelRequestsImmediateAndEscalatesDrain(t *testing.T) {
-	sandbox := terminalSandbox(t, &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain})
+	sandbox := terminalSandboxWithPhase(t, &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain}, v1alpha1.RunCancelled)
 	if err := sandbox.Cancel(t.Context()); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
@@ -145,6 +146,28 @@ func TestSandboxCloseDoesNotDowngradeImmediateTermination(t *testing.T) {
 	}
 	if got := sandbox.Run().Spec.Termination; got == nil || got.Mode != v1alpha1.RunTerminationImmediate {
 		t.Fatalf("termination = %#v, want Immediate", got)
+	}
+}
+
+func TestSandboxTerminationReportsUnexpectedTerminalPhase(t *testing.T) {
+	closeSandbox := terminalSandboxWithPhase(t, nil, v1alpha1.RunFailed)
+	if err := closeSandbox.Close(t.Context()); err == nil {
+		t.Fatal("Close error = nil, want StateError")
+	} else {
+		var stateErr *StateError
+		if !errors.As(err, &stateErr) || stateErr.Run.Status.Phase != v1alpha1.RunFailed {
+			t.Fatalf("Close error = %T %v, want StateError for Failed Run", err, err)
+		}
+	}
+
+	cancelSandbox := terminalSandboxWithPhase(t, nil, v1alpha1.RunSucceeded)
+	if err := cancelSandbox.Cancel(t.Context()); err == nil {
+		t.Fatal("Cancel error = nil, want StateError")
+	} else {
+		var stateErr *StateError
+		if !errors.As(err, &stateErr) || stateErr.Run.Status.Phase != v1alpha1.RunSucceeded {
+			t.Fatalf("Cancel error = %T %v, want StateError for Succeeded Run", err, err)
+		}
 	}
 }
 
@@ -172,6 +195,10 @@ func readySandbox(t *testing.T, doer HTTPDoer) *Sandbox {
 }
 
 func terminalSandbox(t *testing.T, termination *v1alpha1.RunTermination) *Sandbox {
+	return terminalSandboxWithPhase(t, termination, v1alpha1.RunSucceeded)
+}
+
+func terminalSandboxWithPhase(t *testing.T, termination *v1alpha1.RunTermination, phase v1alpha1.RunPhase) *Sandbox {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -183,7 +210,7 @@ func terminalSandbox(t *testing.T, termination *v1alpha1.RunTermination) *Sandbo
 			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
 			Termination: termination,
 		},
-		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunSucceeded},
+		Status: v1alpha1.RunStatus{Phase: phase},
 	}
 	runs := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
 	client, err := New(Config{Runs: runs, HTTPClient: httpDoer(func(*http.Request) (*http.Response, error) { return nil, nil })})

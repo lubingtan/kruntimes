@@ -117,7 +117,7 @@ class SandboxTests(unittest.TestCase):
 
     def test_cancel_requests_immediate_and_escalates_drain(self):
         run = ready_run()
-        run["status"]["phase"] = "Succeeded"
+        run["status"]["phase"] = "Cancelled"
         run["spec"]["termination"] = {"mode": "Drain"}
         runs = FakeRuns(run)
         sandbox = SandboxClient(runs, FakeGateway()).open("default", "sandbox")
@@ -136,6 +136,17 @@ class SandboxTests(unittest.TestCase):
         sandbox.close()
 
         self.assertEqual("Immediate", runs.run["spec"]["termination"]["mode"])
+
+    def test_termination_reports_unexpected_terminal_phase(self):
+        failed = ready_run()
+        failed["status"]["phase"] = "Failed"
+        with self.assertRaises(SandboxStateError):
+            SandboxClient(FakeRuns(failed), FakeGateway()).open("default", "sandbox").close()
+
+        succeeded = ready_run()
+        succeeded["status"]["phase"] = "Succeeded"
+        with self.assertRaises(SandboxStateError):
+            SandboxClient(FakeRuns(succeeded), FakeGateway()).open("default", "sandbox").cancel()
 
     def test_port_forward_preserves_endpoint_path(self):
         gateway = FakeGateway()

@@ -247,7 +247,7 @@ func (s *Sandbox) terminate(ctx context.Context, mode v1alpha1.RunTerminationMod
 			return err
 		}
 		if isTerminal(s.run.Status.Phase) {
-			return nil
+			return terminationResult(s.run, mode)
 		}
 		select {
 		case <-ctx.Done():
@@ -255,6 +255,22 @@ func (s *Sandbox) terminate(ctx context.Context, mode v1alpha1.RunTerminationMod
 		case <-time.After(s.client.pollInterval):
 		}
 	}
+}
+
+func terminationResult(run *v1alpha1.Run, mode v1alpha1.RunTerminationMode) error {
+	if run == nil {
+		return &StateError{Message: "Session Run is not available"}
+	}
+	want := v1alpha1.RunSucceeded
+	operation := "close"
+	if mode == v1alpha1.RunTerminationImmediate {
+		want = v1alpha1.RunCancelled
+		operation = "cancel"
+	}
+	if run.Status.Phase == want {
+		return nil
+	}
+	return &StateError{Run: run.DeepCopy(), Message: fmt.Sprintf("Session Run did not %s successfully; phase is %s", operation, run.Status.Phase)}
 }
 
 func shouldRequestTermination(current *v1alpha1.RunTermination, requested v1alpha1.RunTerminationMode) bool {

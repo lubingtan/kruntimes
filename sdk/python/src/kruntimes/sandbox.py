@@ -245,7 +245,12 @@ class Sandbox:
         deadline = _deadline(timeout_seconds)
         while True:
             self.refresh()
-            if _phase(self._run) in _TERMINAL_PHASES:
+            phase = _phase(self._run)
+            if phase in _TERMINAL_PHASES:
+                expected = "Succeeded" if mode == "Drain" else "Cancelled"
+                if phase != expected:
+                    action = "close" if mode == "Drain" else "cancel"
+                    raise SandboxStateError(self._run, f"Session Run did not {action} successfully; phase is {phase}")
                 return
             _sleep_until(deadline, self._client._poll_interval_seconds)
 
