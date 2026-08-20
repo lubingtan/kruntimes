@@ -218,11 +218,15 @@ controller wiring 累积不必要的冲突。
     direct in-cluster access 与 local port-forward support；
   - [x] 增加 Kubernetes diagnosis agent 示例，使用 Session Run 实现 multi-step scripts、files、
     results 和 cleanup；在 feature 被视为 supported 前用该示例发现剩余 product gaps；
-  - [ ] 增加 registration、ordering、timeout、cancellation、idle expiry、cleanup、authorization、
+  - [x] 增加 registration、ordering、timeout、cancellation、idle expiry、cleanup、authorization、
     file-boundary enforcement、Runtime Pod loss 和 gateway routing 的 unit、integration 与 E2E
     coverage；
     - [x] 通过 authenticated HTTP gateway 的 E2E 验证每个 Session 的 FIFO mutation ordering；
     - [x] 通过 E2E 验证取消 Session Run 会终止活跃的 gateway command，并拒绝后续 gateway access；
+    - [x] 通过 focused unit、integration 与 E2E tests 验证 gateway routing、bearer-token
+      authentication、Run authorization、workspace file-boundary enforcement、registration
+      environment、structured command logs、idle/total timeout、Drain completion、SDK access，
+      以及 assigned Runtime Pod loss。
 - [ ] v0.x examples：增加 LLM agent 示例和 workflow 示例，并用这些示例反推缺失的
   产品和 API 能力。
 - [x] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run

@@ -263,13 +263,17 @@ wiring from accumulating avoidable conflicts.
   - [x] add a Kubernetes diagnosis agent example that uses a Session Run for
     multi-step scripts, files, results, and cleanup; use it to find remaining
     product gaps before calling the feature supported;
-  - [ ] add unit, integration, and E2E coverage for registration, ordering,
+  - [x] add unit, integration, and E2E coverage for registration, ordering,
     timeout, cancellation, idle expiry, cleanup, authorization, file-boundary
     enforcement, Runtime Pod loss, and gateway routing;
     - [x] verify per-session FIFO mutation ordering through the authenticated
       HTTP gateway in E2E;
     - [x] verify that cancelling a Session Run terminates an active gateway
       command and rejects subsequent gateway access in E2E;
+    - [x] verify gateway routing, bearer-token authentication, Run authorization,
+      workspace file-boundary enforcement, registration environment, structured
+      command logs, idle and total timeout, Drain completion, SDK access, and
+      assigned Runtime Pod loss across focused unit, integration, and E2E tests.
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those
   examples to identify missing product and API capabilities.
 - [x] Workflow data sharing: design and implement first-class cross-Run storage
