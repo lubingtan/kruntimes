@@ -221,8 +221,6 @@ controller wiring 累积不必要的冲突。
     coverage；
     - [x] 通过 authenticated HTTP gateway 的 E2E 验证每个 Session 的 FIFO mutation ordering；
     - [x] 通过 E2E 验证取消 Session Run 会终止活跃的 gateway command，并拒绝后续 gateway access；
-  - [ ] v1.0：至少增加一个 secure session backend，初始目标为 gVisor，用于 untrusted
-    LLM-generated code；
 - [ ] v0.x examples：增加 LLM agent 示例和 workflow 示例，并用这些示例反推缺失的
   产品和 API 能力。
 - [x] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run
@@ -381,6 +379,9 @@ controller wiring 累积不必要的冲突。
 ### 迈向 v1.0
 
 - 稳定 CRD API。
+- [ ] 至少增加一个 secure Session backend，初始目标为 gVisor，用于执行不受信任的
+  LLM-generated code。在提供该能力前，定义 Runtime Server contract、isolation boundary、
+  resource accounting、networking policy，以及与 Session workspace 和 gateway API 的兼容性。
 - [ ] 仅在 Python 3.15 正式镜像可用、且包括 `grpcio` 在内的所有锁定 native dependency
   都发布兼容的 `cp315` wheels 后，才将 Python Runtime base image 恢复升级至受支持的
   Python 3.15 release。以镜像构建和 runtime test 作为升级 gate；不要依赖 slim

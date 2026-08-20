@@ -267,8 +267,6 @@ wiring from accumulating avoidable conflicts.
       HTTP gateway in E2E;
     - [x] verify that cancelling a Session Run terminates an active gateway
       command and rejects subsequent gateway access in E2E;
-  - [ ] v1.0: add at least one secure session backend, initially gVisor, for
-    untrusted LLM-generated code;
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those
   examples to identify missing product and API capabilities.
 - [x] Workflow data sharing: design and implement first-class cross-Run storage
@@ -455,6 +453,10 @@ wiring from accumulating avoidable conflicts.
 ### Toward v1.0
 
 - Stabilize CRD APIs.
+- [ ] Add at least one secure Session backend, initially gVisor, for untrusted
+  LLM-generated code. Define the Runtime Server contract, isolation boundary,
+  resource accounting, networking policy, and compatibility with the Session
+  workspace and gateway APIs before making it available.
 - [ ] Restore the Python runtime base image to a supported Python 3.15 release
   only after its final image is available and every locked native dependency,
   including `grpcio`, publishes compatible `cp315` wheels. Keep the image build
