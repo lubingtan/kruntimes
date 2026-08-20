@@ -44,6 +44,10 @@ The SDK never retries commands, file mutations, or `Close` after a transport
 failure. Refresh the Run and read structured owner-runtimed logs to determine
 the outcome.
 
+`Close` returns successfully only after the Run reaches `Succeeded`; `Cancel`
+returns successfully only after `Cancelled`. Any other terminal phase is a
+typed `StateError` that retains the current Run.
+
 The local caller needs `get` on the target Run for gateway authorization. A
 port-forward client also needs `get` on the shared gateway Service and `get`,
 `list` on its Pods in the gateway namespace.

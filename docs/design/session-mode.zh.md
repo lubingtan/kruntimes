@@ -218,8 +218,8 @@ Sandbox resource，也不会绕过 gateway。
 | `Execute` | 通过 Run endpoint 发送恰好一个 command 或 file mutation；绝不隐式重试 mutation |
 | `ReadFile`、`ListFiles`、`WriteFile`、`CreateDirectory`、`DeleteFile`、`RenameFile` | 使用有界且 workspace-relative 的 gateway operations |
 | `Logs` | 读取 assigned runtimed container log，并按不可变 Run UID 过滤结构化日志行；不引入 gateway log store |
-| `Close` | 设置 `spec.termination.mode: Drain`，等待 finalization、artifact export 和成功的 terminal lifecycle |
-| `Cancel` | 设置 `spec.termination.mode: Immediate`，等待 cancellation、Runtime Server close、workspace cleanup 与 capacity release |
+| `Close` | 设置 `spec.termination.mode: Drain`，等待 finalization、artifact export 和 `Succeeded`；任何其他 terminal phase 都返回 typed state error |
+| `Cancel` | 设置 `spec.termination.mode: Immediate`，等待 `Cancelled`、Runtime Server close、workspace cleanup 与 capacity release；任何其他 terminal phase 都返回 typed state error |
 
 `Open` 和每次 data-plane call 都从当前 Run status 推导 endpoint。SDK 会拒绝非 Session Run、未处于
 `Ready` 的 Run，或 endpoint Run UID 与已打开 Run 不匹配的情况。HTTP failures 以保留 status code 和

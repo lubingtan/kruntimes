@@ -274,8 +274,8 @@ Both SDKs expose the same lifecycle and operations:
 | `Execute` | send exactly one command or file mutation through the Run endpoint; never retry a mutation implicitly |
 | `ReadFile`, `ListFiles`, `WriteFile`, `CreateDirectory`, `DeleteFile`, `RenameFile` | use the bounded, workspace-relative gateway operations |
 | `Logs` | read the assigned runtimed container log and filter the structured lines for the immutable Run UID; it does not introduce a gateway log store |
-| `Close` | set `spec.termination.mode: Drain` and wait for finalization, artifact export, and the successful terminal lifecycle |
-| `Cancel` | set `spec.termination.mode: Immediate` and wait for cancellation, Runtime Server close, workspace cleanup, and capacity release |
+| `Close` | set `spec.termination.mode: Drain` and wait for finalization, artifact export, and `Succeeded`; return a typed state error for any other terminal phase |
+| `Cancel` | set `spec.termination.mode: Immediate` and wait for `Cancelled`, Runtime Server close, workspace cleanup, and capacity release; return a typed state error for any other terminal phase |
 
 `Open` and every data-plane call derive the endpoint from the current Run
 status. The SDK rejects a non-Session Run, a Run that is not `Ready`, or an
