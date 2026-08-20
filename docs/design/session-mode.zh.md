@@ -176,6 +176,27 @@ session close 的最长时间。
 session 关闭时，owner runtimed 拒绝新 operation、取消 queued work、向 running process group 发送
 termination，等待 grace period 后仍未退出则 force-kill。
 
+graceful process-termination period 是 Runtime Server 的实现配置，而不是 Run 或 Runtime API 字段。内置
+Runtime chart 分别通过 `bash.sessionTerminationGraceSeconds` 和
+`python.sessionTerminationGraceSeconds` 暴露该配置，默认均为两秒。直接创建 Runtime CR 的用户应在
+`spec.template.spec.containers[0].args` 配置 image 文档化的 flag，例如：
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: runtime
+          args:
+            - --session-termination-grace=2s
+```
+
+所有支持 Session Mode 的 Runtime Server 都必须停止 active operation 及其 child process tree，并在配置的
+grace period 后 forcefully 终止 backend-specific execution unit。Bash 和 Python 使用 process group；sandbox
+或 microVM backend 可以采用自己的等价机制。Runtime Server 作者必须文档化自己的配置和行为。operator
+必须让配置的 grace 小于 `runtimed.session.closeTimeout` 并留出足够余量，以便 operation 退出后
+`CloseSession` 能够返回。
+
 file path 必须相对 session workspace；absolute path、traversal 和 symlink escape 都被拒绝。v0 中，gateway
 JSON request body 上限为 1 MiB。内置 Runtime Server 将 direct file read/write，以及每个 command 的 stdout 与
 stderr stream 均限制为 1 MiB。更大的 durable result 使用 ArtifactStore。`ListSessionFiles` 当前直接返回
@@ -188,6 +209,10 @@ structured audit logs。Runtime Server 负责本地 workspace confinement、proc
 state。两个 hop 使用同一套 gRPC `SessionRuntime` message：runtimed 为 gateway traffic 实现该 service，并将
 owner 已接受的 request proxy 到本地 Runtime Server。session queue 与 operation state 只由 runtimed 维护，
 因此 Runtime Server 不会独立重排工作。
+
+`SessionRuntime` 是可选的 Runtime Server extension。未实现它的 Runtime 仍然可以支持 Task 或 Function
+Run。将 Session Run 分配给该 Runtime 时，会在 registration 阶段因 Runtime capability mismatch 失败；
+Session support 不在 `Runtime.spec` 中声明。
 
 `SessionRuntime` 的 method 集合为：
 

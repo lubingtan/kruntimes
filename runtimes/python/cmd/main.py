@@ -13,10 +13,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9092)
     parser.add_argument("--work-dir", default="/workspace")
+    parser.add_argument("--session-termination-grace-seconds", type=float, default=2)
     args = parser.parse_args()
+    if args.session_termination_grace_seconds <= 0:
+        parser.error("--session-termination-grace-seconds must be positive")
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    runtime = PythonRuntime(work_dir=args.work_dir)
+    runtime = PythonRuntime(
+        work_dir=args.work_dir,
+        session_termination_grace_seconds=args.session_termination_grace_seconds,
+    )
     runtime_pb2_grpc.add_RuntimeServicer_to_server(runtime, server)
     runtime_pb2_grpc.add_FunctionRuntimeServicer_to_server(runtime, server)
     runtime_pb2_grpc.add_SessionRuntimeServicer_to_server(runtime, server)

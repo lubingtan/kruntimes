@@ -203,6 +203,19 @@ processes. It should be safe to call multiple times.
 `healthy=false` with a short message when the Runtime Server cannot accept new
 work.
 
+### Session Process Termination
+
+When implementing `SessionRuntime`, cancellation of an
+`ExecuteSessionOperation` context must stop the active operation and its child
+process tree. The Runtime Server must use a bounded graceful-termination period
+before forcefully ending processes that do not exit. This is a backend-specific
+implementation contract. Built-in Bash and Python Runtime images expose Helm
+values for their own command-line flags; a custom Runtime must document and
+configure its own behavior in its Pod template. runtimed does not inject a
+generic process-termination argument into custom images. Keep that period short
+enough that `CloseSession` can return within
+`runtimed.session.closeTimeout`.
+
 ## Workspace and Data Paths
 
 Runtimed prepares source code under `/workspace/<runUID>` and sends that path

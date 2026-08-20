@@ -240,9 +240,8 @@ wiring from accumulating avoidable conflicts.
       on Session close;
     - [x] expose administrator configuration for global queue and operation
       timeout limits, plus the runtimed-to-Runtime-Server close deadline;
-    - [ ] define backend-specific graceful process-termination configuration.
-      A common setting cannot be injected into arbitrary custom Runtime images
-      without a reviewed Runtime Server contract;
+    - [x] define backend-specific graceful process-termination configuration.
+      A common setting is not injected into arbitrary custom Runtime images;
   - [ ] keep operation history and audit events in structured external logs,
     retain only bounded readiness, endpoint, and artifact-reference data in Run
     status, and export large outputs through ArtifactStore;

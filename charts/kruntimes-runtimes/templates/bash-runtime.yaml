@@ -20,5 +20,6 @@ spec:
           args:
             - --port={{ .Values.bash.port }}
             - --work-dir=/workspace
+            - --session-termination-grace={{ .Values.bash.sessionTerminationGraceSeconds }}s
           resources:
             {{- toYaml .Values.bash.resources | nindent 12 }}

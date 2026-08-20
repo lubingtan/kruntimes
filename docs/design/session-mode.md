@@ -227,6 +227,32 @@ When a session closes, owner runtimed rejects new operations, cancels queued wor
 sends termination to the running process group, waits the grace period, then
 force-kills it if necessary.
 
+The graceful process-termination period is a Runtime Server implementation
+setting, not a Run or Runtime API field. The built-in Runtime chart exposes
+`bash.sessionTerminationGraceSeconds` and
+`python.sessionTerminationGraceSeconds`; both default to two seconds. A user
+who creates a Runtime CR directly configures the image's documented flag in
+`spec.template.spec.containers[0].args`, for example:
+
+```yaml
+spec:
+  template:
+    spec:
+      containers:
+        - name: runtime
+          args:
+            - --session-termination-grace=2s
+```
+
+Every Runtime Server that supports Session Mode must stop the active operation
+and its child process tree, then forcefully terminate its backend-specific
+execution unit after its configured grace period. Bash and Python use process
+groups; a sandbox or microVM backend can use its own equivalent. Runtime Server
+authors must document their configuration and behavior. Operators must leave
+sufficient time between the configured grace and
+`runtimed.session.closeTimeout` for `CloseSession` to return after the operation
+exits.
+
 File paths are always relative to the session workspace. Absolute paths,
 traversal, and symlink escapes are rejected. In v0, the gateway JSON request
 body is limited to 1 MiB. Built-in Runtime Servers limit direct file reads and
@@ -244,6 +270,11 @@ the same gRPC `SessionRuntime` messages: runtimed implements the service for
 gateway traffic and proxies an accepted owner request to its local Runtime
 Server. runtimed alone owns the session queue and operation state, so a Runtime
 Server never independently reorders work.
+
+`SessionRuntime` is an optional Runtime Server extension. A Runtime that does
+not implement it can still support Task or Function Runs. Assigning a Session
+Run to such a Runtime fails during registration with a Runtime capability
+mismatch; Session support is not declared in `Runtime.spec`.
 
 The `SessionRuntime` method set is:
 

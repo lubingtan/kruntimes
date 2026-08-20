@@ -224,6 +224,16 @@ func TestSessionRuntimeRegisterStatusCloseAndAssignmentFencing(t *testing.T) {
 	}
 }
 
+func TestNewServerWithSessionTerminationGrace(t *testing.T) {
+	configured := 17 * time.Millisecond
+	if got := NewServerWithSessionTerminationGrace(t.TempDir(), configured).sessionTerminationGrace; got != configured {
+		t.Fatalf("Session termination grace = %s, want %s", got, configured)
+	}
+	if got := NewServerWithSessionTerminationGrace(t.TempDir(), 0).sessionTerminationGrace; got != processTerminationGrace {
+		t.Fatalf("default Session termination grace = %s, want %s", got, processTerminationGrace)
+	}
+}
+
 func TestSessionRuntimeRejectsEscapingWorkspace(t *testing.T) {
 	client, _, cleanup := startSessionTestServer(t)
 	defer cleanup()

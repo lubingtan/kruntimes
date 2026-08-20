@@ -131,22 +131,40 @@ type Server struct {
 	sessions    map[string]*sessionEntry
 	workDir     string
 	outputLimit int
+
+	// sessionTerminationGrace bounds the graceful SIGTERM period for Session
+	// commands before their process group is force-killed.
+	sessionTerminationGrace time.Duration
 }
 
 func NewServer(workDir string) *Server {
-	return NewServerWithOutputLimit(workDir, defaultOutputLimitBytes)
+	return newServer(workDir, defaultOutputLimitBytes, processTerminationGrace)
 }
 
 func NewServerWithOutputLimit(workDir string, outputLimit int) *Server {
+	return newServer(workDir, outputLimit, processTerminationGrace)
+}
+
+// NewServerWithSessionTerminationGrace configures only Session command
+// termination. Task and Function execution retain their existing behavior.
+func NewServerWithSessionTerminationGrace(workDir string, grace time.Duration) *Server {
+	return newServer(workDir, defaultOutputLimitBytes, grace)
+}
+
+func newServer(workDir string, outputLimit int, sessionTerminationGrace time.Duration) *Server {
 	if workDir == "" {
 		workDir = "/workspace"
 	}
+	if sessionTerminationGrace <= 0 {
+		sessionTerminationGrace = processTerminationGrace
+	}
 	return &Server{
-		executions:  make(map[string]*executionEntry),
-		functions:   make(map[string]*functionEntry),
-		sessions:    make(map[string]*sessionEntry),
-		workDir:     workDir,
-		outputLimit: outputLimit,
+		executions:              make(map[string]*executionEntry),
+		functions:               make(map[string]*functionEntry),
+		sessions:                make(map[string]*sessionEntry),
+		workDir:                 workDir,
+		outputLimit:             outputLimit,
+		sessionTerminationGrace: sessionTerminationGrace,
 	}
 }
 

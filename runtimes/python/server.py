@@ -17,6 +17,7 @@ from function import FunctionEntry, clone_registration, terminate_process_group
 
 DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024
 OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n"
+DEFAULT_SESSION_TERMINATION_GRACE_SECONDS = 2
 DEFAULT_FUNCTION_INVOKE_TIMEOUT_SECONDS = 30
 MAX_FUNCTION_INVOKE_TIMEOUT_SECONDS = 5 * 60
 DEFAULT_FUNCTION_DRAIN_TIMEOUT_SECONDS = 30
@@ -85,10 +86,18 @@ class PythonRuntime(
     runtime_pb2_grpc.FunctionRuntimeServicer,
     runtime_pb2_grpc.SessionRuntimeServicer,
 ):
-    def __init__(self, work_dir="/workspace", output_limit=DEFAULT_OUTPUT_LIMIT_BYTES):
+    def __init__(
+        self,
+        work_dir="/workspace",
+        output_limit=DEFAULT_OUTPUT_LIMIT_BYTES,
+        session_termination_grace_seconds=DEFAULT_SESSION_TERMINATION_GRACE_SECONDS,
+    ):
+        if session_termination_grace_seconds <= 0:
+            raise ValueError("session termination grace must be positive")
         self.base_dir = Path(work_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.output_limit = output_limit
+        self.session_termination_grace_seconds = session_termination_grace_seconds
         self._tasks = {}
         self._lock = threading.Lock()
         self._functions = {}
@@ -441,7 +450,7 @@ class PythonRuntime(
 
         def cancel_process():
             if process.poll() is None:
-                self._stop_process(process)
+                self._stop_session_process(process)
 
         context.add_callback(cancel_process)
         stdout_thread = threading.Thread(
@@ -465,7 +474,7 @@ class PythonRuntime(
             process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            self._stop_process(process)
+            self._stop_session_process(process)
         finally:
             stdout_thread.join()
             stderr_thread.join()
@@ -976,6 +985,14 @@ class PythonRuntime(
         terminate_process_group(process, signal.SIGTERM)
         try:
             process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            terminate_process_group(process, signal.SIGKILL)
+            process.wait()
+
+    def _stop_session_process(self, process):
+        terminate_process_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=self.session_termination_grace_seconds)
         except subprocess.TimeoutExpired:
             terminate_process_group(process, signal.SIGKILL)
             process.wait()

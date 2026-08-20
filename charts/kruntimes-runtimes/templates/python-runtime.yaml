@@ -20,5 +20,6 @@ spec:
           args:
             - --port={{ .Values.python.port }}
             - --work-dir=/workspace
+            - --session-termination-grace-seconds={{ .Values.python.sessionTerminationGraceSeconds }}
           resources:
             {{- toYaml .Values.python.resources | nindent 12 }}

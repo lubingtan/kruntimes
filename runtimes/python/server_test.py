@@ -1,7 +1,10 @@
+import json
+import signal
+import subprocess
 import tempfile
 import time
 import unittest
-import json
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -647,6 +650,29 @@ sys.stderr.write("y" * 4096)
         status = self._wait("bad-entrypoint")
         self.assertEqual(status.state, runtime_pb2.EXECUTION_STATE_FAILED)
         self.assertIn("entrypoint", status.error_message)
+
+
+class TestSessionTermination(unittest.TestCase):
+    def test_session_termination_grace_is_configured(self):
+        runtime = PythonRuntime(
+            tempfile.mkdtemp(),
+            session_termination_grace_seconds=0.25,
+        )
+        process = mock.Mock()
+        process.wait.side_effect = [subprocess.TimeoutExpired("command", 0.25), None]
+
+        with mock.patch("server.terminate_process_group") as terminate:
+            runtime._stop_session_process(process)
+
+        self.assertEqual(process.wait.call_args_list[0], mock.call(timeout=0.25))
+        self.assertEqual(process.wait.call_count, 2)
+        self.assertEqual(terminate.call_count, 2)
+        self.assertEqual(terminate.call_args_list[0][0][1], signal.SIGTERM)
+        self.assertEqual(terminate.call_args_list[1][0][1], signal.SIGKILL)
+
+    def test_session_termination_grace_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            PythonRuntime(tempfile.mkdtemp(), session_termination_grace_seconds=0)
 
 
 if __name__ == "__main__":

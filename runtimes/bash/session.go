@@ -142,7 +142,7 @@ func (s *Server) executeSessionCommand(ctx context.Context, entry *sessionEntry,
 			Stderr:   []byte(stderr.String()),
 		}, nil
 	case <-commandCtx.Done():
-		_ = terminateProcessGroupAndWait(command.Process.Pid, waitCh, processTerminationGrace)
+		_ = terminateProcessGroupAndWait(command.Process.Pid, waitCh, s.sessionTerminationGrace)
 		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 			return &pb.SessionCommandResult{
 				ExitCode: -1,
