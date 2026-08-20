@@ -176,8 +176,10 @@ session close 的最长时间。
 session 关闭时，owner runtimed 拒绝新 operation、取消 queued work、向 running process group 发送
 termination，等待 grace period 后仍未退出则 force-kill。
 
-file path 必须相对 session workspace；absolute path、traversal 和 symlink escape 都被拒绝。direct
-upload/download 最大 32 MiB；更大的 durable result 使用 ArtifactStore。
+file path 必须相对 session workspace；absolute path、traversal 和 symlink escape 都被拒绝。v0 中，gateway
+JSON request body 上限为 1 MiB。内置 Runtime Server 将 direct file read/write，以及每个 command 的 stdout 与
+stderr stream 均限制为 1 MiB。更大的 durable result 使用 ArtifactStore。`ListSessionFiles` 当前直接返回
+directory entry，尚未分页；在 API 可用于任意大型 workspace 前，需要增加有界、支持分页的 listing contract。
 
 ## Runtime Server 协议
 

@@ -175,7 +175,8 @@ controller wiring 累积不必要的冲突。
     authorize target Run；
   - [x] 增加 bounded authorization decision cache；
   - [x] 执行每个 gateway 的有界 HTTP request concurrency limit；
-  - [ ] 执行 chart-managed TLS，并 review 显式的 request 和 response limits；
+  - [ ] 执行 chart-managed TLS，并在需要时使显式 request 和 response limits 可配置；
+  - [ ] 在支持任意大型 session workspace 前，增加有界、支持分页的 `ListSessionFiles` contract；
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
   [Session Mode 设计](design/session-mode.zh.md) 使用 `Run.spec.mode.session`、由共享 gateway

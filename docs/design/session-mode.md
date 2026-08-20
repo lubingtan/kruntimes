@@ -228,8 +228,12 @@ sends termination to the running process group, waits the grace period, then
 force-kills it if necessary.
 
 File paths are always relative to the session workspace. Absolute paths,
-traversal, and symlink escapes are rejected. Direct upload and download are
-limited to 32 MiB; larger durable results use ArtifactStore.
+traversal, and symlink escapes are rejected. In v0, the gateway JSON request
+body is limited to 1 MiB. Built-in Runtime Servers limit direct file reads and
+writes, plus each command stdout and stderr stream, to 1 MiB. Larger durable
+results use ArtifactStore. `ListSessionFiles` currently returns direct entries
+without pagination; a bounded, paginated listing contract is required before
+the API is treated as suitable for arbitrarily large workspaces.
 
 ## Runtime Server Contract
 

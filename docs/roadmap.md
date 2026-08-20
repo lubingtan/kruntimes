@@ -204,7 +204,10 @@ wiring from accumulating avoidable conflicts.
     the target Run through SubjectAccessReview;
   - [x] add a bounded authorization decision cache;
   - [x] enforce a bounded per-gateway HTTP request concurrency limit;
-  - [ ] enforce chart-managed TLS and review explicit request and response limits;
+  - [ ] enforce chart-managed TLS and make explicit request and response limits
+    configurable where needed;
+  - [ ] add a bounded, paginated `ListSessionFiles` contract before supporting
+    arbitrarily large session workspaces;
 - [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
   The accepted [Session Mode design](design/session-mode.md) uses
