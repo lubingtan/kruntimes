@@ -105,6 +105,38 @@ class SandboxTests(unittest.TestCase):
             sandbox.execute(Command(shell="true"))
         self.assertEqual(403, error.exception.status_code)
 
+    def test_close_requests_drain(self):
+        run = ready_run()
+        run["status"]["phase"] = "Succeeded"
+        runs = FakeRuns(run)
+        sandbox = SandboxClient(runs, FakeGateway()).open("default", "sandbox")
+
+        sandbox.close()
+
+        self.assertEqual("Drain", runs.run["spec"]["termination"]["mode"])
+
+    def test_cancel_requests_immediate_and_escalates_drain(self):
+        run = ready_run()
+        run["status"]["phase"] = "Succeeded"
+        run["spec"]["termination"] = {"mode": "Drain"}
+        runs = FakeRuns(run)
+        sandbox = SandboxClient(runs, FakeGateway()).open("default", "sandbox")
+
+        sandbox.cancel()
+
+        self.assertEqual("Immediate", runs.run["spec"]["termination"]["mode"])
+
+    def test_close_does_not_downgrade_immediate_termination(self):
+        run = ready_run()
+        run["status"]["phase"] = "Succeeded"
+        run["spec"]["termination"] = {"mode": "Immediate"}
+        runs = FakeRuns(run)
+        sandbox = SandboxClient(runs, FakeGateway()).open("default", "sandbox")
+
+        sandbox.close()
+
+        self.assertEqual("Immediate", runs.run["spec"]["termination"]["mode"])
+
     def test_port_forward_preserves_endpoint_path(self):
         gateway = FakeGateway()
         transport = PortForwardGatewayTransport(gateway, "http://127.0.0.1:19090")

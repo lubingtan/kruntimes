@@ -118,6 +118,36 @@ func TestSandboxLogsFilterRunUID(t *testing.T) {
 	}
 }
 
+func TestSandboxCloseRequestsDrain(t *testing.T) {
+	sandbox := terminalSandbox(t, nil)
+	if err := sandbox.Close(t.Context()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := sandbox.Run().Spec.Termination; got == nil || got.Mode != v1alpha1.RunTerminationDrain {
+		t.Fatalf("termination = %#v, want Drain", got)
+	}
+}
+
+func TestSandboxCancelRequestsImmediateAndEscalatesDrain(t *testing.T) {
+	sandbox := terminalSandbox(t, &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain})
+	if err := sandbox.Cancel(t.Context()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if got := sandbox.Run().Spec.Termination; got == nil || got.Mode != v1alpha1.RunTerminationImmediate {
+		t.Fatalf("termination = %#v, want Immediate", got)
+	}
+}
+
+func TestSandboxCloseDoesNotDowngradeImmediateTermination(t *testing.T) {
+	sandbox := terminalSandbox(t, &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate})
+	if err := sandbox.Close(t.Context()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := sandbox.Run().Spec.Termination; got == nil || got.Mode != v1alpha1.RunTerminationImmediate {
+		t.Fatalf("termination = %#v, want Immediate", got)
+	}
+}
+
 type httpDoer func(*http.Request) (*http.Response, error)
 
 func (do httpDoer) Do(request *http.Request) (*http.Response, error) { return do(request) }
@@ -139,6 +169,28 @@ func readySandbox(t *testing.T, doer HTTPDoer) *Sandbox {
 		t.Fatal(err)
 	}
 	return &Sandbox{client: client, run: &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{UID: "run-uid"}, Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, Endpoint: &v1alpha1.RunEndpoint{URL: "http://gateway/v1/namespaces/default/runtimes/bash/sessions/run-uid"}}}}
+}
+
+func terminalSandbox(t *testing.T, termination *v1alpha1.RunTermination) *Sandbox {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "run-uid"},
+		Spec: v1alpha1.RunSpec{
+			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+			Termination: termination,
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunSucceeded},
+	}
+	runs := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	client, err := New(Config{Runs: runs, HTTPClient: httpDoer(func(*http.Request) (*http.Response, error) { return nil, nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Sandbox{client: client, run: run.DeepCopy()}
 }
 
 func TestSandboxRejectsEndpointForAnotherRun(t *testing.T) {

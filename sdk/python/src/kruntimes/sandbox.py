@@ -225,12 +225,20 @@ class Sandbox:
             _sleep_until(deadline, self._client._poll_interval_seconds)
 
     def close(self, timeout_seconds: float | None = None) -> None:
-        """Request Session termination and wait for terminal lifecycle completion."""
+        """Request graceful Session completion and wait for terminal lifecycle completion."""
+        self._terminate("Drain", timeout_seconds)
+
+    def cancel(self, timeout_seconds: float | None = None) -> None:
+        """Request immediate Session cancellation and wait for terminal lifecycle completion."""
+        self._terminate("Immediate", timeout_seconds)
+
+    def _terminate(self, mode: str, timeout_seconds: float | None) -> None:
         self.refresh()
         spec = dict(self._run.get("spec", {}))
         termination = spec.get("termination") or {}
-        if termination.get("mode") != "Immediate":
-            spec["termination"] = {"mode": "Immediate"}
+        current_mode = termination.get("mode")
+        if current_mode is None or (current_mode == "Drain" and mode == "Immediate"):
+            spec["termination"] = {"mode": mode}
             self._run["spec"] = spec
             metadata = _metadata(self._run)
             self._run = self._client._runs.replace(_namespace(metadata), _name(metadata), self._run)

@@ -219,14 +219,25 @@ func (s *Sandbox) Wait(ctx context.Context) error {
 	}
 }
 
-// Close requests Session Run termination and waits for its terminal
-// lifecycle. It never calls Runtime Server CloseSession directly.
+// Close requests graceful Session Run completion and waits for its successful
+// terminal lifecycle. It never calls Runtime Server CloseSession directly.
 func (s *Sandbox) Close(ctx context.Context) error {
+	return s.terminate(ctx, v1alpha1.RunTerminationDrain)
+}
+
+// Cancel requests immediate Session Run cancellation and waits for its terminal
+// lifecycle. It may escalate an existing Drain request, but never downgrades
+// an Immediate request.
+func (s *Sandbox) Cancel(ctx context.Context) error {
+	return s.terminate(ctx, v1alpha1.RunTerminationImmediate)
+}
+
+func (s *Sandbox) terminate(ctx context.Context, mode v1alpha1.RunTerminationMode) error {
 	if err := s.Refresh(ctx); err != nil {
 		return err
 	}
-	if !s.run.Spec.HasImmediateTermination() {
-		s.run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
+	if shouldRequestTermination(s.run.Spec.Termination, mode) {
+		s.run.Spec.Termination = &v1alpha1.RunTermination{Mode: mode}
 		if err := s.client.runs.Update(ctx, s.run); err != nil {
 			return fmt.Errorf("terminate Session Run: %w", err)
 		}
@@ -244,6 +255,13 @@ func (s *Sandbox) Close(ctx context.Context) error {
 		case <-time.After(s.client.pollInterval):
 		}
 	}
+}
+
+func shouldRequestTermination(current *v1alpha1.RunTermination, requested v1alpha1.RunTerminationMode) bool {
+	if current == nil {
+		return true
+	}
+	return current.Mode == v1alpha1.RunTerminationDrain && requested == v1alpha1.RunTerminationImmediate
 }
 
 // Command defines one workspace-relative process execution request.
