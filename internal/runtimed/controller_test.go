@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1323,7 +1322,7 @@ func TestFinalizingSessionRetriesTransientArtifactStoreFailure(t *testing.T) {
 func TestFinalizingSessionRetriesRuntimeServerCloseBeforeArtifactExport(t *testing.T) {
 	setTestWorkspace(t)
 	run, ar, c, k8sClient, sessionClient, store := newFinalizingSessionForArtifactTest(t, &fakeArtifactStore{})
-	sessionClient.closeErr = errors.New("runtime server unavailable")
+	sessionClient.closeErr = status.Error(codes.Unimplemented, "close session is not supported")
 	if err := os.MkdirAll(ar.artifactDir, 0o750); err != nil {
 		t.Fatal(err)
 	}

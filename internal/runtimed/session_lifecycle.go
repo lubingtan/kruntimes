@@ -324,7 +324,7 @@ func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run)
 		c.SessionOperations.Close(string(run.UID))
 	}
 	if c.sessionCli == nil {
-		return nil
+		return fmt.Errorf("SessionRuntime client is not configured")
 	}
 	identity, err := sessionIdentityForRun(run)
 	if err != nil {
@@ -333,7 +333,7 @@ func (c *Controller) closeRuntimeSession(ctx context.Context, run *v1alpha1.Run)
 	closeCtx, cancel := context.WithTimeout(ctx, c.sessionCloseTimeout())
 	defer cancel()
 	_, err = c.sessionCli.CloseSession(closeCtx, &pb.CloseSessionRequest{Identity: identity})
-	if err != nil && status.Code(err) != codes.NotFound && status.Code(err) != codes.Unimplemented {
+	if err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("close Runtime Server session: %w", err)
 	}
 	return nil
