@@ -877,6 +877,24 @@ func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
 	if err := session.Close(ctx); err != nil {
 		t.Fatalf("close SDK Session Run: %v", err)
 	}
+	if session.Run().Status.Phase != v1alpha1.RunSucceeded {
+		t.Fatalf("SDK Close phase = %s, want Succeeded", session.Run().Status.Phase)
+	}
+
+	cancelled, err := sdk.Create(t.Context(), sandbox.CreateOptions{GenerateName: "e2e-sdk-cancel-", Namespace: testNamespace, Runtime: runtimeName})
+	if err != nil {
+		t.Fatalf("create SDK cancellation Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cancelled.Run()) })
+	if err := cancelled.Wait(ctx); err != nil {
+		t.Fatalf("wait for SDK cancellation Session Run: %v", err)
+	}
+	if err := cancelled.Cancel(ctx); err != nil {
+		t.Fatalf("cancel SDK Session Run: %v", err)
+	}
+	if cancelled.Run().Status.Phase != v1alpha1.RunCancelled {
+		t.Fatalf("SDK Cancel phase = %s, want Cancelled", cancelled.Run().Status.Phase)
+	}
 }
 
 func TestKubernetesDiagnosisRuntimeCanReadNamespace(t *testing.T) {
