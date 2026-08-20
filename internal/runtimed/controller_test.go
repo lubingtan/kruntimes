@@ -1111,10 +1111,12 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
 	sessionClient := &fakeSessionRuntimeClient{}
 	c := &Controller{
-		Client:     k8sClient,
-		PodName:    "runtime-pod",
-		GatewayURL: "http://kruntimes-gateway.platform.svc/",
-		sessionCli: sessionClient,
+		Client:            k8sClient,
+		PodName:           "runtime-pod",
+		GatewayURL:        "http://kruntimes-gateway.platform.svc/",
+		sessionCli:        sessionClient,
+		ArtifactStore:     &fakeArtifactStore{},
+		ArtifactStoreSpec: artifactTestStoreSpec(),
 	}
 	ar := newActiveRun(run, time.Now())
 	c.activeRuns.Store(string(run.UID), ar)
@@ -1133,6 +1135,9 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	}
 	if got := sessionClient.registerRequest.Identity.GetAssignedPodUid(); got != "runtime-pod-uid" {
 		t.Fatalf("assigned Pod UID = %q, want runtime-pod-uid", got)
+	}
+	if got := sessionClient.registerRequest.Env[artifact.ArtifactsDirEnv]; got != ar.artifactDir {
+		t.Fatalf("artifact directory = %q, want %q", got, ar.artifactDir)
 	}
 	var updated v1alpha1.Run
 	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {

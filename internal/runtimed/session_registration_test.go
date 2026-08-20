@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	"github.com/kruntimes/kruntimes/internal/artifact"
 )
 
 func TestSessionRegistrationRequest(t *testing.T) {
@@ -21,7 +22,7 @@ func TestSessionRegistrationRequest(t *testing.T) {
 		Status: v1alpha1.RunStatus{AssignedPodUID: "runtime-pod"},
 	}
 
-	request, err := sessionRegistrationRequest(run, "/workspace/session-run")
+	request, err := sessionRegistrationRequest(run, "/workspace/session-run", "/workspace/session-run/artifacts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,6 +31,9 @@ func TestSessionRegistrationRequest(t *testing.T) {
 	}
 	if request.WorkingDir != "/workspace/session-run" || request.IdleTimeoutSeconds != 120 || request.Env["TOKEN"] != "value" {
 		t.Fatalf("request = %#v", request)
+	}
+	if request.Env[artifact.ArtifactsDirEnv] != "/workspace/session-run/artifacts" {
+		t.Fatalf("artifact directory = %q", request.Env[artifact.ArtifactsDirEnv])
 	}
 }
 
@@ -53,7 +57,7 @@ func TestSessionRegistrationRequestRejectsIncompleteSessionRun(t *testing.T) {
 	tests[1].run.Status.AssignedPodUID = ""
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := sessionRegistrationRequest(tt.run, tt.dir); err == nil {
+			if _, err := sessionRegistrationRequest(tt.run, tt.dir, ""); err == nil {
 				t.Fatal("sessionRegistrationRequest() error = nil")
 			}
 		})

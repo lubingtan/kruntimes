@@ -56,6 +56,9 @@ func (c *Controller) prepareSession(ctx context.Context, ar *activeRun) error {
 	if err := prepareSource(ar); err != nil {
 		return err
 	}
+	if _, err := c.prepareArtifactStaging(ar); err != nil {
+		return err
+	}
 	if err := c.stageArtifactInputs(ctx, ar); err != nil {
 		return err
 	}
@@ -67,7 +70,11 @@ func (c *Controller) registerSession(ctx context.Context, ar *activeRun) error {
 	if c.sessionCli == nil {
 		return fmt.Errorf("SessionRuntime client is not configured")
 	}
-	request, err := sessionRegistrationRequest(ar.run, ar.workDir)
+	artifactsDir := ""
+	if c.ArtifactStore != nil {
+		artifactsDir = ar.artifactDir
+	}
+	request, err := sessionRegistrationRequest(ar.run, ar.workDir, artifactsDir)
 	if err != nil {
 		return err
 	}
@@ -166,7 +173,7 @@ func (c *Controller) applyStartSessionFailure(ctx context.Context, ar *activeRun
 
 func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
 	ar := c.buildActiveRun(run)
-	request, err := sessionRegistrationRequest(run, ar.workDir)
+	identity, err := sessionIdentityForRun(run)
 	if err != nil {
 		return c.applyTerminal(ctx, ar, v1alpha1.RunFailed, runretry.ReasonExecutionLost, err.Error())
 	}
@@ -175,7 +182,7 @@ func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1
 	}
 	recoveryCtx, cancel := context.WithTimeout(ctx, sessionRegistrationTimeout)
 	defer cancel()
-	response, err := c.sessionCli.GetSessionStatus(recoveryCtx, &pb.GetSessionStatusRequest{Identity: request.Identity})
+	response, err := c.sessionCli.GetSessionStatus(recoveryCtx, &pb.GetSessionStatusRequest{Identity: identity})
 	if err == nil {
 		if response.GetState() == pb.SessionState_SESSION_STATE_READY {
 			if !c.tryClaimActiveRun(ar) {

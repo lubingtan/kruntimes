@@ -7,12 +7,13 @@ import (
 
 	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	"github.com/kruntimes/kruntimes/internal/artifact"
 )
 
 // sessionRegistrationRequest builds the Pod-local registration request for a
 // Session Run. The assigned Pod UID fences stale runtimed instances after a
 // Run has been reassigned.
-func sessionRegistrationRequest(run *v1alpha1.Run, workingDir string) (*pb.RegisterSessionRequest, error) {
+func sessionRegistrationRequest(run *v1alpha1.Run, workingDir, artifactsDir string) (*pb.RegisterSessionRequest, error) {
 	if run == nil || run.UID == "" {
 		return nil, fmt.Errorf("session registration requires a Run UID")
 	}
@@ -35,10 +36,14 @@ func sessionRegistrationRequest(run *v1alpha1.Run, workingDir string) (*pb.Regis
 	if session.IdleTimeoutSeconds != nil {
 		idleTimeoutSeconds = int64(*session.IdleTimeoutSeconds)
 	}
+	env := sessionRegistrationEnv(run.Spec.Env)
+	if artifactsDir != "" {
+		env[artifact.ArtifactsDirEnv] = artifactsDir
+	}
 	return &pb.RegisterSessionRequest{
 		Identity:           identity,
 		WorkingDir:         workingDir,
-		Env:                sessionRegistrationEnv(run.Spec.Env),
+		Env:                env,
 		IdleTimeoutSeconds: idleTimeoutSeconds,
 	}, nil
 }
