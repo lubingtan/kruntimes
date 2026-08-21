@@ -186,11 +186,15 @@ func (s *Server) ListSessionFiles(_ context.Context, req *pb.ListSessionFilesReq
 	if err != nil {
 		return nil, err
 	}
+	page, err := sessionFilePageRequest(req)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	directory, err := sessionPath(entry, req.Path, true)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	entries, err := os.ReadDir(directory)
+	entries, hasMore, err := readSessionFilePage(directory, page.after, page.limit)
 	if err != nil {
 		return nil, sessionFileError("list", err)
 	}
@@ -201,6 +205,12 @@ func (s *Server) ListSessionFiles(_ context.Context, req *pb.ListSessionFilesReq
 			return nil, sessionFileError("stat", err)
 		}
 		response.Entries = append(response.Entries, &pb.SessionFileInfo{Path: item.Name(), Directory: item.IsDir(), SizeBytes: info.Size()})
+	}
+	if hasMore {
+		response.NextPageToken, err = page.nextToken(entries[len(entries)-1].Name())
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encode next page token: %v", err)
+		}
 	}
 	return response, nil
 }

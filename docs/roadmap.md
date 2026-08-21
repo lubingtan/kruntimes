@@ -213,6 +213,8 @@ wiring from accumulating avoidable conflicts.
       and regenerate clients;
     - [ ] implement identical bounded cursor paging in built-in Runtime Servers,
       runtimed proxying, the HTTP gateway, and Go/Python SDKs;
+      - [x] enforce direct gRPC paging in Bash and Python Runtime Servers with
+        shared cursor encoding and UTF-8 byte-wise ordering;
     - [ ] add unit, integration, and E2E coverage for limits, ordering, invalid
       or mismatched tokens, and traversal-safe multi-page listings.
 - [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable

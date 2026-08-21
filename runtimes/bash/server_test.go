@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -333,6 +334,66 @@ func TestSessionRuntimeExecutesCommandsAndConfinesFiles(t *testing.T) {
 	if _, err := client.ReadSessionFile(context.Background(), &pb.ReadSessionFileRequest{Identity: identity, Path: "../outside", MaxBytes: 1}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("ReadSessionFile escaping path = %v, want InvalidArgument", err)
 	}
+}
+
+func TestSessionRuntimeListsFilesInBoundedPages(t *testing.T) {
+	client, workDir, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	identity := &pb.SessionIdentity{RunUid: "session-pages", AssignedPodUid: "pod-a"}
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}); err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	for _, name := range []string{"z", "b", "a", "\u00e9"} {
+		if err := os.WriteFile(filepath.Join(workDir, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("write session file %q: %v", name, err)
+		}
+	}
+
+	first, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity, Limit: 2})
+	if err != nil {
+		t.Fatalf("ListSessionFiles first page: %v", err)
+	}
+	if got, want := sessionFileNames(first.Entries), []string{"a", "b"}; !slices.Equal(got, want) || first.NextPageToken == "" {
+		t.Fatalf("first page = %#v, want entries %v and a next page token", first, want)
+	}
+
+	second, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity, Limit: 2, PageToken: first.NextPageToken})
+	if err != nil {
+		t.Fatalf("ListSessionFiles second page: %v", err)
+	}
+	if got, want := sessionFileNames(second.Entries), []string{"z", "\u00e9"}; !slices.Equal(got, want) || second.NextPageToken != "" {
+		t.Fatalf("second page = %#v, want final entries %v", second, want)
+	}
+
+	// This token is encoded as the documented cross-runtime JSON cursor. A
+	// Python Runtime Server must accept the same unpadded base64url value.
+	pythonToken := "eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJiIn0"
+	fromPython, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity, Limit: 2, PageToken: pythonToken})
+	if err != nil {
+		t.Fatalf("ListSessionFiles Python token: %v", err)
+	}
+	if got, want := sessionFileNames(fromPython.Entries), []string{"z", "\u00e9"}; !slices.Equal(got, want) {
+		t.Fatalf("Python token page entries = %v, want %v", got, want)
+	}
+
+	for _, request := range []*pb.ListSessionFilesRequest{
+		{Identity: identity, Limit: maxSessionFilePageSize + 1},
+		{Identity: identity, PageToken: "not-a-token"},
+		{Identity: identity, Path: "other", PageToken: first.NextPageToken},
+	} {
+		if _, err := client.ListSessionFiles(context.Background(), request); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("ListSessionFiles request %#v error = %v, want InvalidArgument", request, err)
+		}
+	}
+}
+
+func sessionFileNames(entries []*pb.SessionFileInfo) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Path)
+	}
+	return names
 }
 
 func TestFunctionRuntimeRegistrationFencing(t *testing.T) {

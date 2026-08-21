@@ -182,6 +182,8 @@ controller wiring 累积不必要的冲突。
     - [x] 向 gRPC contract 增加 `limit`、`page_token` 与 `next_page_token`，并重新生成 client；
     - [ ] 在内置 Runtime Server、runtimed proxy、HTTP gateway 以及 Go/Python SDK 中实现一致的有界
       cursor paging；
+      - [x] 在 Bash 和 Python Runtime Server 中执行 direct gRPC paging，使用共享 cursor encoding
+        和 UTF-8 byte-wise ordering；
     - [ ] 增加 limits、ordering、invalid/mismatched token 与 traversal-safe multi-page listing 的
       unit、integration 和 E2E coverage。
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime

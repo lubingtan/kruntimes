@@ -1,3 +1,5 @@
+import base64
+import bisect
 import json
 import os
 import re
@@ -18,6 +20,9 @@ from function import FunctionEntry, clone_registration, terminate_process_group
 DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024
 OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n"
 DEFAULT_SESSION_TERMINATION_GRACE_SECONDS = 2
+DEFAULT_SESSION_FILE_PAGE_SIZE = 100
+MAX_SESSION_FILE_PAGE_SIZE = 1000
+SESSION_FILE_PAGE_TOKEN_VERSION = 1
 DEFAULT_FUNCTION_INVOKE_TIMEOUT_SECONDS = 30
 MAX_FUNCTION_INVOKE_TIMEOUT_SECONDS = 5 * 60
 DEFAULT_FUNCTION_DRAIN_TIMEOUT_SECONDS = 30
@@ -508,8 +513,10 @@ class PythonRuntime(
         entry = self._match_session(request.identity, context)
         try:
             directory = self._session_path(entry, request.path, allow_root=True)
+            limit, after = self._session_file_page_request(request)
+            paths, has_more = self._read_session_file_page(directory, after, limit)
             entries = []
-            for path in sorted(directory.iterdir()):
+            for path in paths:
                 info = path.stat()
                 entries.append(runtime_pb2.SessionFileInfo(
                     path=path.name,
@@ -520,7 +527,13 @@ class PythonRuntime(
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
         except OSError as error:
             self._abort_session_file_error(context, "list", error)
-        return runtime_pb2.ListSessionFilesResponse(entries=entries)
+        next_page_token = ""
+        if has_more:
+            next_page_token = self._encode_session_file_page_token(request.path, paths[-1].name)
+        return runtime_pb2.ListSessionFilesResponse(
+            entries=entries,
+            next_page_token=next_page_token,
+        )
 
     def _write_session_file(self, entry, request, context):
         if len(request.contents) > self.output_limit:
@@ -750,6 +763,57 @@ class PythonRuntime(
     @staticmethod
     def _touch_session(entry):
         entry["last_activity_unix_nano"] = time.time_ns()
+
+    @staticmethod
+    def _session_file_page_request(request):
+        limit = request.limit or DEFAULT_SESSION_FILE_PAGE_SIZE
+        if limit < 1 or limit > MAX_SESSION_FILE_PAGE_SIZE:
+            raise ValueError(
+                f"limit must be between 1 and {MAX_SESSION_FILE_PAGE_SIZE}"
+            )
+        if not request.page_token:
+            return limit, ""
+        try:
+            encoded = request.page_token.encode("ascii")
+            encoded += b"=" * (-len(encoded) % 4)
+            token = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            raise ValueError("page token is invalid")
+        if (
+            not isinstance(token, dict)
+            or set(token) != {"v", "path", "after"}
+            or type(token["v"]) is not int
+            or token["v"] != SESSION_FILE_PAGE_TOKEN_VERSION
+            or not isinstance(token["path"], str)
+            or token["path"] != request.path
+            or not isinstance(token["after"], str)
+            or not token["after"]
+        ):
+            raise ValueError("page token does not match the requested directory")
+        return limit, token["after"]
+
+    @staticmethod
+    def _encode_session_file_page_token(path, after):
+        value = json.dumps(
+            {"v": SESSION_FILE_PAGE_TOKEN_VERSION, "path": path, "after": after},
+            separators=(",", ":"),
+        )
+        return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _read_session_file_page(directory, after, limit):
+        candidates = []
+        after_key = after.encode("utf-8")
+        for path in directory.iterdir():
+            name_key = path.name.encode("utf-8")
+            if name_key <= after_key:
+                continue
+            index = bisect.bisect_left([item[0] for item in candidates], name_key)
+            candidates.insert(index, (name_key, path))
+            if len(candidates) > limit + 1:
+                candidates.pop()
+        has_more = len(candidates) > limit
+        return [path for _, path in candidates[:limit]], has_more
 
     @staticmethod
     def _session_command_timeout(timeout_millis, context):

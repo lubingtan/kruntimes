@@ -207,6 +207,58 @@ class TestPythonRuntime(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
+    def test_session_file_listing_pages_are_bounded_and_cross_runtime(self):
+        session_dir = self.work_dir / "session-pages"
+        session_dir.mkdir()
+        self._register_session(str(session_dir))
+        identity = runtime_pb2.SessionIdentity(
+            run_uid="session-run",
+            assigned_pod_uid="pod-a",
+        )
+        for name in ("z", "b", "a", "\u00e9"):
+            (session_dir / name).write_text(name)
+
+        first = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(identity=identity, limit=2)
+        )
+        self.assertEqual([entry.path for entry in first.entries], ["a", "b"])
+        self.assertTrue(first.next_page_token)
+
+        second = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(
+                identity=identity,
+                limit=2,
+                page_token=first.next_page_token,
+            )
+        )
+        self.assertEqual([entry.path for entry in second.entries], ["z", "\u00e9"])
+        self.assertFalse(second.next_page_token)
+
+        # This token is encoded as the documented cross-runtime JSON cursor. A
+        # Bash Runtime Server must accept the same unpadded base64url value.
+        bash_token = "eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJiIn0"
+        from_bash = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(
+                identity=identity,
+                limit=2,
+                page_token=bash_token,
+            )
+        )
+        self.assertEqual([entry.path for entry in from_bash.entries], ["z", "\u00e9"])
+
+        for request in (
+            runtime_pb2.ListSessionFilesRequest(identity=identity, limit=1001),
+            runtime_pb2.ListSessionFilesRequest(identity=identity, page_token="not-a-token"),
+            runtime_pb2.ListSessionFilesRequest(
+                identity=identity,
+                path="other",
+                page_token=first.next_page_token,
+            ),
+        ):
+            with self.assertRaises(grpc.RpcError) as ctx:
+                self.session_stub.ListSessionFiles(request)
+            self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
     def _wait_for_function_in_flight(self, registration, timeout=5):
         deadline = time.time() + timeout
         while time.time() < deadline:
