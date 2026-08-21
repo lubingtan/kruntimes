@@ -45,9 +45,11 @@ for validating a change that affects deployed components.
 - For a clean environment, run `make e2e-cleanup` first, then run `make e2e`.
   There is no `e2e-clean` target.
 - E2E can exceed an interactive command timeout. Start it in a named `tmux`
-  session and redirect output to a unique file under `/tmp`; poll the log and
-  save the exit code to a companion file. Do not start a second run merely
-  because the caller returns before the background process completes.
+  session, redirect output to a unique file under `/tmp`, and save the exit
+  code to a companion file. Start an independent watcher that follows the
+  test process with `tail --pid`, then writes a log summary when it exits; do
+  not use fixed-interval sleep polling or start a second run merely because
+  the caller returns before the background process completes.
 - E2E needs Docker, kind, kubectl, Helm, the local Kubernetes API, and service
   ports. Run it with the required sandbox escalation.
 

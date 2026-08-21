@@ -100,7 +100,7 @@ func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error 
 	}
 
 	var run v1alpha1.Run
-	if err := c.Get(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
+	if err := c.getRunDirectly(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
@@ -158,7 +158,7 @@ func (c *Controller) applyStartSessionFailure(ctx context.Context, ar *activeRun
 		return
 	}
 	var run v1alpha1.Run
-	if err := c.Get(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
+	if err := c.getRunDirectly(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
 		c.Log.Error(err, "failed to get Session Run after registration error", "run", client.ObjectKeyFromObject(ar.run))
 		return
 	}

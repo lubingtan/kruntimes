@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -670,6 +671,66 @@ func TestReconcileScheduledCancelBeforeClaim(t *testing.T) {
 	}
 }
 
+func TestApplyStartExecutionFailureUsesDirectRunReader(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "missing-artifact",
+			Namespace: "default",
+			UID:       "missing-artifact-uid",
+		},
+		Spec: v1alpha1.RunSpec{Runtime: "bash"},
+		Status: v1alpha1.RunStatus{
+			Phase:       v1alpha1.RunRunning,
+			AssignedPod: "runtime-pod",
+		},
+	}
+	directReader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		WithObjects(run.DeepCopy()).
+		Build()
+	stale := run.DeepCopy()
+	stale.Status.Phase = v1alpha1.RunScheduled
+	c := &Controller{
+		Client:    staleRunGetClient{Client: directReader, stale: stale},
+		RunReader: directReader,
+		PodName:   "runtime-pod",
+	}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	c.applyStartExecutionFailure(t.Context(), ar, errors.New("open artifact input \"missing.txt\": no such file"))
+
+	var updated v1alpha1.Run
+	if err := directReader.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	if !strings.Contains(updated.Status.Message, "open artifact input") {
+		t.Fatalf("message = %q, want artifact input error", updated.Status.Message)
+	}
+}
+
+type staleRunGetClient struct {
+	client.Client
+	stale *v1alpha1.Run
+}
+
+func (c staleRunGetClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+	if run, ok := object.(*v1alpha1.Run); ok && c.stale != nil && key == client.ObjectKeyFromObject(c.stale) {
+		c.stale.DeepCopyInto(run)
+		return nil
+	}
+	return c.Client.Get(ctx, key, object, options...)
+}
+
 func TestReconcileRunningRecoversMissingActiveRun(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -1151,6 +1212,46 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	}
 	if condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionReady); condition == nil || condition.Status != metav1.ConditionTrue {
 		t.Fatalf("Ready condition = %#v, want true", condition)
+	}
+}
+
+func TestMarkSessionReadyUsesDirectRunReader(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning, AssignedPod: "runtime-pod"},
+	}
+	directReader := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		WithObjects(run.DeepCopy()).
+		Build()
+	stale := run.DeepCopy()
+	stale.Status.Phase = v1alpha1.RunScheduled
+	c := &Controller{
+		Client:    staleRunGetClient{Client: directReader, stale: stale},
+		RunReader: directReader,
+		PodName:   "runtime-pod",
+	}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if err := c.markSessionReady(t.Context(), ar); err != nil {
+		t.Fatalf("markSessionReady: %v", err)
+	}
+	var updated v1alpha1.Run
+	if err := directReader.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunReady {
+		t.Fatalf("phase = %s, want Ready", updated.Status.Phase)
 	}
 }
 

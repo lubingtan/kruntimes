@@ -883,7 +883,7 @@ func (c *Controller) applyStartExecutionFailure(ctx context.Context, ar *activeR
 		return
 	}
 	var run v1alpha1.Run
-	if err := c.Get(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
+	if err := c.getRunDirectly(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
 		c.Log.Error(err, "failed to get Run after runtime Execute error", "run", client.ObjectKeyFromObject(ar.run))
 		return
 	}
@@ -894,6 +894,16 @@ func (c *Controller) applyStartExecutionFailure(ctx context.Context, ar *activeR
 	if _, err := c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, fmt.Sprintf("runtime Execute: %v", startErr)); err != nil {
 		c.Log.Error(err, "failed to mark Run failed after runtime Execute error", "run", client.ObjectKeyFromObject(ar.run))
 	}
+}
+
+// getRunDirectly avoids reading a stale Run cache after an asynchronous local
+// operation fails immediately after runtimed updates its status.
+func (c *Controller) getRunDirectly(ctx context.Context, key client.ObjectKey, run *v1alpha1.Run) error {
+	reader := c.RunReader
+	if reader == nil {
+		reader = c.Client
+	}
+	return reader.Get(ctx, key, run)
 }
 
 func (c *Controller) startExecution(ctx context.Context, ar *activeRun) error {

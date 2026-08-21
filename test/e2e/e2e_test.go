@@ -705,13 +705,13 @@ func TestSessionGatewaySerializesMutations(t *testing.T) {
 
 	gatewayPod := waitForGatewayPod(t)
 	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
-	firstRequestURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
 	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
 	firstResult := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, err := gatewayRequest(ctx, http.MethodPost, firstRequestURL+"/operations:execute", token,
+		_, err := gatewayRequest(ctx, http.MethodPost, baseURL+"/operations:execute", token,
 			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 1; printf first > result.txt"]}}`), http.StatusOK)
 		firstResult <- err
 	}()
@@ -756,13 +756,13 @@ func TestSessionRunCancellationTerminatesActiveGatewayCommand(t *testing.T) {
 
 	gatewayPod := waitForGatewayPod(t)
 	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
-	commandURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
 	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
 	commandResult := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, err := gatewayRequest(ctx, http.MethodPost, commandURL+"/operations:execute", token,
+		_, err := gatewayRequest(ctx, http.MethodPost, baseURL+"/operations:execute", token,
 			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 20; printf completed > completed"]}}`), http.StatusOK)
 		commandResult <- err
 	}()
@@ -797,6 +797,7 @@ func TestSessionRunDrainCompletesAcceptedGatewayCommand(t *testing.T) {
 	gatewayPod := waitForGatewayPod(t)
 	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
 	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
 	commandResult := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1254,9 +1255,12 @@ func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	lastResult := "no response"
 	for {
-		request, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(body))
+		requestCtx, requestCancel := context.WithTimeout(ctx, 2*time.Second)
+		request, err := http.NewRequestWithContext(requestCtx, method, requestURL, bytes.NewReader(body))
 		if err != nil {
+			requestCancel()
 			t.Fatalf("create gateway request: %v", err)
 		}
 		if len(body) > 0 {
@@ -1269,19 +1273,24 @@ func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body
 		if err == nil {
 			contents, readErr := io.ReadAll(response.Body)
 			_ = response.Body.Close()
+			requestCancel()
 			if readErr != nil {
 				t.Fatalf("read gateway response: %v", readErr)
 			}
 			if response.StatusCode == expectedStatus {
 				return contents
 			}
+			lastResult = fmt.Sprintf("status %d: %s", response.StatusCode, contents)
 			if response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("gateway response status = %d, want %d: %s", response.StatusCode, expectedStatus, contents)
 			}
+		} else {
+			requestCancel()
+			lastResult = err.Error()
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("timed out waiting for gateway response status %d: %v", expectedStatus, err)
+			t.Fatalf("timed out waiting for gateway response status %d: %s", expectedStatus, lastResult)
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
