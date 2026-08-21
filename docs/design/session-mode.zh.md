@@ -224,7 +224,12 @@ Runtime Server 产生可互换的 page boundary。
 listing 不是 filesystem snapshot。翻页期间的 mutation 可能让后续页面遗漏或重复 entry；需要 fresh view 的
 caller 必须从空 token 重新开始。Runtime Server 而非仅 HTTP gateway 强制 page limit，因此 direct
 `SessionRuntime` caller 也不能造成无界 listing response。Go 与 Python SDK 暴露显式分页的 `ListFiles`
-operation，接收 page-options value 并返回一页结果及 next token；不会使用 helper 隐藏无界 iteration。
+operation，接收 page-options value 并返回一页结果及 next token；不会使用 helper 隐藏无界 iteration。Go SDK
+使用 `ListFiles(ctx, ListFilesOptions{Directory, Limit, PageToken})`，返回带有 `Entries` 与
+`NextPageToken` 的 `FilePage`；Python SDK 使用
+`list_files(ListFilesOptions(directory, limit, page_token))`，返回带有 `entries` 与
+`next_page_token` 的 `FilePage`。limit 为零时不发送该 query parameter，并由 Runtime Server 选择默认 page
+size。
 
 ## Runtime Server 协议
 

@@ -289,7 +289,12 @@ from an empty token. The Runtime Server, not only the HTTP gateway, enforces
 the page limit so direct `SessionRuntime` callers cannot cause an unbounded
 listing response. The Go and Python SDKs expose an explicit paged `ListFiles`
 operation with a page-options value and return one page plus its next token;
-they do not hide unbounded iteration behind a helper.
+they do not hide unbounded iteration behind a helper. The Go SDK uses
+`ListFiles(ctx, ListFilesOptions{Directory, Limit, PageToken})` and returns a
+`FilePage` with `Entries` and `NextPageToken`. The Python SDK uses
+`list_files(ListFilesOptions(directory, limit, page_token))` and returns a
+`FilePage` with `entries` and `next_page_token`. A zero limit omits the query
+parameter and lets the Runtime Server select its default page size.
 
 ## Runtime Server Contract
 

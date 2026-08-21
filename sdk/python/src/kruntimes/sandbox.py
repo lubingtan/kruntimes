@@ -124,6 +124,23 @@ class FileInfo:
 
 
 @dataclass(frozen=True)
+class ListFilesOptions:
+    """Select one bounded page of direct workspace-relative children."""
+
+    directory: str = ""
+    limit: int = 0
+    page_token: str = ""
+
+
+@dataclass(frozen=True)
+class FilePage:
+    """One bounded directory listing response."""
+
+    entries: list[FileInfo]
+    next_page_token: str
+
+
+@dataclass(frozen=True)
 class LogLine:
     """One structured output or audit record emitted by owner runtimed."""
 
@@ -289,15 +306,30 @@ class Sandbox:
         response = self._request("GET", file_url)
         return _decode_bytes(response.get("contents", "")), bool(response.get("truncated", False))
 
-    def list_files(self, directory: str = "") -> list[FileInfo]:
+    def list_files(self, options: ListFilesOptions | None = None) -> FilePage:
+        """Return one bounded page of direct workspace-relative children."""
+        options = options or ListFilesOptions()
+        if options.limit < 0:
+            raise ValueError("file page limit cannot be negative")
+
         endpoint = self._endpoint("files")
-        if directory:
-            endpoint += "?" + urlencode({"path": directory})
+        query: dict[str, str] = {}
+        if options.directory:
+            query["path"] = options.directory
+        if options.limit > 0:
+            query["limit"] = str(options.limit)
+        if options.page_token:
+            query["pageToken"] = options.page_token
+        if query:
+            endpoint += "?" + urlencode(query)
         response = self._request("GET", endpoint)
         entries = response.get("entries", [])
         if not isinstance(entries, list):
             raise ValueError("gateway response did not include file entries")
-        return [FileInfo(path=str(entry.get("path", "")), directory=bool(entry.get("directory", False)), size_bytes=int(entry.get("sizeBytes", 0))) for entry in entries if isinstance(entry, Mapping)]
+        return FilePage(
+            entries=[FileInfo(path=str(entry.get("path", "")), directory=bool(entry.get("directory", False)), size_bytes=int(entry.get("sizeBytes", 0))) for entry in entries if isinstance(entry, Mapping)],
+            next_page_token=str(response.get("nextPageToken", "")),
+        )
 
     def logs(self) -> list[LogLine]:
         """Read structured owner-runtimed log records for this Sandbox only."""

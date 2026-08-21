@@ -6,6 +6,7 @@ from kruntimes.sandbox import (
     Command,
     CreateOptions,
     HTTPResponse,
+    ListFilesOptions,
     SandboxClient,
     SandboxStateError,
 )
@@ -84,6 +85,19 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(b"ok", contents)
         self.assertFalse(truncated)
         self.assertTrue(gateway.requests[0][1].endswith("/files/../outside.txt"))
+
+    def test_list_files_uses_explicit_page_options(self):
+        gateway = FakeGateway()
+        gateway.response = HTTPResponse(200, b'{"entries":[{"path":"build.log","sizeBytes":12}],"nextPageToken":"next"}')
+        sandbox = SandboxClient(FakeRuns(ready_run()), gateway).open("default", "sandbox")
+
+        page = sandbox.list_files(ListFilesOptions(directory="notes", limit=2, page_token="after-notes"))
+
+        self.assertEqual(["build.log"], [entry.path for entry in page.entries])
+        self.assertEqual("next", page.next_page_token)
+        self.assertTrue(gateway.requests[0][1].endswith("/files?path=notes&limit=2&pageToken=after-notes"))
+        with self.assertRaises(ValueError):
+            sandbox.list_files(ListFilesOptions(limit=-1))
 
     def test_logs_filter_run_uid(self):
         sandbox = SandboxClient(FakeRuns(ready_run()), FakeGateway(), logs=FakeLogs()).open("default", "sandbox")

@@ -24,6 +24,31 @@ if err := session.Wait(ctx); err != nil {
 result, err := session.Execute(ctx, sandbox.Command{Argv: []string{"sh", "-c", "kubectl get pods -A"}})
 ```
 
+File listings are explicitly paginated. Continue while `NextPageToken` is not
+empty; a listing is not a filesystem snapshot, so restart from an empty token
+when a fresh view is required:
+
+```go
+page, err := session.ListFiles(ctx, sandbox.ListFilesOptions{Directory: "output", Limit: 100})
+if err != nil {
+    return err
+}
+for {
+    for _, entry := range page.Entries {
+        fmt.Println(entry.Path)
+    }
+    if page.NextPageToken == "" {
+        break
+    }
+    page, err = session.ListFiles(ctx, sandbox.ListFilesOptions{
+        Directory: "output", Limit: 100, PageToken: page.NextPageToken,
+    })
+    if err != nil {
+        return err
+    }
+}
+```
+
 For local development, forward only the shared Runtime gateway Service. Pass
 the returned forward as `Config.HTTPClient`; it preserves the endpoint path and
 does not expose runtimed or Runtime Server gRPC ports:

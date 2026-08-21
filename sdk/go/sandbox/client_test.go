@@ -98,6 +98,27 @@ func TestSandboxReadFilePreservesPathForRuntimeValidation(t *testing.T) {
 	}
 }
 
+func TestSandboxListFilesUsesExplicitPageOptions(t *testing.T) {
+	requests := []string{}
+	sandbox := readySandbox(t, httpDoer(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.String())
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"entries":[{"path":"build.log","sizeBytes":12}],"nextPageToken":"next"}`))}, nil
+	}))
+	page, err := sandbox.ListFiles(t.Context(), ListFilesOptions{Directory: "notes", Limit: 2, PageToken: "after-notes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Path != "build.log" || page.NextPageToken != "next" {
+		t.Fatalf("page = %#v", page)
+	}
+	if got, want := strings.Join(requests, ","), "http://gateway/v1/namespaces/default/runtimes/bash/sessions/run-uid/files?limit=2&pageToken=after-notes&path=notes"; got != want {
+		t.Fatalf("request = %q, want %q", got, want)
+	}
+	if _, err := sandbox.ListFiles(t.Context(), ListFilesOptions{Limit: -1}); err == nil {
+		t.Fatal("ListFiles accepted a negative limit")
+	}
+}
+
 func TestSandboxLogsFilterRunUID(t *testing.T) {
 	reader := logReader(func(context.Context, string, string, string) (io.ReadCloser, error) {
 		return io.NopCloser(strings.NewReader("not-json\n{\"run_uid\":\"other\",\"stream\":\"stdout\"}\n{\"run_uid\":\"run-uid\",\"stream\":\"audit\",\"message\":\"session operation completed\",\"operation\":\"command\"}\n")), nil

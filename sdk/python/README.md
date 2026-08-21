@@ -29,6 +29,25 @@ print(result.stdout.decode())
 sandbox.close(timeout_seconds=30)
 ```
 
+File listings are explicitly paginated. Continue while `next_page_token` is
+not empty; a listing is not a filesystem snapshot, so restart from an empty
+token when a fresh view is required:
+
+```python
+from kruntimes.sandbox import ListFilesOptions
+
+options = ListFilesOptions(directory="output", limit=100)
+while True:
+    page = sandbox.list_files(options)
+    for entry in page.entries:
+        print(entry.path)
+    if not page.next_page_token:
+        break
+    options = ListFilesOptions(
+        directory="output", limit=100, page_token=page.next_page_token,
+    )
+```
+
 For local development, forward only the shared Runtime gateway Service. The
 forward preserves each Run endpoint path and does not expose runtimed or
 Runtime Server gRPC ports:

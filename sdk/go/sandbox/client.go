@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -367,22 +368,47 @@ type FileInfo struct {
 	SizeBytes int64  `json:"sizeBytes"`
 }
 
-// ListFiles lists bounded direct children below a workspace-relative path.
-func (s *Sandbox) ListFiles(ctx context.Context, directory string) ([]FileInfo, error) {
+// ListFilesOptions selects one bounded page of direct workspace-relative children.
+// A zero Limit lets the Runtime Server apply its default page size.
+type ListFilesOptions struct {
+	Directory string
+	Limit     int
+	PageToken string
+}
+
+// FilePage is one bounded directory listing response.
+type FilePage struct {
+	Entries       []FileInfo `json:"entries"`
+	NextPageToken string     `json:"nextPageToken"`
+}
+
+// ListFiles returns one bounded page of direct children below a workspace-relative path.
+func (s *Sandbox) ListFiles(ctx context.Context, options ListFilesOptions) (FilePage, error) {
 	endpoint, err := s.endpoint("files")
 	if err != nil {
-		return nil, err
+		return FilePage{}, err
 	}
-	if directory != "" {
-		endpoint += "?path=" + url.QueryEscape(directory)
+	if options.Limit < 0 {
+		return FilePage{}, errors.New("file page limit cannot be negative")
 	}
-	var response struct {
-		Entries []FileInfo `json:"entries"`
+	query := url.Values{}
+	if options.Directory != "" {
+		query.Set("path", options.Directory)
 	}
+	if options.Limit > 0 {
+		query.Set("limit", strconv.Itoa(options.Limit))
+	}
+	if options.PageToken != "" {
+		query.Set("pageToken", options.PageToken)
+	}
+	if encoded := query.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	var response FilePage
 	if err := s.request(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
-		return nil, err
+		return FilePage{}, err
 	}
-	return response.Entries, nil
+	return response, nil
 }
 
 // LogLine is one structured output or audit record emitted by owner runtimed.
