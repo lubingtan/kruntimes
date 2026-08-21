@@ -209,7 +209,7 @@ wiring from accumulating avoidable conflicts.
   - [ ] implement the reviewed bounded, paginated `ListSessionFiles` contract:
     - [x] define HTTP, gRPC, SDK, ordering, cursor, mutation-consistency, and
       response-bound semantics in the Session Mode design;
-    - [ ] add `limit`, `page_token`, and `next_page_token` to the gRPC contract
+    - [x] add `limit`, `page_token`, and `next_page_token` to the gRPC contract
       and regenerate clients;
     - [ ] implement identical bounded cursor paging in built-in Runtime Servers,
       runtimed proxying, the HTTP gateway, and Go/Python SDKs;

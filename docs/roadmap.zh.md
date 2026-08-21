@@ -179,7 +179,7 @@ controller wiring 累积不必要的冲突。
   - [ ] 实现经过 review 的有界、支持分页的 `ListSessionFiles` contract：
     - [x] 在 Session Mode design 中定义 HTTP、gRPC、SDK、排序、cursor、mutation-consistency 和
       response-bound semantics；
-    - [ ] 向 gRPC contract 增加 `limit`、`page_token` 与 `next_page_token`，并重新生成 client；
+    - [x] 向 gRPC contract 增加 `limit`、`page_token` 与 `next_page_token`，并重新生成 client；
     - [ ] 在内置 Runtime Server、runtimed proxy、HTTP gateway 以及 Go/Python SDK 中实现一致的有界
       cursor paging；
     - [ ] 增加 limits、ordering、invalid/mismatched token 与 traversal-safe multi-page listing 的

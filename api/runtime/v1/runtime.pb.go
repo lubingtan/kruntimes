@@ -2083,7 +2083,13 @@ type ListSessionFilesRequest struct {
 	// Immutable assignment identity for the Session Run owning the directory.
 	Identity *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
 	// An empty path lists the session workspace root.
-	Path          string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// Maximum direct children to return. Zero asks the Runtime Server to use
+	// its default; a non-zero value must be within the supported page bounds.
+	Limit int32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Opaque cursor returned by a prior ListSessionFiles response for this
+	// directory. An empty value starts at the first direct child.
+	PageToken     string `protobuf:"bytes,4,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2128,6 +2134,20 @@ func (x *ListSessionFilesRequest) GetIdentity() *SessionIdentity {
 func (x *ListSessionFilesRequest) GetPath() string {
 	if x != nil {
 		return x.Path
+	}
+	return ""
+}
+
+func (x *ListSessionFilesRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListSessionFilesRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
 	}
 	return ""
 }
@@ -2198,7 +2218,9 @@ func (x *SessionFileInfo) GetSizeBytes() int64 {
 type ListSessionFilesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Direct child entries in the requested workspace-relative directory.
-	Entries       []*SessionFileInfo `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	Entries []*SessionFileInfo `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	// Opaque cursor for the next page. Empty means there are no later entries.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2238,6 +2260,13 @@ func (x *ListSessionFilesResponse) GetEntries() []*SessionFileInfo {
 		return x.Entries
 	}
 	return nil
+}
+
+func (x *ListSessionFilesResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
 }
 
 type SessionFileWrite struct {
@@ -2700,17 +2729,21 @@ const file_api_runtime_v1_runtime_proto_rawDesc = "" +
 	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\"S\n" +
 	"\x17ReadSessionFileResponse\x12\x1a\n" +
 	"\bcontents\x18\x01 \x01(\fR\bcontents\x12\x1c\n" +
-	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"g\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"\x9c\x01\n" +
 	"\x17ListSessionFilesRequest\x128\n" +
 	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\"b\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x04 \x01(\tR\tpageToken\"b\n" +
 	"\x0fSessionFileInfo\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
 	"\tdirectory\x18\x02 \x01(\bR\tdirectory\x12\x1d\n" +
 	"\n" +
-	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\"R\n" +
+	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\"z\n" +
 	"\x18ListSessionFilesResponse\x126\n" +
-	"\aentries\x18\x01 \x03(\v2\x1c.executor.v1.SessionFileInfoR\aentries\"i\n" +
+	"\aentries\x18\x01 \x03(\v2\x1c.executor.v1.SessionFileInfoR\aentries\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"i\n" +
 	"\x10SessionFileWrite\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcontents\x18\x02 \x01(\fR\bcontents\x12%\n" +
