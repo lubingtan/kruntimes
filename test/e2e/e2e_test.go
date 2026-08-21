@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -874,6 +875,25 @@ func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
 	if result.ExitCode != 0 || string(result.Stdout) != "sdk-port-forward" {
 		t.Fatalf("SDK Session command result = %#v, want successful sdk-port-forward output", result)
 	}
+	for _, name := range []string{"alpha.txt", "beta.txt", "gamma.txt"} {
+		if err := session.WriteFile(ctx, "pages/"+name, []byte(name), true); err != nil {
+			t.Fatalf("write SDK Session page file %q: %v", name, err)
+		}
+	}
+	page, err := session.ListFiles(ctx, sandbox.ListFilesOptions{Directory: "pages", Limit: 2})
+	if err != nil {
+		t.Fatalf("list first SDK Session file page: %v", err)
+	}
+	if got, want := sessionFilePaths(page.Entries), []string{"alpha.txt", "beta.txt"}; !slices.Equal(got, want) || page.NextPageToken == "" {
+		t.Fatalf("first SDK Session file page = %#v, want %#v and next token", page, want)
+	}
+	page, err = session.ListFiles(ctx, sandbox.ListFilesOptions{Directory: "pages", Limit: 2, PageToken: page.NextPageToken})
+	if err != nil {
+		t.Fatalf("list second SDK Session file page: %v", err)
+	}
+	if got, want := sessionFilePaths(page.Entries), []string{"gamma.txt"}; !slices.Equal(got, want) || page.NextPageToken != "" {
+		t.Fatalf("second SDK Session file page = %#v, want %#v and no next token", page, want)
+	}
 	if err := session.Close(ctx); err != nil {
 		t.Fatalf("close SDK Session Run: %v", err)
 	}
@@ -895,6 +915,14 @@ func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
 	if cancelled.Run().Status.Phase != v1alpha1.RunCancelled {
 		t.Fatalf("SDK Cancel phase = %s, want Cancelled", cancelled.Run().Status.Phase)
 	}
+}
+
+func sessionFilePaths(entries []sandbox.FileInfo) []string {
+	paths := make([]string, len(entries))
+	for i := range entries {
+		paths[i] = entries[i].Path
+	}
+	return paths
 }
 
 func TestKubernetesDiagnosisRuntimeCanReadNamespace(t *testing.T) {
