@@ -184,6 +184,8 @@ controller wiring 累积不必要的冲突。
       cursor paging；
       - [x] 在 Bash 和 Python Runtime Server 中执行 direct gRPC paging，使用共享 cursor encoding
         和 UTF-8 byte-wise ordering；
+      - [x] 通过 gateway 映射 HTTP `limit` 与 `pageToken`，并通过 runtimed proxy routing
+        保留 page fields；
     - [ ] 增加 limits、ordering、invalid/mismatched token 与 traversal-safe multi-page listing 的
       unit、integration 和 E2E coverage。
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime

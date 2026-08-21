@@ -47,6 +47,31 @@ func TestSessionRuntimeProxyCallsLocalRuntimeServerForOwner(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeProxyPreservesFilePageFields(t *testing.T) {
+	run := proxySessionRun("session-run", "bash", "pod-a", "pod-a-uid")
+	reader := newSessionProxyReader(t, run)
+	local := &sessionRuntimeClient{list: func(_ context.Context, request *pb.ListSessionFilesRequest) (*pb.ListSessionFilesResponse, error) {
+		if request.GetPath() != "notes" || request.GetLimit() != 2 || request.GetPageToken() != "after-notes" {
+			t.Fatalf("list request = %#v", request)
+		}
+		return &pb.ListSessionFilesResponse{NextPageToken: "next-notes"}, nil
+	}}
+	proxy := newSessionRuntimeProxy(reader, local, run.Namespace, "bash", "pod-a", "9093")
+
+	response, err := proxy.ListSessionFiles(t.Context(), &pb.ListSessionFilesRequest{
+		Identity:  &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: "pod-a-uid"},
+		Path:      "notes",
+		Limit:     2,
+		PageToken: "after-notes",
+	})
+	if err != nil {
+		t.Fatalf("ListSessionFiles() error = %v", err)
+	}
+	if response.GetNextPageToken() != "next-notes" {
+		t.Fatalf("next page token = %q, want next-notes", response.GetNextPageToken())
+	}
+}
+
 func TestSessionRuntimeProxyEmitsStructuredCommandAndAuditLogs(t *testing.T) {
 	run := proxySessionRun("session-run", "bash", "pod-a", "pod-a-uid")
 	reader := newSessionProxyReader(t, run)
@@ -216,6 +241,7 @@ func newSessionProxyReader(t *testing.T, objects ...runtime.Object) client.Clien
 
 type sessionRuntimeClient struct {
 	execute func(context.Context, *pb.ExecuteSessionOperationRequest) (*pb.ExecuteSessionOperationResponse, error)
+	list    func(context.Context, *pb.ListSessionFilesRequest) (*pb.ListSessionFilesResponse, error)
 }
 
 func (c *sessionRuntimeClient) RegisterSession(context.Context, *pb.RegisterSessionRequest, ...grpc.CallOption) (*pb.SessionStatus, error) {
@@ -237,7 +263,10 @@ func (c *sessionRuntimeClient) ReadSessionFile(context.Context, *pb.ReadSessionF
 	return nil, status.Error(codes.Unimplemented, "ReadSessionFile")
 }
 
-func (c *sessionRuntimeClient) ListSessionFiles(context.Context, *pb.ListSessionFilesRequest, ...grpc.CallOption) (*pb.ListSessionFilesResponse, error) {
+func (c *sessionRuntimeClient) ListSessionFiles(ctx context.Context, request *pb.ListSessionFilesRequest, _ ...grpc.CallOption) (*pb.ListSessionFilesResponse, error) {
+	if c.list != nil {
+		return c.list(ctx, request)
+	}
 	return nil, status.Error(codes.Unimplemented, "ListSessionFiles")
 }
 

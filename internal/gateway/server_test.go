@@ -85,6 +85,35 @@ func TestGatewayExecutesExactlyOneOperation(t *testing.T) {
 	}
 }
 
+func TestGatewayListsSessionFilesInPages(t *testing.T) {
+	run := readySessionRun()
+	client := &fakeSessionRuntimeClient{list: func(_ context.Context, request *pb.ListSessionFilesRequest, _ ...grpc.CallOption) (*pb.ListSessionFilesResponse, error) {
+		if request.GetIdentity().GetRunUid() != string(run.UID) || request.GetPath() != "notes" || request.GetLimit() != 2 || request.GetPageToken() != "after-notes" {
+			t.Fatalf("list request = %#v", request)
+		}
+		return &pb.ListSessionFilesResponse{
+			Entries:       []*pb.SessionFileInfo{{Path: "build.log", SizeBytes: 12}},
+			NextPageToken: "next-notes",
+		}, nil
+	}}
+	server := testServer(t, run, allowAuthorizer{}, &fakeDialer{client: client})
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/sessions/session-uid/files?path=notes&limit=2&pageToken=after-notes", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got, want := response.Body.String(), `{"entries":[{"path":"build.log","directory":false,"sizeBytes":12}],"nextPageToken":"next-notes"}`+"\n"; got != want {
+		t.Fatalf("response = %q, want %q", got, want)
+	}
+
+	invalid := httptest.NewRecorder()
+	server.ServeHTTP(invalid, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/sessions/session-uid/files?limit=0", nil))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid limit status = %d, body = %s", invalid.Code, invalid.Body.String())
+	}
+}
+
 func TestGatewayRejectsInvalidOperationShape(t *testing.T) {
 	server := testServer(t, readySessionRun(), allowAuthorizer{}, &fakeDialer{client: &fakeSessionRuntimeClient{}})
 
@@ -192,6 +221,7 @@ type fakeSessionRuntimeClient struct {
 	pb.SessionRuntimeClient
 	status  func(context.Context, *pb.GetSessionStatusRequest, ...grpc.CallOption) (*pb.SessionStatus, error)
 	execute func(context.Context, *pb.ExecuteSessionOperationRequest, ...grpc.CallOption) (*pb.ExecuteSessionOperationResponse, error)
+	list    func(context.Context, *pb.ListSessionFilesRequest, ...grpc.CallOption) (*pb.ListSessionFilesResponse, error)
 }
 
 func (c *fakeSessionRuntimeClient) GetSessionStatus(ctx context.Context, request *pb.GetSessionStatusRequest, options ...grpc.CallOption) (*pb.SessionStatus, error) {
@@ -205,4 +235,11 @@ func (c *fakeSessionRuntimeClient) ExecuteSessionOperation(ctx context.Context, 
 		return nil, status.Error(codes.Unimplemented, "ExecuteSessionOperation")
 	}
 	return c.execute(ctx, request, options...)
+}
+
+func (c *fakeSessionRuntimeClient) ListSessionFiles(ctx context.Context, request *pb.ListSessionFilesRequest, options ...grpc.CallOption) (*pb.ListSessionFilesResponse, error) {
+	if c.list == nil {
+		return nil, status.Error(codes.Unimplemented, "ListSessionFiles")
+	}
+	return c.list(ctx, request, options...)
 }

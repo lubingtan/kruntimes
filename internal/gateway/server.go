@@ -205,16 +205,19 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, run *v
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run) {
+	request, err := sessionFileListRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	client, closer, err := s.runtimeClient(r.Context(), run)
 	if err != nil {
 		writeGatewayError(w, err)
 		return
 	}
 	defer closer.Close()
-	response, err := client.ListSessionFiles(r.Context(), &pb.ListSessionFilesRequest{
-		Identity: sessionIdentity(run),
-		Path:     r.URL.Query().Get("path"),
-	})
+	request.Identity = sessionIdentity(run)
+	response, err := client.ListSessionFiles(r.Context(), request)
 	if err != nil {
 		writeGatewayError(w, err)
 		return
@@ -224,8 +227,21 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request, run *v1alpha1
 		entries = append(entries, sessionFileInfoResponse{Path: entry.GetPath(), Directory: entry.GetDirectory(), SizeBytes: entry.GetSizeBytes()})
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Entries []sessionFileInfoResponse `json:"entries"`
-	}{Entries: entries})
+		Entries       []sessionFileInfoResponse `json:"entries"`
+		NextPageToken string                    `json:"nextPageToken"`
+	}{Entries: entries, NextPageToken: response.GetNextPageToken()})
+}
+
+func sessionFileListRequest(query url.Values) (*pb.ListSessionFilesRequest, error) {
+	request := &pb.ListSessionFilesRequest{Path: query.Get("path"), PageToken: query.Get("pageToken")}
+	if value := query.Get("limit"); value != "" {
+		limit, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || limit <= 0 {
+			return nil, errors.New("limit must be a positive integer")
+		}
+		request.Limit = int32(limit)
+	}
+	return request, nil
 }
 
 func (s *Server) readFile(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run, path string) {
