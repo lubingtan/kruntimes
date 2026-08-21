@@ -1194,6 +1194,66 @@ func TestReadySessionCancellationClosesRuntimeSession(t *testing.T) {
 	}
 }
 
+func TestReadySessionCancellationWaitsForRuntimeSessionClose(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime:     "bash",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate},
+			Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunReady,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{closeErr: status.Error(codes.Unavailable, "runtime unavailable")}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient}
+	c.activeRuns.Store(string(run.UID), newActiveRun(run, time.Now()))
+
+	result, err := c.reconcileReady(t.Context(), run)
+	if err != nil {
+		t.Fatalf("reconcileReady: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %s, want 1s", result.RequeueAfter)
+	}
+	var pending v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &pending); err != nil {
+		t.Fatalf("get pending Run: %v", err)
+	}
+	if pending.Status.Phase != v1alpha1.RunReady {
+		t.Fatalf("phase after failed close = %s, want Ready", pending.Status.Phase)
+	}
+
+	sessionClient.closeErr = nil
+	result, err = c.reconcileReady(t.Context(), &pending)
+	if err != nil {
+		t.Fatalf("reconcileReady after close recovery: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter after close recovery = %s, want 0", result.RequeueAfter)
+	}
+	var cancelled v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &cancelled); err != nil {
+		t.Fatalf("get cancelled Run: %v", err)
+	}
+	if cancelled.Status.Phase != v1alpha1.RunCancelled {
+		t.Fatalf("phase after close recovery = %s, want Cancelled", cancelled.Status.Phase)
+	}
+	if len(sessionClient.closeRequests) != 2 {
+		t.Fatalf("CloseSession requests = %d, want 2", len(sessionClient.closeRequests))
+	}
+}
+
 func TestReadySessionDrainFinalizesAfterAcceptedOperations(t *testing.T) {
 	setTestWorkspace(t)
 	scheme := runtime.NewScheme()

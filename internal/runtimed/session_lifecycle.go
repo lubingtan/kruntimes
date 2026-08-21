@@ -217,6 +217,10 @@ func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1
 }
 
 func (c *Controller) closeSessionAndApplyTerminal(ctx context.Context, ar *activeRun, phase v1alpha1.RunPhase, reason, message string) (ctrl.Result, error) {
+	if err := c.ensureActiveSessionClosed(ctx, ar); err != nil {
+		c.Log.Error(err, "failed to close Session before terminal transition; retrying", "run", client.ObjectKeyFromObject(ar.run))
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	return c.applyTerminal(ctx, ar, phase, reason, message)
 }
 
