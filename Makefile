@@ -16,6 +16,7 @@ CONTROLLER_GEN_VERSION ?= v0.17.3
 SETUP_ENVTEST_VERSION ?= v0.24.1
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOVULNCHECK_VERSION ?= v1.5.0
+GITLEAKS_VERSION ?= v8.30.1
 PROTOC_VERSION ?= 29.3
 PROTOC_ARCH ?= linux-x86_64
 PROTOC_GEN_GO_VERSION ?= v1.36.11
@@ -101,6 +102,11 @@ test-race: generate manifests proto ## Run focused Go race-detector coverage for
 .PHONY: govulncheck
 govulncheck: govulncheck-tool ## Run govulncheck against all Go packages.
 	$(GOVULNCHECK) ./...
+
+GITLEAKS = $(GOBIN)/gitleaks
+.PHONY: test-secrets
+test-secrets: gitleaks ## Scan Git history for secrets using the CI configuration.
+	$(GITLEAKS) git --redact --exit-code 1
 
 .PHONY: test-s3-integration
 test-s3-integration: ## Run S3 ArtifactStore integration tests against MinIO.
@@ -349,6 +355,12 @@ GOVULNCHECK = $(GOBIN)/govulncheck
 govulncheck-tool: ## Install govulncheck if not present.
 	@if ! test -x $(GOVULNCHECK) || ! $(GOVULNCHECK) -version | grep -q "$(GOVULNCHECK_VERSION)"; then \
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION); \
+	fi
+
+.PHONY: gitleaks
+gitleaks: ## Install the pinned gitleaks version if not present.
+	@if ! test -x $(GITLEAKS) || ! go version -m $(GITLEAKS) | awk '$$1 == "mod" && $$2 == "github.com/zricethezav/gitleaks/v8" && $$3 == "$(GITLEAKS_VERSION)" { found = 1 } END { exit !found }'; then \
+		go install github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION); \
 	fi
 
 .PHONY: protoc
