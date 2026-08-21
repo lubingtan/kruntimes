@@ -21,6 +21,12 @@ make test-integration
 
 使用 envtest 测试 controller 和 CRD 行为。
 
+使用同一套 envtest 环境运行单个集成测试：
+
+```bash
+make test-integration-run INTEGRATION_TEST=TestSessionFilePaginationContract
+```
+
 ## 竞态检测
 
 ```bash

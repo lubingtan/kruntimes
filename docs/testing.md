@@ -19,6 +19,12 @@ make test-integration
 
 Uses envtest for controller and CRD behavior.
 
+To run one integration test with the same envtest setup:
+
+```bash
+make test-integration-run INTEGRATION_TEST=TestSessionFilePaginationContract
+```
+
 ## Race Detector
 
 ```bash

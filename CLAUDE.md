@@ -21,6 +21,7 @@ make build              # compile all Go binaries
 make lint               # go fmt + go vet + golangci-lint (if installed) (scheduler, controller, runtimed, bash-runtime, krt)
 make test               # unit tests (skips integration and e2e)
 make test-integration   # envtest-based integration tests (real API server)
+make test-integration-run INTEGRATION_TEST=TestName # one envtest integration test
 make e2e-test           # E2E tests against a kind cluster (requires make e2e-setup first)
 make e2e                # full E2E: kind cluster + deploy + test
 make e2e-run E2E_TEST=TestName # full E2E setup, then the matching test only

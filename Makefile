@@ -79,7 +79,15 @@ test: generate manifests proto fmt vet ## Run unit tests.
 .PHONY: test-integration
 test-integration: generate manifests setup-envtest ## Run integration tests (requires envtest).
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	go test ./test/integration/... -v -count=1 -failfast
+	go test ./test/integration/... -v -count=1 -failfast $(if $(INTEGRATION_TEST),-run '$(INTEGRATION_TEST)')
+
+INTEGRATION_TEST ?=
+
+.PHONY: test-integration-run test-integration-test-required
+test-integration-test-required:
+	@test -n "$(INTEGRATION_TEST)" || { echo "INTEGRATION_TEST is required, for example: make test-integration-run INTEGRATION_TEST=TestSessionFilePaginationContract" >&2; exit 2; }
+
+test-integration-run: test-integration-test-required test-integration ## Run one envtest integration test selected by INTEGRATION_TEST.
 
 .PHONY: test-sdk-python
 test-sdk-python: ## Run Python Sandbox SDK and diagnosis agent unit tests.

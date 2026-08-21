@@ -2,12 +2,18 @@ package integration
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,11 +30,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	workspaceadmission "github.com/kruntimes/kruntimes/internal/admission"
 	"github.com/kruntimes/kruntimes/internal/runtimed"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
 	"github.com/kruntimes/kruntimes/internal/scheduler"
+	"github.com/kruntimes/kruntimes/runtimes/bash"
 )
 
 var (
@@ -165,6 +173,73 @@ func TestRunWorkspaceAdmissionWebhook(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func TestSessionFilePaginationContract(t *testing.T) {
+	workDir := t.TempDir()
+	runtimeServer := grpc.NewServer()
+	pb.RegisterSessionRuntimeServer(runtimeServer, bash.NewServer(workDir))
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen for Session Runtime: %v", err)
+	}
+	defer listener.Close()
+	go func() { _ = runtimeServer.Serve(listener) }()
+	defer runtimeServer.Stop()
+
+	connection, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial Session Runtime: %v", err)
+	}
+	defer connection.Close()
+	client := pb.NewSessionRuntimeClient(connection)
+	identity := &pb.SessionIdentity{RunUid: "pagination-run", AssignedPodUid: "runtime-pod"}
+	if _, err := client.RegisterSession(t.Context(), &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}); err != nil {
+		t.Fatalf("register Session: %v", err)
+	}
+	for _, name := range []string{"z", "a", "\u00e9", "b"} {
+		if _, err := client.ExecuteSessionOperation(t.Context(), &pb.ExecuteSessionOperationRequest{
+			Identity: identity,
+			Operation: &pb.ExecuteSessionOperationRequest_WriteFile{WriteFile: &pb.SessionFileWrite{
+				Path: "pages/" + name, Contents: []byte(name), CreateParents: true,
+			}},
+		}); err != nil {
+			t.Fatalf("write Session file %q: %v", name, err)
+		}
+	}
+
+	first, err := client.ListSessionFiles(t.Context(), &pb.ListSessionFilesRequest{Identity: identity, Path: "pages", Limit: 2})
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+	if got, want := integrationSessionFilePaths(first.Entries), []string{"a", "b"}; !slices.Equal(got, want) || first.NextPageToken == "" {
+		t.Fatalf("first page = %#v, want %#v and next token", first, want)
+	}
+	second, err := client.ListSessionFiles(t.Context(), &pb.ListSessionFilesRequest{Identity: identity, Path: "pages", Limit: 2, PageToken: first.NextPageToken})
+	if err != nil {
+		t.Fatalf("list second page: %v", err)
+	}
+	if got, want := integrationSessionFilePaths(second.Entries), []string{"z", "\u00e9"}; !slices.Equal(got, want) || second.NextPageToken != "" {
+		t.Fatalf("second page = %#v, want %#v and no next token", second, want)
+	}
+
+	for _, request := range []*pb.ListSessionFilesRequest{
+		{Identity: identity, Path: "pages", Limit: 1001},
+		{Identity: identity, Path: "other", PageToken: first.NextPageToken},
+		{Identity: identity, Path: "../outside"},
+	} {
+		if _, err := client.ListSessionFiles(t.Context(), request); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("ListSessionFiles(%#v) error = %v, want InvalidArgument", request, err)
+		}
+	}
+}
+
+func integrationSessionFilePaths(entries []*pb.SessionFileInfo) []string {
+	paths := make([]string, len(entries))
+	for i := range entries {
+		paths[i] = entries[i].Path
+	}
+	return paths
 }
 
 func integrationRun(namespace, workspaceName string) *v1alpha1.Run {

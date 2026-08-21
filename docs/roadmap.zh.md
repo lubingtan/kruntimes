@@ -176,17 +176,17 @@ controller wiring 累积不必要的冲突。
   - [x] 增加 bounded authorization decision cache；
   - [x] 执行每个 gateway 的有界 HTTP request concurrency limit；
   - [ ] 执行 chart-managed TLS，并在需要时使显式 request 和 response limits 可配置；
-  - [ ] 实现经过 review 的有界、支持分页的 `ListSessionFiles` contract：
+  - [x] 实现经过 review 的有界、支持分页的 `ListSessionFiles` contract：
     - [x] 在 Session Mode design 中定义 HTTP、gRPC、SDK、排序、cursor、mutation-consistency 和
       response-bound semantics；
     - [x] 向 gRPC contract 增加 `limit`、`page_token` 与 `next_page_token`，并重新生成 client；
-    - [ ] 在内置 Runtime Server、runtimed proxy、HTTP gateway 以及 Go/Python SDK 中实现一致的有界
+    - [x] 在内置 Runtime Server、runtimed proxy、HTTP gateway 以及 Go/Python SDK 中实现一致的有界
       cursor paging；
       - [x] 在 Bash 和 Python Runtime Server 中执行 direct gRPC paging，使用共享 cursor encoding
         和 UTF-8 byte-wise ordering；
       - [x] 通过 gateway 映射 HTTP `limit` 与 `pageToken`，并通过 runtimed proxy routing
         保留 page fields；
-    - [ ] 增加 limits、ordering、invalid/mismatched token 与 traversal-safe multi-page listing 的
+    - [x] 增加 limits、ordering、invalid/mismatched token 与 traversal-safe multi-page listing 的
       unit、integration 和 E2E coverage。
 - [ ] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
   Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
