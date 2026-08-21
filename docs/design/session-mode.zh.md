@@ -199,8 +199,32 @@ grace period 后 forcefully 终止 backend-specific execution unit。Bash 和 Py
 
 file path 必须相对 session workspace；absolute path、traversal 和 symlink escape 都被拒绝。v0 中，gateway
 JSON request body 上限为 1 MiB。内置 Runtime Server 将 direct file read/write，以及每个 command 的 stdout 与
-stderr stream 均限制为 1 MiB。更大的 durable result 使用 ArtifactStore。`ListSessionFiles` 当前直接返回
-directory entry，尚未分页；在 API 可用于任意大型 workspace 前，需要增加有界、支持分页的 listing contract。
+stderr stream 均限制为 1 MiB。更大的 durable result 使用 ArtifactStore。
+
+`ListSessionFiles` 只列出 direct child，并且必须分页。HTTP endpoint 接受可选的 `path`、`limit` 与
+`pageToken` query parameter。`limit` 默认是 100，合法范围为 `1..1000`；非法值返回 `400 Bad Request`。
+每个 response 都包含 `entries` array 与 `nextPageToken` string。空的 `nextPageToken` 表示未观察到后续
+entry。例如：
+
+```json
+{
+  "entries": [
+    {"path": "build.log", "directory": false, "sizeBytes": 1024}
+  ],
+  "nextPageToken": "eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJidWlsZC5sb2cifQ"
+}
+```
+
+token 对 client 是 opaque 的，但可在同一个 Runtime 的 ready Pod 之间传递。它是 versioned base64url
+cursor，包含请求的 relative directory 与最后一个返回 entry 的名称。Runtime Server 拒绝 malformed token，
+以及被用于不同 directory 的 token。entry 按其 UTF-8 encoded name 的 byte-wise lexicographic order
+排序；token 从严格晚于该名称的 entry 继续。此排序是 cross-runtime contract 的一部分，因此 Bash 和 Python
+Runtime Server 产生可互换的 page boundary。
+
+listing 不是 filesystem snapshot。翻页期间的 mutation 可能让后续页面遗漏或重复 entry；需要 fresh view 的
+caller 必须从空 token 重新开始。Runtime Server 而非仅 HTTP gateway 强制 page limit，因此 direct
+`SessionRuntime` caller 也不能造成无界 listing response。Go 与 Python SDK 暴露显式分页的 `ListFiles`
+operation，接收 page-options value 并返回一页结果及 next token；不会使用 helper 隐藏无界 iteration。
 
 ## Runtime Server 协议
 
@@ -227,6 +251,10 @@ service SessionRuntime {
   rpc GetSessionStatus(GetSessionStatusRequest) returns (SessionStatus);
 }
 ```
+
+`ListSessionFilesRequest` 除 `path` 外携带可选的正整数 `limit` 与 opaque `page_token`。
+`ListSessionFilesResponse` 在 direct child entries 外携带 `next_page_token`。Runtime Server 验证与 HTTP
+endpoint 相同的 `1..1000` limit 与 cursor semantics。
 
 每个 request 携带 immutable Run UID 和 assignment identity。gateway server 从当前 Run assignment 推导该
 identity；它不是 client 控制的 HTTP input。收到 request 的 runtimed 要么将其转发给 owner，要么在自己是

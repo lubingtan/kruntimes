@@ -257,9 +257,39 @@ File paths are always relative to the session workspace. Absolute paths,
 traversal, and symlink escapes are rejected. In v0, the gateway JSON request
 body is limited to 1 MiB. Built-in Runtime Servers limit direct file reads and
 writes, plus each command stdout and stderr stream, to 1 MiB. Larger durable
-results use ArtifactStore. `ListSessionFiles` currently returns direct entries
-without pagination; a bounded, paginated listing contract is required before
-the API is treated as suitable for arbitrarily large workspaces.
+results use ArtifactStore.
+
+`ListSessionFiles` lists direct children only and is paginated. The HTTP
+endpoint accepts optional `path`, `limit`, and `pageToken` query parameters.
+`limit` defaults to 100 and must be in `1..1000`; an invalid value returns
+`400 Bad Request`. Each response contains an `entries` array and a
+`nextPageToken` string. An empty `nextPageToken` means that no later entry was
+observed. For example:
+
+```json
+{
+  "entries": [
+    {"path": "build.log", "directory": false, "sizeBytes": 1024}
+  ],
+  "nextPageToken": "eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJidWlsZC5sb2cifQ"
+}
+```
+
+The token is opaque to clients but portable between ready Pods of the same
+Runtime. It is a versioned base64url cursor containing the requested relative
+directory and the final returned entry name. A Runtime Server rejects malformed
+tokens and a token used with a different directory. Entries are ordered by
+their UTF-8 encoded names in byte-wise lexicographic order; the token resumes
+strictly after that name. This ordering is part of the cross-runtime contract,
+so Bash and Python Runtime Servers produce interchangeable page boundaries.
+
+A listing is not a filesystem snapshot. Mutations between pages can cause a
+later page to omit or repeat entries; a caller that needs a fresh view restarts
+from an empty token. The Runtime Server, not only the HTTP gateway, enforces
+the page limit so direct `SessionRuntime` callers cannot cause an unbounded
+listing response. The Go and Python SDKs expose an explicit paged `ListFiles`
+operation with a page-options value and return one page plus its next token;
+they do not hide unbounded iteration behind a helper.
 
 ## Runtime Server Contract
 
@@ -289,6 +319,11 @@ service SessionRuntime {
   rpc GetSessionStatus(GetSessionStatusRequest) returns (SessionStatus);
 }
 ```
+
+`ListSessionFilesRequest` carries the optional positive `limit` and opaque
+`page_token` in addition to `path`. `ListSessionFilesResponse` carries
+`next_page_token` with the direct child entries. Runtime Servers validate the
+same `1..1000` limit and cursor semantics as the HTTP endpoint.
 
 Every request includes the immutable Run UID and assignment identity. The
 gateway server derives that identity from the current Run assignment; it is not

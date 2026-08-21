@@ -206,8 +206,15 @@ wiring from accumulating avoidable conflicts.
   - [x] enforce a bounded per-gateway HTTP request concurrency limit;
   - [ ] enforce chart-managed TLS and make explicit request and response limits
     configurable where needed;
-  - [ ] add a bounded, paginated `ListSessionFiles` contract before supporting
-    arbitrarily large session workspaces;
+  - [ ] implement the reviewed bounded, paginated `ListSessionFiles` contract:
+    - [x] define HTTP, gRPC, SDK, ordering, cursor, mutation-consistency, and
+      response-bound semantics in the Session Mode design;
+    - [ ] add `limit`, `page_token`, and `next_page_token` to the gRPC contract
+      and regenerate clients;
+    - [ ] implement identical bounded cursor paging in built-in Runtime Servers,
+      runtimed proxying, the HTTP gateway, and Go/Python SDKs;
+    - [ ] add unit, integration, and E2E coverage for limits, ordering, invalid
+      or mismatched tokens, and traversal-safe multi-page listings.
 - [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
   The accepted [Session Mode design](design/session-mode.md) uses
