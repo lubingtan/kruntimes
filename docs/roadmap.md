@@ -219,7 +219,7 @@ wiring from accumulating avoidable conflicts.
         page fields through runtimed proxy routing;
     - [x] add unit, integration, and E2E coverage for limits, ordering, invalid
       or mismatched tokens, and traversal-safe multi-page listings.
-- [ ] Session-mode Runs for agent sandboxes: provide a stateful, mutable
+- [x] Session-mode Runs for agent sandboxes: provide a stateful, mutable
   workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
   The accepted [Session Mode design](design/session-mode.md) uses
   `Run.spec.mode.session`, an HTTP API translated by the shared gateway to the
@@ -243,7 +243,7 @@ wiring from accumulating avoidable conflicts.
   - [x] emit structured Session output and audit logs from owner runtimed for
     existing Kubernetes log collectors and `krt logs`; do not create a separate
     gateway log store;
-  - [ ] implement the per-session FIFO mutation queue: one active command or
+  - [x] implement the per-session FIFO mutation queue: one active command or
     file mutation, global and per-Run bounds, default/max operation timeout,
     cancellation, and graceful termination;
     - [x] serialize owner-runtimed mutations with per-Session FIFO queues,
@@ -253,7 +253,7 @@ wiring from accumulating avoidable conflicts.
       timeout limits, plus the runtimed-to-Runtime-Server close deadline;
     - [x] define backend-specific graceful process-termination configuration.
       A common setting is not injected into arbitrary custom Runtime images;
-  - [ ] keep operation history and audit events in structured external logs,
+  - [x] keep operation history and audit events in structured external logs,
     retain only bounded readiness, endpoint, and artifact-reference data in Run
     status, and export large outputs through ArtifactStore;
     - [x] replace `cancelRequested` with a monotonic `termination.mode` API:
