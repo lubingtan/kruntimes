@@ -44,6 +44,22 @@ Session 使用已有的 `Pending -> Scheduled -> Running -> Ready` lifecycle。`
 runtimed 已在本地 Runtime Server 注册 session 并接受 operation；它是 active phase 并持续占用
 Runtime capacity。
 
+## Registration Reconciliation
+
+session registration 有意拆分为 local work 与 Kubernetes status reconciliation 两部分。runtimed
+观察到被分配给自己的 `Scheduled` Run 后，先 claim Run 并通过 status 更新为 `Running`。之后对该缓存
+`Running` Run 的 reconcile 会调用本地 Runtime Server 的 `GetSessionStatus`。
+
+- `READY` 会将 Run transition 到 `Ready`，发布 endpoint，并启动 idle tracking。
+- `NOT_FOUND` 且没有 registration in flight 时，异步开始 source preparation 与
+  `RegisterSession`；如果已有 registration in flight，runtimed 只 requeue Run。
+- `REGISTERING` 保持 `Running` 并 requeue。
+- `FAILED`、`CLOSED`、`CLOSING` 或非法状态会在进入 `Ready` 前走普通 Run retry path。
+
+异步 worker 不读取或写入 Run API object。它仅记录 local registration failure、发出 Event 与 log，
+然后 enqueue Run。下一次 reconcile 消费该结果并应用普通 retry policy。这样所有 `Run.status` 更新都在
+reconcile path 内完成，也不需要依赖 direct API read 抢在 informer cache update 之前读取最新对象。
+
 v0 中用于 session 的 Runtime 应配置为有效 `runs: 1` capacity。scheduler 仍只执行通用资源
 capacity 计算；runtimed 是本地独占的权威门控：它原子地拒绝在其他 Run active 时 claim
 Session，并在 Session active 时拒绝 claim 其他任何 Run。这在本地竞争或 Runtime 配置错误时也能

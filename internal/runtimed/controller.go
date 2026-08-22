@@ -184,6 +184,20 @@ func (c *Controller) forwardRLEGEvents(ctx context.Context) {
 	}
 }
 
+// enqueueRun asks the controller to re-read a Run from its cache after an
+// asynchronous local operation completes. It deliberately carries no status
+// mutation: Reconcile remains the only writer of Run status.
+func (c *Controller) enqueueRun(run *v1alpha1.Run) {
+	if c.rlegCh == nil || run == nil {
+		return
+	}
+	select {
+	case c.rlegCh <- event.GenericEvent{Object: run.DeepCopy()}:
+	default:
+		c.Log.Info("runtimed event queue is full; periodic reconciliation will retry", "run", client.ObjectKeyFromObject(run))
+	}
+}
+
 func (c *Controller) runFilter() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
@@ -272,7 +286,6 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	c.recordActiveRuns(run.Spec.Runtime)
 
 	if run.Spec.Mode.Session != nil {
-		c.startSessionRegistrationAsync(ar)
 		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	}
 	if err := prepareSource(ar); err != nil {
@@ -452,7 +465,7 @@ func (c *Controller) reconcileRunningSession(ctx context.Context, run *v1alpha1.
 	if condition != nil && condition.Status == metav1.ConditionFalse {
 		return c.reconcileRetryBackoff(ctx, ar)
 	}
-	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	return c.reconcileSessionRegistration(ctx, ar)
 }
 
 // reconcileReady handles the long-lived Session Run reservation. Task Runs
@@ -626,7 +639,6 @@ func (c *Controller) reconcileRetryBackoff(ctx context.Context, ar *activeRun) (
 	c.recordEvent(run, corev1.EventTypeNormal, "RunRetrying",
 		"Retry attempt %d/%d starting", run.Status.Attempt+1, policy.MaxAttempts)
 	if run.Spec.Mode.Session != nil {
-		c.startSessionRegistrationAsync(ar)
 		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	}
 	c.startExecutionAsync(ar)

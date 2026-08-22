@@ -50,6 +50,29 @@ lifecycle. `Ready` means the owning runtimed has registered a session with the
 local Runtime Server and accepts session operations. It remains active and
 holds Runtime capacity.
 
+## Registration Reconciliation
+
+Session registration is deliberately split between local work and Kubernetes
+status reconciliation. When runtimed observes its assigned `Scheduled` Run, it
+claims the Run and updates its status to `Running`. A later reconciliation of
+that cached `Running` Run queries the local Runtime Server with
+`GetSessionStatus`.
+
+- `READY` transitions the Run to `Ready`, publishes its endpoint, and starts
+  idle tracking.
+- `NOT_FOUND` starts asynchronous source preparation and `RegisterSession` if
+  no registration is already in flight. While one is in flight, runtimed only
+  requeues the Run.
+- `REGISTERING` remains `Running` and is requeued.
+- `FAILED`, `CLOSED`, `CLOSING`, or an invalid state enter the ordinary Run
+  retry path before `Ready`.
+
+The asynchronous worker never reads or writes the Run API object. It records a
+local registration failure, emits an Event and log entry, and enqueues the Run.
+The next reconciliation consumes that result and applies the normal retry
+policy. This keeps every `Run.status` update in the reconcile path and avoids
+depending on a direct API read to outrun an informer cache update.
+
 For v0, configure a Runtime used for sessions with effective `runs: 1`
 capacity. The scheduler continues to apply only generic resource capacity
 accounting. runtimed is the authoritative local gate: it atomically refuses to

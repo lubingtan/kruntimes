@@ -27,8 +27,51 @@ type activeRun struct {
 	start                  time.Time
 	started                atomic.Bool
 	prepared               atomic.Bool
+	sessionRegistrationMu  sync.Mutex
+	sessionRegistration    *sessionRegistrationFailure
+	sessionRegistering     bool
 	sessionCloseMu         sync.Mutex
 	sessionClosed          atomic.Bool
+}
+
+// sessionRegistrationFailure is recorded by the asynchronous local
+// registration operation. Reconcile consumes it and applies the normal Run
+// retry semantics; the goroutine itself never mutates Kubernetes status.
+type sessionRegistrationFailure struct {
+	reason  string
+	message string
+}
+
+func (ar *activeRun) beginSessionRegistration() bool {
+	ar.sessionRegistrationMu.Lock()
+	defer ar.sessionRegistrationMu.Unlock()
+	if ar.sessionRegistering {
+		return false
+	}
+	ar.sessionRegistering = true
+	ar.sessionRegistration = nil
+	return true
+}
+
+func (ar *activeRun) finishSessionRegistration(failure *sessionRegistrationFailure) {
+	ar.sessionRegistrationMu.Lock()
+	defer ar.sessionRegistrationMu.Unlock()
+	ar.sessionRegistering = false
+	ar.sessionRegistration = failure
+}
+
+func (ar *activeRun) sessionRegistrationInFlight() bool {
+	ar.sessionRegistrationMu.Lock()
+	defer ar.sessionRegistrationMu.Unlock()
+	return ar.sessionRegistering
+}
+
+func (ar *activeRun) consumeSessionRegistrationFailure() *sessionRegistrationFailure {
+	ar.sessionRegistrationMu.Lock()
+	defer ar.sessionRegistrationMu.Unlock()
+	failure := ar.sessionRegistration
+	ar.sessionRegistration = nil
+	return failure
 }
 
 func newActiveRun(run *v1alpha1.Run, start time.Time) *activeRun {

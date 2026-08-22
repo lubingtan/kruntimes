@@ -1150,7 +1150,7 @@ func TestActiveRunRequeueAfterUsesSoonerDeadline(t *testing.T) {
 	}
 }
 
-func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
+func TestSessionRunBecomesReadyFromReconciledRuntimeStatus(t *testing.T) {
 	setTestWorkspace(t)
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -1170,7 +1170,7 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 		},
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
-	sessionClient := &fakeSessionRuntimeClient{}
+	sessionClient := &fakeSessionRuntimeClient{status: &pb.SessionStatus{State: pb.SessionState_SESSION_STATE_READY}}
 	c := &Controller{
 		Client:            k8sClient,
 		PodName:           "runtime-pod",
@@ -1182,23 +1182,11 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	ar := newActiveRun(run, time.Now())
 	c.activeRuns.Store(string(run.UID), ar)
 
-	if err := c.prepareSession(t.Context(), ar); err != nil {
-		t.Fatalf("prepareSession: %v", err)
+	if _, err := c.reconcileSessionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileSessionRegistration: %v", err)
 	}
-	if err := c.registerSession(t.Context(), ar); err != nil {
-		t.Fatalf("registerSession: %v", err)
-	}
-	if err := c.markSessionReady(t.Context(), ar); err != nil {
-		t.Fatalf("markSessionReady: %v", err)
-	}
-	if sessionClient.registerRequest == nil {
-		t.Fatal("RegisterSession was not called")
-	}
-	if got := sessionClient.registerRequest.Identity.GetAssignedPodUid(); got != "runtime-pod-uid" {
-		t.Fatalf("assigned Pod UID = %q, want runtime-pod-uid", got)
-	}
-	if got := sessionClient.registerRequest.Env[artifact.ArtifactsDirEnv]; got != ar.artifactDir {
-		t.Fatalf("artifact directory = %q, want %q", got, ar.artifactDir)
+	if sessionClient.registerRequest != nil {
+		t.Fatal("RegisterSession was called although the Runtime Server was already ready")
 	}
 	var updated v1alpha1.Run
 	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
@@ -1215,7 +1203,62 @@ func TestSessionRunRegistersAndBecomesReadyWithoutExecutingTask(t *testing.T) {
 	}
 }
 
-func TestMarkSessionReadyUsesDirectRunReader(t *testing.T) {
+func TestSessionRegistrationAsyncDoesNotUpdateRunStatus(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunRunning,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+			StartTime:      &metav1.Time{Time: time.Now()},
+		},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{
+		statusErr:      status.Error(codes.NotFound, "session not found"),
+		registerCalled: make(chan struct{}),
+	}
+	c := &Controller{
+		Client:     k8sClient,
+		PodName:    "runtime-pod",
+		sessionCli: sessionClient,
+		rlegCh:     make(chan event.GenericEvent, 1),
+	}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileSessionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileSessionRegistration: %v", err)
+	}
+	select {
+	case <-sessionClient.registerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("RegisterSession was not called")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunRunning {
+		t.Fatalf("phase = %s, want Running before a later reconcile observes Ready", updated.Status.Phase)
+	}
+	select {
+	case <-c.rlegCh:
+	case <-time.After(time.Second):
+		t.Fatal("registration completion did not enqueue the Run")
+	}
+}
+
+func TestApplySessionReadyUsesCachedRun(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add scheme: %v", err)
@@ -1236,15 +1279,18 @@ func TestMarkSessionReadyUsesDirectRunReader(t *testing.T) {
 	stale := run.DeepCopy()
 	stale.Status.Phase = v1alpha1.RunScheduled
 	c := &Controller{
-		Client:    staleRunGetClient{Client: directReader, stale: stale},
-		RunReader: directReader,
-		PodName:   "runtime-pod",
+		Client:  staleRunGetClient{Client: directReader, stale: stale},
+		PodName: "runtime-pod",
 	}
-	ar := newActiveRun(run, time.Now())
+	var cached v1alpha1.Run
+	if err := directReader.Get(t.Context(), client.ObjectKeyFromObject(run), &cached); err != nil {
+		t.Fatalf("get cached Run: %v", err)
+	}
+	ar := newActiveRun(&cached, time.Now())
 	c.activeRuns.Store(string(run.UID), ar)
 
-	if err := c.markSessionReady(t.Context(), ar); err != nil {
-		t.Fatalf("markSessionReady: %v", err)
+	if _, err := c.applySessionReady(t.Context(), ar); err != nil {
+		t.Fatalf("applySessionReady: %v", err)
 	}
 	var updated v1alpha1.Run
 	if err := directReader.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
@@ -1614,7 +1660,7 @@ func newFinalizingSessionForArtifactTest(t *testing.T, store *fakeArtifactStore)
 	return run, ar, c, k8sClient, sessionClient, store
 }
 
-func TestLateSessionRegistrationClosesFinalizingSession(t *testing.T) {
+func TestFinalizingSessionClosesRuntimeSession(t *testing.T) {
 	setTestWorkspace(t)
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -1640,8 +1686,8 @@ func TestLateSessionRegistrationClosesFinalizingSession(t *testing.T) {
 	ar := newActiveRun(run, time.Now())
 	c.activeRuns.Store(string(run.UID), ar)
 
-	if err := c.markSessionReady(t.Context(), ar); err != nil {
-		t.Fatalf("markSessionReady: %v", err)
+	if err := c.ensureActiveSessionClosed(t.Context(), ar); err != nil {
+		t.Fatalf("ensureActiveSessionClosed: %v", err)
 	}
 	if len(sessionClient.closeRequests) != 1 {
 		t.Fatalf("CloseSession requests = %d, want 1", len(sessionClient.closeRequests))
@@ -2132,10 +2178,14 @@ type fakeSessionRuntimeClient struct {
 	statusErr       error
 	closeRequests   []*pb.CloseSessionRequest
 	closeErr        error
+	registerCalled  chan struct{}
 }
 
 func (f *fakeSessionRuntimeClient) RegisterSession(_ context.Context, request *pb.RegisterSessionRequest, _ ...grpc.CallOption) (*pb.SessionStatus, error) {
 	f.registerRequest = request
+	if f.registerCalled != nil {
+		close(f.registerCalled)
+	}
 	if f.registerErr != nil {
 		return nil, f.registerErr
 	}

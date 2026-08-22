@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,27 +24,32 @@ import (
 const sessionRegistrationTimeout = 10 * time.Second
 
 func (c *Controller) startSessionRegistrationAsync(ar *activeRun) {
+	if ar == nil || ar.run == nil || !ar.beginSessionRegistration() {
+		return
+	}
 	go func() {
 		ctx := context.Background()
 		if err := c.prepareSession(ctx, ar); err != nil {
-			c.applyStartSessionFailure(ctx, ar, runretry.ReasonPrepareSource, fmt.Errorf("prepare session: %w", err))
+			c.finishSessionRegistration(ar, runretry.ReasonPrepareSource, fmt.Errorf("prepare session: %w", err))
 			return
 		}
 		if err := c.registerSession(ctx, ar); err != nil {
-			c.applyStartSessionFailure(ctx, ar, runretry.ReasonSessionRegister, fmt.Errorf("register session: %w", err))
+			c.finishSessionRegistration(ar, runretry.ReasonSessionRegister, fmt.Errorf("register session: %w", err))
 			return
 		}
-		uid := string(ar.run.UID)
-		if value, exists := c.activeRuns.Load(uid); !exists || value != ar {
-			// The Run was cancelled or deleted while local registration was in
-			// flight. Do not leave a session behind after its owner released it.
-			c.closeActiveSession(ctx, ar)
-			return
-		}
-		if err := c.markSessionReady(ctx, ar); err != nil {
-			c.Log.Error(err, "failed to mark Session Run ready", "run", client.ObjectKeyFromObject(ar.run))
-		}
+		c.finishSessionRegistration(ar, "", nil)
 	}()
+}
+
+func (c *Controller) finishSessionRegistration(ar *activeRun, reason string, err error) {
+	var failure *sessionRegistrationFailure
+	if err != nil {
+		failure = &sessionRegistrationFailure{reason: reason, message: err.Error()}
+		c.Log.Error(err, "local Session registration failed", "run", client.ObjectKeyFromObject(ar.run))
+		c.recordEvent(ar.run, corev1.EventTypeWarning, "SessionRegistrationFailed", "%s", err)
+	}
+	ar.finishSessionRegistration(failure)
+	c.enqueueRun(ar.run)
 }
 
 func (c *Controller) prepareSession(ctx context.Context, ar *activeRun) error {
@@ -90,28 +96,56 @@ func (c *Controller) registerSession(ctx context.Context, ar *activeRun) error {
 	return nil
 }
 
-func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error {
+// reconcileSessionRegistration observes local Runtime Server state and is the
+// only place registration changes Run status. Registration itself is async so
+// source preparation and the gRPC call never block the controller worker.
+func (c *Controller) reconcileSessionRegistration(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
 	if ar == nil || ar.run == nil {
-		return fmt.Errorf("active Run is required")
+		return ctrl.Result{}, fmt.Errorf("active Run is required")
 	}
-	uid := string(ar.run.UID)
-	if value, exists := c.activeRuns.Load(uid); !exists || value != ar {
-		return nil
+	if c.sessionCli == nil {
+		return ctrl.Result{}, fmt.Errorf("SessionRuntime client is not configured")
+	}
+	identity, err := sessionIdentityForRun(ar.run)
+	if err != nil {
+		return c.applyFailure(ctx, ar, runretry.ReasonSessionRegister, err.Error())
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, sessionRegistrationTimeout)
+	defer cancel()
+	response, err := c.sessionCli.GetSessionStatus(statusCtx, &pb.GetSessionStatusRequest{Identity: identity})
+	if err != nil {
+		if status.Code(err) != codes.NotFound {
+			return ctrl.Result{}, fmt.Errorf("get SessionRuntime registration status: %w", err)
+		}
+		if failure := ar.consumeSessionRegistrationFailure(); failure != nil {
+			return c.applyFailure(ctx, ar, failure.reason, failure.message)
+		}
+		if !ar.sessionRegistrationInFlight() {
+			c.startSessionRegistrationAsync(ar)
+		}
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	}
 
-	var run v1alpha1.Run
-	if err := c.getRunDirectly(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
-		return client.IgnoreNotFound(err)
+	switch response.GetState() {
+	case pb.SessionState_SESSION_STATE_READY:
+		return c.applySessionReady(ctx, ar)
+	case pb.SessionState_SESSION_STATE_REGISTERING:
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	case pb.SessionState_SESSION_STATE_CLOSING, pb.SessionState_SESSION_STATE_CLOSED, pb.SessionState_SESSION_STATE_FAILED, pb.SessionState_SESSION_STATE_UNSPECIFIED:
+		return c.applyFailure(ctx, ar, runretry.ReasonSessionRegister, fmt.Sprintf("Runtime Server session is %s", response.GetState()))
+	default:
+		return c.applyFailure(ctx, ar, runretry.ReasonSessionRegister, fmt.Sprintf("Runtime Server returned unknown session state %s", response.GetState()))
 	}
+}
+
+func (c *Controller) applySessionReady(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
+	run := ar.run
 	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
-		// Registration can finish after termination moved the Run out of
-		// Running. Do not leave that late Runtime Server session registered.
-		c.closeActiveSession(ctx, ar)
-		return nil
+		return ctrl.Result{}, nil
 	}
 	run.Status.Phase = v1alpha1.RunReady
 	run.Status.Message = "session registered"
-	if endpoint := c.sessionEndpoint(&run); endpoint != nil {
+	if endpoint := c.sessionEndpoint(run); endpoint != nil {
 		run.Status.Endpoint = endpoint
 	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
@@ -121,16 +155,15 @@ func (c *Controller) markSessionReady(ctx context.Context, ar *activeRun) error 
 		Message:            "session is ready for gateway operations",
 		LastTransitionTime: metav1.Now(),
 	})
-	if err := c.Status().Update(ctx, &run); err != nil {
-		return err
+	if err := c.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
 	}
 	if c.SessionOperations != nil {
-		if err := c.SessionOperations.Ensure(&run, time.Now()); err != nil {
-			return fmt.Errorf("start Session idle tracking: %w", err)
+		if err := c.SessionOperations.Ensure(run, time.Now()); err != nil {
+			return ctrl.Result{}, fmt.Errorf("start Session idle tracking: %w", err)
 		}
 	}
-	ar.run = &run
-	return nil
+	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
 
 func (c *Controller) sessionEndpoint(run *v1alpha1.Run) *v1alpha1.RunEndpoint {
@@ -146,28 +179,6 @@ func (c *Controller) sessionEndpoint(run *v1alpha1.Run) *v1alpha1.RunEndpoint {
 			run.Spec.Runtime,
 			run.UID,
 		),
-	}
-}
-
-func (c *Controller) applyStartSessionFailure(ctx context.Context, ar *activeRun, reason string, startErr error) {
-	if ar == nil || ar.run == nil {
-		return
-	}
-	uid := string(ar.run.UID)
-	if value, exists := c.activeRuns.Load(uid); !exists || value != ar {
-		return
-	}
-	var run v1alpha1.Run
-	if err := c.getRunDirectly(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
-		c.Log.Error(err, "failed to get Session Run after registration error", "run", client.ObjectKeyFromObject(ar.run))
-		return
-	}
-	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
-		return
-	}
-	ar.run = &run
-	if _, err := c.applyFailure(ctx, ar, reason, startErr.Error()); err != nil {
-		c.Log.Error(err, "failed to update Session Run after registration error", "run", client.ObjectKeyFromObject(ar.run))
 	}
 }
 
@@ -198,6 +209,9 @@ func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1
 				}
 			}
 			c.recordActiveRuns(run.Spec.Runtime)
+			if run.Status.Phase == v1alpha1.RunRunning {
+				return c.applySessionReady(ctx, ar)
+			}
 			return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 		}
 		return c.applyTerminal(ctx, ar, v1alpha1.RunFailed, runretry.ReasonExecutionLost, fmt.Sprintf("runtime session recovered in state %s", response.GetState()))
@@ -210,8 +224,7 @@ func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		c.recordActiveRuns(run.Spec.Runtime)
-		c.startSessionRegistrationAsync(ar)
-		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+		return c.reconcileSessionRegistration(ctx, ar)
 	}
 	return c.applyTerminal(ctx, ar, v1alpha1.RunFailed, runretry.ReasonExecutionLost, "runtime session not found after runtimed restart")
 }
