@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -540,6 +539,36 @@ func TestHandleFailure_RetryAndBackoff(t *testing.T) {
 	}
 }
 
+func TestScheduleRetryForgetsFailedTaskExecution(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "retry", Namespace: "default", UID: "retry-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning, AssignedPod: "pod-a", Attempt: 1},
+	}
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Run{}).
+		WithObjects(run).
+		Build()
+	runtimeClient := &fakeRuntimeClient{}
+	c := &Controller{Client: k8sClient, runtimeCli: runtimeClient}
+	policy := runretry.WithDefaults(&v1alpha1.RetryPolicy{MaxAttempts: 3})
+
+	if _, err := c.scheduleRetry(t.Context(), newActiveRun(run, time.Now()), 1, policy, runretry.ReasonRuntimeError, "failed"); err != nil {
+		t.Fatalf("scheduleRetry: %v", err)
+	}
+	if len(runtimeClient.forgetRequests) != 1 || runtimeClient.forgetRequests[0].Id != string(run.UID) {
+		t.Fatalf("Forget requests = %#v, want Run UID %q", runtimeClient.forgetRequests, run.UID)
+	}
+}
+
 func TestReconcileScheduledRespectsLocalCapacity(t *testing.T) {
 	c := &Controller{Workers: 1}
 	c.activeRuns.Store("existing", &activeRun{})
@@ -671,7 +700,7 @@ func TestReconcileScheduledCancelBeforeClaim(t *testing.T) {
 	}
 }
 
-func TestApplyStartExecutionFailureUsesDirectRunReader(t *testing.T) {
+func TestReconcileRunningAppliesAsynchronousExecutionStartFailure(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add scheme: %v", err)
@@ -689,25 +718,29 @@ func TestApplyStartExecutionFailureUsesDirectRunReader(t *testing.T) {
 			AssignedPod: "runtime-pod",
 		},
 	}
-	directReader := fake.NewClientBuilder().
+	k8sClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.Run{}).
-		WithObjects(run.DeepCopy()).
+		WithObjects(run).
 		Build()
-	stale := run.DeepCopy()
-	stale.Status.Phase = v1alpha1.RunScheduled
 	c := &Controller{
-		Client:    staleRunGetClient{Client: directReader, stale: stale},
-		RunReader: directReader,
-		PodName:   "runtime-pod",
+		Client:     k8sClient,
+		PodName:    "runtime-pod",
+		runtimeCli: &fakeRuntimeClient{statusErr: status.Error(codes.NotFound, "execution not found")},
 	}
 	ar := newActiveRun(run, time.Now())
 	c.activeRuns.Store(string(run.UID), ar)
+	ar.finishExecutionStart(&executionStartFailure{
+		reason:  runretry.ReasonRuntimeExecute,
+		message: "runtime Execute: open artifact input \"missing.txt\": no such file",
+	})
 
-	c.applyStartExecutionFailure(t.Context(), ar, errors.New("open artifact input \"missing.txt\": no such file"))
+	if _, err := c.reconcileRunningActive(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileRunningActive: %v", err)
+	}
 
 	var updated v1alpha1.Run
-	if err := directReader.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
 		t.Fatalf("get updated Run: %v", err)
 	}
 	if updated.Status.Phase != v1alpha1.RunFailed {
@@ -718,6 +751,8 @@ func TestApplyStartExecutionFailureUsesDirectRunReader(t *testing.T) {
 	}
 }
 
+// staleRunGetClient proves status transitions use the Run object supplied to
+// Reconcile rather than fetching around the controller cache.
 type staleRunGetClient struct {
 	client.Client
 	stale *v1alpha1.Run

@@ -291,7 +291,6 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	if err := prepareSource(ar); err != nil {
 		return c.applyFailure(ctx, ar, runretry.ReasonPrepareSource, fmt.Sprintf("prepare source: %v", err))
 	}
-	c.startExecutionAsync(ar)
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
 
@@ -574,25 +573,39 @@ func (c *Controller) reconcileRunningActive(ctx context.Context, ar *activeRun) 
 	if !ar.deadline.IsZero() && time.Now().After(ar.deadline) {
 		return c.handleTimeout(ctx, ar)
 	}
-	if !ar.started.Load() {
-		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
-	}
 
 	resp, err := c.pollStatus(ctx, string(ar.run.UID))
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
+			if !ar.started.Load() {
+				if failure := ar.consumeExecutionStartFailure(); failure != nil {
+					return c.applyFailure(ctx, ar, failure.reason, failure.message)
+				}
+				if ar.executionStartInFlight() {
+					return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+				}
+				c.startExecutionAsync(ar)
+				return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+			}
 			return c.applyFailure(ctx, ar, runretry.ReasonExecutionLost, "runtime execution not found")
 		}
 		return ctrl.Result{}, fmt.Errorf("runtime Status: %w", err)
 	}
 
 	switch resp.State {
+	case pb.ExecutionState_EXECUTION_STATE_PENDING, pb.ExecutionState_EXECUTION_STATE_RUNNING:
+		if ar.started.CompareAndSwap(false, true) && c.rleg != nil {
+			c.rleg.AddRun(ar.run)
+		}
 	case pb.ExecutionState_EXECUTION_STATE_SUCCEEDED:
 		return c.applySuccess(ctx, ar, resp)
 	case pb.ExecutionState_EXECUTION_STATE_FAILED:
 		reason := classifyFailureReason(resp, nil)
 		msg := summarizeRuntimeFailure(resp)
 		return c.applyFailureWithOutput(ctx, ar, reason, msg, outputFromStatus(resp))
+	default:
+		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute,
+			fmt.Sprintf("runtime Status returned unsupported execution state %s", resp.State))
 	}
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
@@ -636,12 +649,12 @@ func (c *Controller) reconcileRetryBackoff(ctx context.Context, ar *activeRun) (
 	if err := c.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The previous attempt's Runtime execution was forgotten when its retry was
+	// scheduled. Its local observation must not turn the next NotFound into an
+	// ExecutionLost failure.
+	ar.started.Store(false)
 	c.recordEvent(run, corev1.EventTypeNormal, "RunRetrying",
 		"Retry attempt %d/%d starting", run.Status.Attempt+1, policy.MaxAttempts)
-	if run.Spec.Mode.Session != nil {
-		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
-	}
-	c.startExecutionAsync(ar)
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 }
 
@@ -755,6 +768,12 @@ func (c *Controller) scheduleRetry(ctx context.Context, ar *activeRun, curAttemp
 
 	if c.rleg != nil {
 		c.rleg.RemoveRun(string(run.UID))
+	}
+	// Runtime Servers retain terminal executions by Run UID. Forget the failed
+	// task before its next Running reconciliation so that Status can distinguish
+	// a new attempt (NotFound) from the previous attempt's terminal result.
+	if run.Spec.Mode.Session == nil {
+		c.releaseExecution(ctx, string(run.UID))
 	}
 	runRetries.WithLabelValues(run.Spec.Runtime, reason).Inc()
 	c.recordEvent(run, corev1.EventTypeWarning, "RunFailedRetrying",
@@ -870,52 +889,30 @@ func (c *Controller) releaseExecution(ctx context.Context, uid string) {
 // ===========================================================================
 
 func (c *Controller) startExecutionAsync(ar *activeRun) {
-	ar.started.Store(false)
+	if !ar.beginExecutionStart() {
+		return
+	}
 	go func() {
 		ctx := context.Background()
 		if err := c.startExecution(ctx, ar); err != nil {
-			c.applyStartExecutionFailure(ctx, ar, err)
+			ar.finishExecutionStart(&executionStartFailure{
+				reason:  runretry.ReasonRuntimeExecute,
+				message: fmt.Sprintf("runtime Execute: %v", err),
+			})
+			c.Log.Error(err, "failed to start runtime execution", "run", client.ObjectKeyFromObject(ar.run))
+			c.recordEvent(ar.run, corev1.EventTypeWarning, "RunExecutionStartFailed", "runtime Execute: %v", err)
+			c.enqueueRun(ar.run)
 			return
 		}
 		uid := string(ar.run.UID)
 		if val, ok := c.activeRuns.Load(uid); !ok || val != ar {
+			ar.finishExecutionStart(nil)
 			c.releaseExecution(ctx, uid)
 			return
 		}
-		ar.started.Store(true)
-		if c.rleg != nil {
-			c.rleg.AddRun(ar.run)
-		}
+		ar.finishExecutionStart(nil)
+		c.enqueueRun(ar.run)
 	}()
-}
-
-func (c *Controller) applyStartExecutionFailure(ctx context.Context, ar *activeRun, startErr error) {
-	uid := string(ar.run.UID)
-	if val, ok := c.activeRuns.Load(uid); !ok || val != ar {
-		return
-	}
-	var run v1alpha1.Run
-	if err := c.getRunDirectly(ctx, client.ObjectKeyFromObject(ar.run), &run); err != nil {
-		c.Log.Error(err, "failed to get Run after runtime Execute error", "run", client.ObjectKeyFromObject(ar.run))
-		return
-	}
-	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
-		return
-	}
-	ar.run = &run
-	if _, err := c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, fmt.Sprintf("runtime Execute: %v", startErr)); err != nil {
-		c.Log.Error(err, "failed to mark Run failed after runtime Execute error", "run", client.ObjectKeyFromObject(ar.run))
-	}
-}
-
-// getRunDirectly avoids reading a stale Run cache after an asynchronous local
-// operation fails immediately after runtimed updates its status.
-func (c *Controller) getRunDirectly(ctx context.Context, key client.ObjectKey, run *v1alpha1.Run) error {
-	reader := c.RunReader
-	if reader == nil {
-		reader = c.Client
-	}
-	return reader.Get(ctx, key, run)
 }
 
 func (c *Controller) startExecution(ctx context.Context, ar *activeRun) error {

@@ -27,11 +27,55 @@ type activeRun struct {
 	start                  time.Time
 	started                atomic.Bool
 	prepared               atomic.Bool
+	executionStartMu       sync.Mutex
+	executionStart         *executionStartFailure
+	executionStarting      bool
 	sessionRegistrationMu  sync.Mutex
 	sessionRegistration    *sessionRegistrationFailure
 	sessionRegistering     bool
 	sessionCloseMu         sync.Mutex
 	sessionClosed          atomic.Bool
+}
+
+// executionStartFailure is recorded by the asynchronous local execution
+// startup. Reconcile consumes it and applies the normal Run retry semantics;
+// the goroutine itself never mutates Kubernetes status.
+type executionStartFailure struct {
+	reason  string
+	message string
+}
+
+func (ar *activeRun) beginExecutionStart() bool {
+	ar.executionStartMu.Lock()
+	defer ar.executionStartMu.Unlock()
+	if ar.executionStarting {
+		return false
+	}
+	ar.executionStarting = true
+	ar.executionStart = nil
+	ar.started.Store(false)
+	return true
+}
+
+func (ar *activeRun) finishExecutionStart(failure *executionStartFailure) {
+	ar.executionStartMu.Lock()
+	defer ar.executionStartMu.Unlock()
+	ar.executionStarting = false
+	ar.executionStart = failure
+}
+
+func (ar *activeRun) executionStartInFlight() bool {
+	ar.executionStartMu.Lock()
+	defer ar.executionStartMu.Unlock()
+	return ar.executionStarting
+}
+
+func (ar *activeRun) consumeExecutionStartFailure() *executionStartFailure {
+	ar.executionStartMu.Lock()
+	defer ar.executionStartMu.Unlock()
+	failure := ar.executionStart
+	ar.executionStart = nil
+	return failure
 }
 
 // sessionRegistrationFailure is recorded by the asynchronous local

@@ -22,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -284,7 +285,7 @@ func waitForRuntimePod(t *testing.T, name, runtimeImage, daemonImage string, run
 		)
 		if err == nil {
 			for _, pod := range pods.Items {
-				if isRuntimePodReady(&pod, runtimeImage, daemonImage, runsCapacity) {
+				if isRuntimePodReady(&pod, runtimeImage, daemonImage, runsCapacity) && runtimeServiceHasReadyEndpoint(ctx, name) {
 					return
 				}
 			}
@@ -299,6 +300,27 @@ func waitForRuntimePod(t *testing.T, name, runtimeImage, daemonImage string, run
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// runtimeServiceHasReadyEndpoint verifies that the Runtime Service can route
+// gateway requests to a ready runtimed Pod. Pod readiness alone does not prove
+// that the EndpointSlice controller has published the Service endpoint yet.
+func runtimeServiceHasReadyEndpoint(ctx context.Context, runtimeName string) bool {
+	var slices discoveryv1.EndpointSliceList
+	if err := k8sClient.List(ctx, &slices,
+		client.InNamespace(testNamespace),
+		client.MatchingLabels{discoveryv1.LabelServiceName: "runtime-" + runtimeName},
+	); err != nil {
+		return false
+	}
+	for _, slice := range slices.Items {
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func dumpRuntimeDiagnostics(t *testing.T, name, runtimeImage, daemonImage string, runsCapacity int32, lastErr error) {
