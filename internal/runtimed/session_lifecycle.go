@@ -130,6 +130,9 @@ func (c *Controller) reconcileSessionRegistration(ctx context.Context, ar *activ
 	case pb.SessionState_SESSION_STATE_READY:
 		return c.applySessionReady(ctx, ar)
 	case pb.SessionState_SESSION_STATE_REGISTERING:
+		// TODO: Support Runtime Server-side asynchronous session registration.
+		// Current built-in Runtime Servers register synchronously and return
+		// READY; this state is reserved for a future versioned contract.
 		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	case pb.SessionState_SESSION_STATE_CLOSING, pb.SessionState_SESSION_STATE_CLOSED, pb.SessionState_SESSION_STATE_FAILED, pb.SessionState_SESSION_STATE_UNSPECIFIED:
 		return c.applyFailure(ctx, ar, runretry.ReasonSessionRegister, fmt.Sprintf("Runtime Server session is %s", response.GetState()))
