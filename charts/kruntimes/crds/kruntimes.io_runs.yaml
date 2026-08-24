@@ -513,10 +513,6 @@ spec:
                       size(segment) == 0 || segment == ''.'' || segment == ''..'')'
                 maxItems: 32
                 type: array
-              cancelRequested:
-                description: CancelRequested is set to true to request cancellation
-                  of a running Run.
-                type: boolean
               env:
                 description: Env is the list of environment variables to set for execution.
                 items:
@@ -696,6 +692,30 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  session:
+                    description: Session configures a stateful agent sandbox session.
+                    properties:
+                      idleTimeoutSeconds:
+                        description: |-
+                          IdleTimeoutSeconds is the duration after the last accepted command or file
+                          mutation before the session is closed.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      operationTimeout:
+                        description: |-
+                          OperationTimeout limits one command or file-mutation operation. runtimed
+                          rejects values above its administrator-configured maximum.
+                        type: string
+                      queueSize:
+                        description: |-
+                          QueueSize limits queued command and file-mutation operations for this
+                          session. runtimed also applies its administrator-configured global limit.
+                        format: int32
+                        maximum: 32
+                        minimum: 1
+                        type: integer
+                    type: object
                   task:
                     description: Task configures one-shot process execution.
                     properties:
@@ -718,8 +738,10 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: exactly one of task or function must be set
-                  rule: has(self.task) != has(self.function)
+                - message: exactly one of task, function, or session must be set
+                  rule: (has(self.task) && !has(self.function) && !has(self.session))
+                    || (!has(self.task) && has(self.function) && !has(self.session))
+                    || (!has(self.task) && !has(self.function) && has(self.session))
               resources:
                 description: |-
                   Resources declares logical Runtime capacity reserved by this Run.
@@ -787,9 +809,9 @@ spec:
                     type: string
                   inline:
                     description: |-
-                      Inline is a standalone script. In task mode, runtimed writes it to the
-                      default script file and does not pass Entrypoint or Args to the Runtime
-                      Server. In function mode, InlinePath identifies the file to materialize.
+                      Inline is a standalone script. In task and session modes, runtimed writes
+                      it to the default script file. In function mode, InlinePath identifies the
+                      file to materialize.
                       Mutually exclusive with RepoURL.
                       256 KiB keeps simple scripts well below the Kubernetes object size limit.
                     maxLength: 262144
@@ -820,6 +842,22 @@ spec:
                   rule: '!has(self.inlinePath) || (!self.inlinePath.startsWith(''/'')
                     && !self.inlinePath.split(''/'').exists(segment, size(segment)
                     == 0 || segment == ''.'' || segment == ''..''))'
+              termination:
+                description: |-
+                  Termination requests an irreversible termination transition. Immediate is
+                  valid for every Run mode; Drain is valid only for Session Runs and may be
+                  escalated to Immediate.
+                properties:
+                  mode:
+                    description: Mode selects immediate cancellation or Session-specific
+                      graceful drain.
+                    enum:
+                    - Immediate
+                    - Drain
+                    type: string
+                required:
+                - mode
+                type: object
               timeout:
                 description: |-
                   Timeout is the maximum duration the run is allowed to run.
@@ -877,6 +915,11 @@ spec:
             - message: function mode inline source requires source.inlinePath
               rule: '!has(self.mode.function) || !has(self.source) || !has(self.source.inline)
                 || has(self.source.inlinePath)'
+            - message: session mode does not support spec.workspace
+              rule: '!has(self.mode.session) || !has(self.workspace)'
+            - message: termination.mode Drain is only valid for session mode
+              rule: '!has(self.termination) || self.termination.mode != ''Drain''
+                || has(self.mode.session)'
             - message: runtime, source, mode, artifactInputs, env, timeout, retryPolicy,
                 and resources are immutable after Run creation
               rule: self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source)
@@ -893,9 +936,11 @@ spec:
               rule: has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace)
                 || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity)
                 && (!has(self.affinity) || self.affinity == oldSelf.affinity)
-            - message: cancelRequested may not transition from true to false
-              rule: '!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested ||
-                (has(self.cancelRequested) && self.cancelRequested)'
+            - message: termination may not be removed, downgraded, or changed except
+                from Drain to Immediate
+              rule: '!has(oldSelf.termination) || (has(self.termination) && (self.termination
+                == oldSelf.termination || (oldSelf.termination.mode == ''Drain'' &&
+                self.termination.mode == ''Immediate'')))'
           status:
             description: RunStatus defines the observed state of Run.
             properties:
@@ -1163,8 +1208,8 @@ spec:
                 x-kubernetes-list-type: map
               endpoint:
                 description: |-
-                  Endpoint is the stable gateway endpoint for a ready function Run.
-                  It is absent for one-shot task Runs.
+                  Endpoint is the stable gateway endpoint for a ready function or session
+                  Run. It is absent for one-shot task Runs.
                 properties:
                   caBundle:
                     description: |-
@@ -1176,6 +1221,7 @@ spec:
                   protocol:
                     description: Protocol identifies the endpoint protocol.
                     enum:
+                    - HTTP
                     - HTTPS
                     type: string
                   url:
@@ -1209,6 +1255,7 @@ spec:
                 - Scheduled
                 - Running
                 - Ready
+                - Finalizing
                 - Succeeded
                 - Failed
                 - Timeout

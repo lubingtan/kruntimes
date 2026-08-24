@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -53,7 +54,14 @@ func TestBuildDeploymentAddsCapacityAnnotationsAndWorkers(t *testing.T) {
 	if !slices.Contains(daemon.Args, "--runtime-name=bash") {
 		t.Fatalf("daemon args = %v, want runtime name", daemon.Args)
 	}
-	if len(daemon.Ports) != 1 || daemon.Ports[0].Name != "health" || daemon.Ports[0].ContainerPort != 9094 {
+	if !slices.ContainsFunc(daemon.Ports, func(port corev1.ContainerPort) bool {
+		return port.Name == "session-runtime" && port.ContainerPort == 9093 && port.Protocol == corev1.ProtocolTCP
+	}) {
+		t.Fatalf("daemon ports = %v, want session-runtime port 9093", daemon.Ports)
+	}
+	if !slices.ContainsFunc(daemon.Ports, func(port corev1.ContainerPort) bool {
+		return port.Name == "health" && port.ContainerPort == 9094 && port.Protocol == corev1.ProtocolTCP
+	}) {
 		t.Fatalf("daemon ports = %v, want health port 9094", daemon.Ports)
 	}
 	if daemon.LivenessProbe == nil ||
@@ -86,6 +94,105 @@ func TestBuildDeploymentAddsCapacityAnnotationsAndWorkers(t *testing.T) {
 		if container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != corev1.Capability("ALL") {
 			t.Fatalf("container %s capabilities = %#v, want drop ALL", container.Name, container.SecurityContext.Capabilities)
 		}
+	}
+}
+
+func TestBuildDeploymentPassesSessionAdministratorLimitsToRuntimed(t *testing.T) {
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "default"},
+		Spec:       v1alpha1.RuntimeSpec{Template: runtimePodTemplate("bash-runtime:latest")},
+	}
+	reconciler := &RuntimeReconciler{
+		SessionMaxQueueSize:        8,
+		SessionMaxOperationTimeout: 90 * time.Second,
+		SessionCloseTimeout:        12 * time.Second,
+	}
+	daemon := reconciler.buildDeployment(rt).Spec.Template.Spec.Containers[1]
+	for _, want := range []string{
+		"--session-max-queue-size=8",
+		"--session-max-operation-timeout=1m30s",
+		"--session-close-timeout=12s",
+	} {
+		if !slices.Contains(daemon.Args, want) {
+			t.Errorf("daemon args = %v, missing %q", daemon.Args, want)
+		}
+	}
+}
+
+func TestBuildServiceRoutesToRuntimeSessionPort(t *testing.T) {
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "workloads"},
+		Spec: v1alpha1.RuntimeSpec{
+			Template: runtimePodTemplate("python-runtime:latest"),
+		},
+	}
+
+	service := (&RuntimeReconciler{}).buildService(rt)
+	if service.Name != "runtime-python" || service.Namespace != "workloads" {
+		t.Fatalf("service metadata = %s/%s, want workloads/runtime-python", service.Namespace, service.Name)
+	}
+	wantSelector := map[string]string{runtimeLabel: "python", "app": "kruntimes-python"}
+	if !maps.Equal(service.Spec.Selector, wantSelector) {
+		t.Fatalf("service selector = %v, want %v", service.Spec.Selector, wantSelector)
+	}
+	if service.Spec.Type != corev1.ServiceTypeClusterIP || len(service.Spec.Ports) != 1 {
+		t.Fatalf("service spec = %#v, want one ClusterIP port", service.Spec)
+	}
+	port := service.Spec.Ports[0]
+	if port.Name != "session-runtime" || port.Port != 9093 || port.TargetPort != intstr.FromString("session-runtime") || port.Protocol != corev1.ProtocolTCP {
+		t.Fatalf("service port = %#v, want session-runtime -> 9093", port)
+	}
+}
+
+func TestReconcileServicePreservesClusterIP(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "default", UID: "runtime-uid"},
+		Spec:       v1alpha1.RuntimeSpec{Template: runtimePodTemplate("bash-runtime:latest")},
+	}
+	reconciler := &RuntimeReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(rt).Build(),
+		Scheme: scheme,
+	}
+
+	desired := reconciler.buildService(rt)
+	changed, err := reconciler.reconcileService(t.Context(), rt, desired)
+	if err != nil || !changed {
+		t.Fatalf("create service = (%v, %v), want (true, nil)", changed, err)
+	}
+
+	var existing corev1.Service
+	key := client.ObjectKeyFromObject(desired)
+	if err := reconciler.Get(t.Context(), key, &existing); err != nil {
+		t.Fatal(err)
+	}
+	existing.Spec.ClusterIP = "10.0.0.42"
+	if err := reconciler.Update(t.Context(), &existing); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err = reconciler.reconcileService(t.Context(), rt, reconciler.buildService(rt))
+	if err != nil || changed {
+		t.Fatalf("reconcile unchanged service = (%v, %v), want (false, nil)", changed, err)
+	}
+
+	updated := reconciler.buildService(rt)
+	updated.Spec.Ports[0].Port = 9443
+	changed, err = reconciler.reconcileService(t.Context(), rt, updated)
+	if err != nil || !changed {
+		t.Fatalf("update service = (%v, %v), want (true, nil)", changed, err)
+	}
+	if err := reconciler.Get(t.Context(), key, &existing); err != nil {
+		t.Fatal(err)
+	}
+	if existing.Spec.ClusterIP != "10.0.0.42" || existing.Spec.Ports[0].Port != 9443 {
+		t.Fatalf("service = %#v, want preserved ClusterIP and updated port", existing.Spec)
 	}
 }
 
@@ -467,6 +574,38 @@ func TestBuildNetworkPolicyDeniesRuntimePodIngressByDefault(t *testing.T) {
 	}
 	if networkPolicy.Spec.PodSelector.MatchLabels["app"] != "kruntimes-bash" {
 		t.Fatalf("networkPolicy selector = %v, want app=kruntimes-bash", networkPolicy.Spec.PodSelector.MatchLabels)
+	}
+}
+
+func TestBuildNetworkPolicyAllowsSessionGatewayAndRuntimePeers(t *testing.T) {
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "workloads"},
+		Spec:       v1alpha1.RuntimeSpec{Template: runtimePodTemplate("bash-runtime:latest")},
+	}
+	networkPolicy := (&RuntimeReconciler{
+		GatewayNamespace: "platform",
+		GatewaySelectorLabels: map[string]string{
+			"app.kubernetes.io/instance":  "kruntimes",
+			"app.kubernetes.io/component": "runtime-gateway",
+		},
+	}).buildNetworkPolicy(rt)
+	if len(networkPolicy.Spec.Ingress) != 2 {
+		t.Fatalf("ingress rules = %v, want Runtime peer and gateway rules", networkPolicy.Spec.Ingress)
+	}
+	if got := networkPolicy.Spec.Ingress[0].From[0].PodSelector.MatchLabels; !maps.Equal(got, map[string]string{runtimeLabel: "bash", "app": "kruntimes-bash"}) {
+		t.Fatalf("Runtime peer selector = %v", got)
+	}
+	gateway := networkPolicy.Spec.Ingress[1].From[0]
+	if gateway.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "platform" {
+		t.Fatalf("gateway namespace selector = %v", gateway.NamespaceSelector)
+	}
+	if !maps.Equal(gateway.PodSelector.MatchLabels, map[string]string{"app.kubernetes.io/instance": "kruntimes", "app.kubernetes.io/component": "runtime-gateway"}) {
+		t.Fatalf("gateway Pod selector = %v", gateway.PodSelector)
+	}
+	for _, rule := range networkPolicy.Spec.Ingress {
+		if len(rule.Ports) != 1 || rule.Ports[0].Port == nil || rule.Ports[0].Port.IntValue() != 9093 {
+			t.Fatalf("ingress ports = %v, want TCP/9093", rule.Ports)
+		}
 	}
 }
 

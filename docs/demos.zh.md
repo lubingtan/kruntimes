@@ -281,6 +281,16 @@ krt logs custom-runtime-demo -n kruntimes-demo
 你需要的执行语义时，再选择这种方式。协议约定见
 [自定义 Runtime 开发](custom-runtime.md)。
 
+## Demo 4：Kubernetes Diagnosis Agent 预览
+
+[Kubernetes Diagnosis Agent](../demo/kubernetes-diagnosis-agent/README.md)
+使用 OpenAI 工具调用和一个 Session-mode Run。它演示多步命令、workspace 中的证据文件、
+最终报告、结构化日志和显式 session 清理。
+
+该示例刻意使用带 namespace-scoped read-only Kubernetes RBAC 的 custom Python Runtime。它是
+trusted-workload preview，不是运行不可信模型生成代码的 sandbox。完整的 setup 和安全约束见
+示例 README。
+
 ## 清理
 
 ```bash

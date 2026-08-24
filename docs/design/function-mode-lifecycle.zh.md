@@ -57,7 +57,10 @@ Function-mode status 增加一个稳定 endpoint reference：
 ```go
 type RunEndpointProtocol string
 
-const RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
+const (
+    RunEndpointProtocolHTTP  RunEndpointProtocol = "HTTP"
+    RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
+)
 
 type RunEndpoint struct {
     Protocol RunEndpointProtocol `json:"protocol"`
@@ -89,7 +92,7 @@ status:
   assignedPod: runtime-python-7f587b4668-njcks
   endpoint:
     protocol: HTTPS
-    url: https://python-gateway.kruntimes-demo.svc.cluster.local/v1/namespaces/kruntimes-demo/runs/kube-diagnose-agent/2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6/invoke
+    url: https://runtime-gateway.kruntimes-system.svc.cluster.local/v1/namespaces/kruntimes-demo/runtimes/python/runs/2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6:invoke
     caBundle: <base64-encoded-PEM>
   conditions:
     - type: Ready
@@ -191,19 +194,26 @@ controllers 与 policies 负责；function finalizer 不得隐式删除 shared p
 Cancellation 保留 Run object 并记录 terminal status。Deletion 是独立的 user request，使用
 finalizer path。两种操作在 controller 和 runtimed restart 后都必须保持幂等。
 
-## Runtime Gateway Service
+## Runtime Gateway
 
-Runtime controller 为每个 Runtime 创建一个 ClusterIP gateway Service。Service 由 Runtime
-owner，并通过专用 runtimed gateway port 选择该 pool 中所有 ready Runtime Pods。Controller
-同时管理 Runtime-scoped CA 和只挂载到 runtimed 的 serving certificate Secret。Certificate
-覆盖 gateway Service DNS name。Rotation 会先发布同时包含 old/new CA 的 bundle，再替换
-serving certificates，并在所有 Runtime Pods 完成 rollout 后删除 retired CA。
+Helm chart 可选安装一个面向所有 Runtime 的共享 `runtime-gateway` Deployment 和 ClusterIP Service。
+`gateway.enabled` 控制是否安装。Deployment 运行 stateless HTTP gateway server。Service 只将 client
+traffic 转发给 gateway Pod，绝不直接转发到 Runtime Pod。gateway server 从 endpoint path 读取
+namespace、Runtime 和 Run UID，经该 Runtime 的 Kubernetes Service 调用其专用 gRPC port，并将 HTTP
+invoke request 转换为内部 runtimed gRPC request。
+
+Chart values 配置 replicas、RBAC 和挂载到 gateway Pod 的 serving certificate Secret。Certificate 覆盖
+共享 gateway Service DNS name。Certificate issuance 与 rotation 属于安装职责，例如使用 user-managed
+Secret 或 optional cert-manager chart resource；Runtime controller 不管理 gateway resource 或 certificate。
 
 ```text
-Runtime gateway Service
-  -> Runtime pool 中任意 runtimed
-     -> owning runtimed（直接到达或经过一次 peer proxy）
-        -> local Runtime Server
+client
+  -> shared runtime-gateway Service
+     -> runtime-gateway Pod
+        -> requested Runtime 的 Kubernetes Service
+           -> ready Runtime Pod 的 runtimed
+              -> owning runtimed（直接到达或经过一次 peer proxy）
+                 -> local Runtime Server
 ```
 
 每个 runtimed 为其 Runtime 和 namespace 中所有 assigned function Runs 维护 watch-backed
@@ -223,11 +233,9 @@ Pod。请求处理规则：
 - owner stale 或 unreachable：返回 `503 Service Unavailable` 并 enqueue recovery；
 - 达到 local concurrency limit：`429 Too Many Requests`。
 
-peer request 保留原 caller credential，并由 owner 再次 authorization。Peer connection 使用
-TLS 并验证相同 Runtime-scoped CA；连接 owning Pod address 时，client 使用 shared serving
-certificate 中的 gateway Service DNS name 完成校验。hop marker 防止 proxy loop。Service
-routing 和 cache recovery 必须容忍请求落到尚未通过 watch cache 观察到最新 assignment 的
-Pod。
+peer request 保留原 caller credential，并由 owner 再次 authorization。Peer connection 使用带
+workload identity 的 mTLS；hop marker 防止 proxy loop。Gateway selection 和 cache recovery 必须
+容忍请求到达尚未通过 watch cache 观察到最新 assignment 的 runtimed。
 
 ## Authentication 与 Authorization
 
@@ -309,7 +317,7 @@ function Run 只允许一个 in-flight invocation，并对 overlap request 返�
 
 | Component | Responsibility |
 | --- | --- |
-| Runtime controller | Reconcile Runtime-owned gateway Service 和 ports。 |
+| Helm chart | 可选安装 shared runtime-gateway Deployment、Service、RBAC 和 TLS configuration。 |
 | Scheduler | 分配通用 Run capacity；把 Ready 视为 active、non-terminal。 |
 | runtimed | Register/unregister、维护 lifecycle status 和 routing cache、authorize/proxy invokes、执行 local limits，并清理本地状态。 |
 | Runtime Server | 保存 registration/activity state、执行 invokes，并暴露幂等 local lifecycle APIs。 |
@@ -323,9 +331,9 @@ Runs，但只使用 public Run API。
 
 1. 增加 API prerequisites：`Ready`、assigned Pod UID、endpoint status、transition validation、
    finalizer constant、generated CRDs 和通用 phase-classification tests。
-2. 增加 Runtime gateway Service reconciliation 以及 Helm/RBAC coverage。
-3. 增加 Runtime-scoped gateway TLS certificate reconciliation、CA publication、rotation 和
-   pod rollout behavior。
+2. 为可选 shared runtime-gateway Deployment 和 Service 增加 Helm templates、values、RBAC 和
+   smoke coverage。
+3. 定义 chart-managed TLS configuration，包括 existing Secret 和 optional cert-manager integration。
 4. 增加 Runtime Server register/status/invoke/unregister protobuf APIs 和内置 Bash/Python
    adapters。
 5. 增加 runtimed registration lifecycle、finalization、shared retry integration、timeout handling

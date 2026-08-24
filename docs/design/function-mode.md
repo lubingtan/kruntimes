@@ -1,23 +1,21 @@
-# Function Mode and Agent Sandboxes
+# Function Mode
 
 This document describes a target v0.x design. It is not implemented yet.
 
-The goal is to let kruntimes serve as a low-latency sandbox execution substrate
-for agent platforms. An agent should be able to reserve a warm Runtime Pod,
-prepare a callable function or actor, invoke it many times through a dataplane
-API, and release it without putting every invocation through Kubernetes
-reconciliation.
+The goal is to let kruntimes expose low-latency fixed-handler invocations
+without putting every invocation through Kubernetes reconciliation. Mutable
+workspaces, arbitrary commands, and file operations belong to the separate
+[Session Mode for Agent Sandboxes](../session-mode/) design.
 
 ## Motivation
 
 One-shot Runs are useful for short tasks, CI steps, and automation commands.
-Agent workloads often need a different execution shape:
+Some workloads instead expose a stable operation through a fixed handler:
 
-- an LLM planner decides what task to run;
-- generated scripts or sub-agent tasks need an isolated execution environment;
-- multiple invocations should reuse the same prepared code, environment, and
-  workspace;
-- the invoke path must be fast enough for interactive agent loops;
+- a caller invokes the same handler repeatedly with different bounded inputs;
+- repeated invocations reuse prepared source and the Runtime Server's
+  registration state;
+- the invoke path must be fast enough for request-response use cases;
 - high-frequency invocations should not write unbounded history to etcd.
 
 Kubernetes remains the lifecycle control plane. The invoke path should be a
@@ -25,16 +23,14 @@ runtime dataplane path.
 
 ## Goals
 
-- Use `Run` as the lifecycle object for both one-shot tasks and function-mode
-  sandboxes.
+- Use `Run` as the lifecycle object for both one-shot tasks and fixed-handler
+  functions.
 - Add `Run.spec.mode.function` so a Run can reserve a Runtime Pod and stay
   callable until deletion or idle timeout.
 - Expose a stable runtime gateway endpoint from Run status.
 - Route invoke requests through runtimed to the Runtime Pod that owns the Run.
 - Keep scheduler and runtimed generic. They should not understand agent,
   workflow, or MCP semantics.
-- Provide SDKs so agent developers do not need to hand-roll Kubernetes watches,
-  gateway discovery, port-forwarding, cleanup, and error handling.
 
 ## Non-Goals
 
@@ -42,8 +38,8 @@ runtime dataplane path.
 - kruntimes does not own prompt management, model routing, memory, tool
   catalogs, or multi-agent planning.
 - Function mode is not a replacement for Workflow APIs.
-- Function mode does not make built-in runtimes hostile-code sandboxes by
-  default. Stronger isolation remains a separate runtime and deployment choice.
+- Function mode does not provide an arbitrary-command sandbox, mutable
+  workspace API, or file API.
 
 ## Proposed Run Model
 
@@ -99,7 +95,7 @@ similar to AWS Lambda's `filename.function` convention:
 apiVersion: kruntimes.io/v1alpha1
 kind: Run
 metadata:
-  name: kube-diagnose-agent
+  name: diagnose-service
 spec:
   runtime: python
   source:
@@ -126,7 +122,7 @@ status:
   assignedPod: runtime-python-7f587b4668-njcks
   endpoint:
     protocol: HTTPS
-    url: https://python-gateway.kruntimes-demo.svc.cluster.local/v1/namespaces/kruntimes-demo/runs/kube-diagnose-agent/2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6/invoke
+    url: https://runtime-gateway.kruntimes-system.svc.cluster.local/v1/namespaces/kruntimes-demo/runtimes/python/runs/2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6:invoke
     caBundle: <base64-encoded-PEM>
   conditions:
     - type: Ready
@@ -148,32 +144,10 @@ can own more than one function-mode Run when the Runtime capacity allows it. For
 example, a Runtime with `runs: "2"` can register two ready function-mode Runs on
 the same Runtime Pod.
 
-This is important for keeping the scheduler generic. Function mode should not
-imply Pod exclusivity. The scheduler only decides whether a Runtime Pod has
-capacity for another Run; it does not know whether that Run represents an agent
-sandbox, an internal tool, or another product-level concept.
-
-Agent sandbox use cases are different. They often expect strong workspace
-ownership, predictable cleanup, and fewer surprising cross-run interactions. For
-that case, the recommended deployment shape is one function-mode Run per
-Runtime Pod:
-
-```yaml
-apiVersion: kruntimes.io/v1alpha1
-kind: Runtime
-metadata:
-  name: python-agent-sandbox
-spec:
-  capacity:
-    resources:
-      runs: "1"
-```
-
-SDKs can provide guardrails for this recommendation. For example, an agent
-sandbox SDK may warn when the target Runtime has capacity greater than one, or
-offer a helper that creates or selects a dedicated Runtime configured with
-`runs: "1"`. The guardrail should live in the SDK or higher-level integration;
-the scheduler should continue to enforce only the generic capacity contract.
+This keeps the scheduler generic. Function mode does not imply Pod exclusivity:
+the scheduler only decides whether a Runtime Pod has capacity for another Run.
+Session Mode, in contrast, requires exclusive v0 capacity because it owns a
+mutable workspace.
 
 ## Handler Field Placement
 
@@ -212,18 +186,25 @@ function mode keeps `handler` under `mode.function`.
 The detailed gateway routing and authorization contract is defined in
 [Function Mode Lifecycle and Invoke Dataplane](../function-mode-lifecycle/).
 
-Each Runtime should get a gateway Service:
+All Runtimes share one `runtime-gateway` Deployment and its ClusterIP Service.
+The Helm chart installs them when `gateway.enabled` is true. The gateway
+Deployment runs stateless HTTP servers. A Run endpoint identifies the namespace,
+Runtime, and Run UID; the gateway calls the Kubernetes Service for that Runtime,
+which selects a ready Runtime Pod before runtimed resolves the owner:
 
 ```text
-python-runtime-gateway Service
-  -> Runtime Pods for Runtime=python
-     -> runtimed sidecar
-        -> local Runtime Server
+client
+  -> shared runtime-gateway Service
+     -> runtime-gateway Pod
+        -> Kubernetes Service for Runtime=python
+           -> ready Runtime Pod's runtimed
+              -> owning runtimed when different
+                 -> local Runtime Server
 ```
 
-The Service address is stable. Kubernetes Service load balancing can send an
-invoke request to any runtimed in that Runtime pool, so each runtimed needs an
-ownership cache:
+The gateway Service address is stable. Each Runtime controller-created Service
+selects its ready Pods, and each runtimed resolves ownership only for Runs of
+its own Runtime:
 
 ```text
 Run namespace/name/UID -> assigned Runtime Pod UID -> attempt -> readiness
@@ -270,132 +251,6 @@ High-frequency invocation history should not be written to `Run.status` by
 default. Persisted history can be added later through explicit audit sinks,
 metrics, logs, or artifact metadata.
 
-## Agent SDKs
-
-Agent developers should not need to assemble this flow manually. The first SDKs
-should target Python and Go.
-
-The SDK should expose sandbox semantics, even though the kruntimes control-plane
-object underneath is a function-mode Run. This matches the developer model used
-by projects such as Kubernetes SIG Apps agent-sandbox: callers create or attach
-to a sandbox, run commands or invoke tools, transfer files, disconnect when they
-want to preserve the session, and terminate when they want cleanup.
-
-An SDK should provide a sandbox-facing API:
-
-- create, open, reattach to, disconnect from, and terminate a sandbox session;
-- hide the function-mode Run object unless the caller asks for low-level
-  Kubernetes metadata;
-- wait for the underlying Run to become `Ready`;
-- discover the runtime gateway endpoint;
-- optionally verify that the selected agent-sandbox Runtime is configured for
-  one Run per Runtime Pod;
-- use direct in-cluster URLs when running inside Kubernetes;
-- fall back to port-forwarding for local development;
-- invoke tools or run commands with typed request and response objects;
-- expose file operations as sandbox operations, for example write, read, list,
-  and exists;
-- read outputs, artifacts, and logs through sandbox methods;
-- apply timeouts and retries for idempotent operations;
-- reconnect after local network interruption;
-- clean up the underlying function-mode Run by default, with explicit options to
-  preserve, disconnect, or reattach.
-
-Example shape:
-
-```python
-from kruntimes import SandboxClient
-
-client = SandboxClient(namespace="kruntimes-demo")
-
-with client.create_sandbox(
-    name="kube-diagnose-agent",
-    runtime="python",
-    source_file="agent_tool.py",
-    idle_timeout_seconds=600,
-) as sandbox:
-    sandbox.files.write("request.json", b'{"namespace":"default"}')
-
-    result = sandbox.commands.run({
-        "task": "diagnose-kubernetes",
-        "clusterSnapshot": {
-            "namespace": "default",
-            "pods": []
-        },
-    })
-
-    report = sandbox.files.read("report.md")
-    print(result.outputs["summary"])
-```
-
-The SDK API can use `Sandbox` as a developer-facing concept without introducing
-a Kubernetes `Sandbox` CRD. A sandbox handle maps to a function-mode Run plus
-gateway connection state, file/log/artifact helpers, and lifecycle cleanup.
-
-Recommended SDK objects:
-
-- `SandboxClient`: owns Kubernetes client configuration, gateway discovery, and
-  tracked sandbox sessions.
-- `Sandbox`: represents one opened sandbox handle and exposes lifecycle,
-  command/tool, file, log, artifact, and identity helpers.
-- `Commands` or `Tools`: executes a command or structured tool request inside
-  the sandbox.
-- `Files`: uploads, downloads, lists, and checks workspace files.
-- `Info`: read-only identity metadata such as Run name, Run UID, namespace,
-  Runtime, assigned Pod, gateway URL, and readiness.
-
-The SDK should support at least three connection modes:
-
-- gateway mode for production traffic through the runtime gateway Service or an
-  external Gateway;
-- local port-forward mode for development and CI, without requiring users to
-  call `kubectl port-forward` manually;
-- direct URL mode for in-cluster agents or custom domains.
-
-Retry behavior should distinguish idempotent operations from execution. File
-read/write/list/exists and readiness checks can retry on transient transport
-errors. Tool or command execution should default to one attempt unless the caller
-opts in, because arbitrary execution may not be idempotent.
-
-Typed errors should make recovery explicit, for example not ready, timeout,
-gateway unavailable, port-forward died, sandbox deleted, orphaned Run,
-retries exhausted, and non-OK invoke response.
-
-## Workspace, Files, Logs, and Artifacts
-
-Agent tasks commonly need to upload generated scripts, inspect files, and fetch
-reports. Those operations should not become Kubernetes reconciliation loops.
-
-Required APIs:
-
-- upload file or directory into the function workspace;
-- list and read workspace files;
-- stream logs for the function Run and individual invokes;
-- publish artifacts through the configured ArtifactStore;
-- return artifact references from invoke responses;
-- clean workspace state on deletion or idle timeout.
-
-For v0.x, workspace operations can be limited to trusted agent integrations.
-Multi-tenant production use needs clear RBAC, network policy, and runtime
-isolation guidance.
-
-## Integration Boundary
-
-Agent frameworks and MCP-style tool servers can integrate with kruntimes by
-mapping a tool call to a function-mode Run:
-
-```text
-Agent / MCP tool server
-  -> kruntimes SDK
-     -> Run lifecycle through Kubernetes API
-     -> invoke through runtime gateway
-     -> structured result back to agent
-```
-
-kruntimes should not require an agent framework to adopt kruntimes-specific
-planning concepts. The integration boundary is a sandbox handle plus invoke
-API.
-
 ## Reliability and Security Requirements
 
 Function mode needs E2E coverage for:
@@ -403,18 +258,13 @@ Function mode needs E2E coverage for:
 - function registration and ready status;
 - local invoke and proxied invoke;
 - repeated invocation;
-- artifact reuse;
 - idle timeout;
 - explicit release;
 - runtime pod restart recovery;
 - cleanup;
-- service account selection;
-- runtime pod security context;
-- resource limits;
-- network policy guidance.
 
-Future stronger runtime backends such as gVisor, Kata, or Firecracker should
-fit behind the same Runtime abstraction.
+Function invocation remains a bounded request-response API. It does not persist
+arbitrary command history or workspace contents in `Run.status`.
 
 ## Implementation Sequence
 
@@ -423,10 +273,10 @@ fit behind the same Runtime abstraction.
 2. Remove top-level `Run.spec.handler`, `Run.spec.entrypoint`, and
    `Run.spec.args`; use `Run.spec.mode.function.handler` and
    `Run.spec.mode.task` instead.
-3. Add runtime gateway Service reconciliation for each Runtime.
+3. Add Helm templates and values for the optional shared runtime-gateway
+   Deployment and Service.
 4. Add runtimed ownership cache and invoke routing.
 5. Add Runtime Server register, invoke, unregister, and status APIs.
 6. Implement built-in Bash/Python function-mode adapters.
-7. Add `krt invoke` and the first SDK shape.
+7. Add `krt invoke`.
 8. Add E2E tests covering ready, invoke, proxy, cleanup, and restart recovery.
-9. Update the agent demo from a target design to a supported path.

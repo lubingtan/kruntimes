@@ -2,8 +2,10 @@
 IMG_SCHEDULER ?= kruntimes-scheduler:latest
 IMG_CONTROLLER ?= kruntimes-controller:latest
 IMG_RUNTIMED ?= kruntimes-runtimed:latest
+IMG_GATEWAY ?= kruntimes-gateway:latest
 IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:latest
 IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:latest
+IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:latest
 
 # ENVTEST_K8S_VERSION refers to the version of k8s to use for envtest
 ENVTEST_K8S_VERSION = 1.32
@@ -14,6 +16,7 @@ CONTROLLER_GEN_VERSION ?= v0.17.3
 SETUP_ENVTEST_VERSION ?= v0.24.1
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GOVULNCHECK_VERSION ?= v1.5.0
+GITLEAKS_VERSION ?= v8.30.1
 PROTOC_VERSION ?= 29.3
 PROTOC_ARCH ?= linux-x86_64
 PROTOC_GEN_GO_VERSION ?= v1.36.11
@@ -77,7 +80,20 @@ test: generate manifests proto fmt vet ## Run unit tests.
 .PHONY: test-integration
 test-integration: generate manifests setup-envtest ## Run integration tests (requires envtest).
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	go test ./test/integration/... -v -count=1 -failfast
+	go test ./test/integration/... -v -count=1 -failfast $(if $(INTEGRATION_TEST),-run '$(INTEGRATION_TEST)')
+
+INTEGRATION_TEST ?=
+
+.PHONY: test-integration-run test-integration-test-required
+test-integration-test-required:
+	@test -n "$(INTEGRATION_TEST)" || { echo "INTEGRATION_TEST is required, for example: make test-integration-run INTEGRATION_TEST=TestSessionFilePaginationContract" >&2; exit 2; }
+
+test-integration-run: test-integration-test-required test-integration ## Run one envtest integration test selected by INTEGRATION_TEST.
+
+.PHONY: test-sdk-python
+test-sdk-python: ## Run Python Sandbox SDK and diagnosis agent unit tests.
+	PYTHONPATH=sdk/python/src python3 -m unittest discover -s sdk/python/tests -v
+	PYTHONPATH=sdk/python/src:demo/kubernetes-diagnosis-agent python3 -m unittest discover -s demo/kubernetes-diagnosis-agent/tests -v
 
 .PHONY: test-race
 test-race: generate manifests proto ## Run focused Go race-detector coverage for runtime and control-plane packages.
@@ -86,6 +102,11 @@ test-race: generate manifests proto ## Run focused Go race-detector coverage for
 .PHONY: govulncheck
 govulncheck: govulncheck-tool ## Run govulncheck against all Go packages.
 	$(GOVULNCHECK) ./...
+
+GITLEAKS = $(GOBIN)/gitleaks
+.PHONY: test-secrets
+test-secrets: gitleaks ## Scan Git history for secrets using the CI configuration.
+	$(GITLEAKS) git --redact --exit-code 1
 
 .PHONY: test-s3-integration
 test-s3-integration: ## Run S3 ArtifactStore integration tests against MinIO.
@@ -107,42 +128,59 @@ E2E_RUN_IMAGE_TAG ?= e2e-$(shell date +%Y%m%d%H%M%S)
 E2E_IMG_SCHEDULER ?= kruntimes-scheduler:$(E2E_IMAGE_TAG)
 E2E_IMG_CONTROLLER ?= kruntimes-controller:$(E2E_IMAGE_TAG)
 E2E_IMG_RUNTIMED ?= kruntimes-runtimed:$(E2E_IMAGE_TAG)
+E2E_IMG_GATEWAY ?= kruntimes-gateway:$(E2E_IMAGE_TAG)
 E2E_IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:$(E2E_IMAGE_TAG)
+E2E_IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:$(E2E_IMAGE_TAG)
+E2E_TEST ?=
 .PHONY: e2e-setup
 e2e-setup: IMG_SCHEDULER = $(E2E_IMG_SCHEDULER)
 e2e-setup: IMG_CONTROLLER = $(E2E_IMG_CONTROLLER)
 e2e-setup: IMG_RUNTIMED = $(E2E_IMG_RUNTIMED)
+e2e-setup: IMG_GATEWAY = $(E2E_IMG_GATEWAY)
 e2e-setup: IMG_BASH_RUNTIME = $(E2E_IMG_BASH_RUNTIME)
 e2e-setup: IMG_PYTHON_RUNTIME = $(E2E_IMG_PYTHON_RUNTIME)
-e2e-setup: manifests docker-build ## Create kind cluster, load images, and deploy chart.
+e2e-setup: IMG_DIAGNOSIS_RUNTIME = $(E2E_IMG_DIAGNOSIS_RUNTIME)
+e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind cluster, load images, and deploy chart.
 	kind get clusters | grep $(KIND_CLUSTER_NAME) || kind create cluster --name $(KIND_CLUSTER_NAME) --wait 120s
 	kind load docker-image $(E2E_IMG_SCHEDULER) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_CONTROLLER) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_RUNTIMED) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(E2E_IMG_GATEWAY) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_BASH_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_PYTHON_RUNTIME) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(E2E_IMG_DIAGNOSIS_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	# Server-side apply avoids copying large CRD schemas into the 256 KiB last-applied annotation.
 	kubectl apply --server-side --force-conflicts -f charts/kruntimes/crds
 	$(HELM) upgrade --install kruntimes ./charts/kruntimes \
 		--set scheduler.image=$(E2E_IMG_SCHEDULER) \
 		--set controller.image=$(E2E_IMG_CONTROLLER) \
 		--set runtimed.image=$(E2E_IMG_RUNTIMED) \
+		--set gateway.enabled=true \
+		--set gateway.image=$(E2E_IMG_GATEWAY) \
 		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s
 
 .PHONY: e2e-test
 e2e-test: generate ## Run E2E tests against the kind cluster.
 	KRUNTIMES_BASH_RUNTIME_IMAGE=$(E2E_IMG_BASH_RUNTIME) \
 	KRUNTIMES_PYTHON_RUNTIME_IMAGE=$(E2E_IMG_PYTHON_RUNTIME) \
+	KRUNTIMES_DIAGNOSIS_RUNTIME_IMAGE=$(E2E_IMG_DIAGNOSIS_RUNTIME) \
 	KRUNTIMES_RUNTIMED_IMAGE=$(E2E_IMG_RUNTIMED) \
-	go test ./test/e2e/... -v -count=1 -failfast
+	go test ./test/e2e/... -v -count=1 -failfast $(if $(E2E_TEST),-run '$(E2E_TEST)')
 
 .PHONY: e2e
 e2e: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
 e2e: e2e-setup e2e-test ## Full E2E: setup cluster, deploy, run tests.
 
+.PHONY: e2e-run e2e-test-required
+e2e-test-required:
+	@test -n "$(E2E_TEST)" || { echo "E2E_TEST is required, for example: make e2e-run E2E_TEST=TestSessionGatewayExecutesAuthorizedOperation" >&2; exit 2; }
+
+e2e-run: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
+e2e-run: e2e-test-required e2e-setup e2e-test ## Set up E2E and run the tests matching E2E_TEST.
+
 # Preserve setup-before-test ordering even when make is invoked with -j.
-.NOTPARALLEL: e2e-setup e2e
+.NOTPARALLEL: e2e-setup e2e e2e-run
 
 .PHONY: e2e-cleanup
 e2e-cleanup: ## Delete the kind cluster.
@@ -165,6 +203,7 @@ build: generate proto ## Build all binaries.
 	go build -o bin/scheduler ./cmd/scheduler
 	go build -o bin/runtimed ./cmd/runtimed
 	go build -o bin/controller ./cmd/controller
+	go build -o bin/runtime-gateway ./cmd/runtime-gateway
 	go build -o bin/krt ./cmd/krt
 	go build -o bin/bash-runtime ./runtimes/bash/cmd
 
@@ -199,7 +238,7 @@ run-runtimed: generate manifests proto ## Run runtimed locally (requires kubecon
 ##@ Docker
 
 .PHONY: docker-build
-docker-build: docker-build-scheduler docker-build-controller docker-build-runtimed docker-build-bash-runtime docker-build-python-runtime ## Build all Docker images.
+docker-build: docker-build-scheduler docker-build-controller docker-build-runtimed docker-build-gateway docker-build-bash-runtime docker-build-python-runtime ## Build all Docker images.
 
 .PHONY: docker-build-scheduler
 docker-build-scheduler: generate ## Build scheduler Docker image.
@@ -213,6 +252,10 @@ docker-build-controller: generate ## Build controller Docker image.
 docker-build-runtimed: generate proto ## Build runtimed Docker image.
 	$(CONTAINER_TOOL) build -t $(IMG_RUNTIMED) -f Dockerfile.runtimed .
 
+.PHONY: docker-build-gateway
+docker-build-gateway: generate proto ## Build Runtime gateway Docker image.
+	$(CONTAINER_TOOL) build -t $(IMG_GATEWAY) -f Dockerfile.gateway .
+
 .PHONY: docker-build-bash-runtime
 docker-build-bash-runtime: proto ## Build bash-runtime Docker image.
 	$(CONTAINER_TOOL) build -t $(IMG_BASH_RUNTIME) -f Dockerfile.bash-runtime .
@@ -221,11 +264,19 @@ docker-build-bash-runtime: proto ## Build bash-runtime Docker image.
 docker-build-python-runtime: proto-python ## Build python-runtime Docker image.
 	$(CONTAINER_TOOL) build -t $(IMG_PYTHON_RUNTIME) -f Dockerfile.python-runtime .
 
+.PHONY: docker-build-diagnosis-runtime
+docker-build-diagnosis-runtime: docker-build-python-runtime ## Build the Kubernetes diagnosis Runtime image used by its E2E demo.
+	$(CONTAINER_TOOL) build \
+		--build-arg RUNTIME_IMAGE=$(IMG_PYTHON_RUNTIME) \
+		-t $(IMG_DIAGNOSIS_RUNTIME) \
+		-f demo/kubernetes-diagnosis-agent/Dockerfile .
+
 .PHONY: docker-push
 docker-push: ## Push Docker images.
 	$(CONTAINER_TOOL) push $(IMG_SCHEDULER)
 	$(CONTAINER_TOOL) push $(IMG_CONTROLLER)
 	$(CONTAINER_TOOL) push $(IMG_RUNTIMED)
+	$(CONTAINER_TOOL) push $(IMG_GATEWAY)
 	$(CONTAINER_TOOL) push $(IMG_BASH_RUNTIME)
 	$(CONTAINER_TOOL) push $(IMG_PYTHON_RUNTIME)
 
@@ -306,6 +357,12 @@ govulncheck-tool: ## Install govulncheck if not present.
 		go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION); \
 	fi
 
+.PHONY: gitleaks
+gitleaks: ## Install the pinned gitleaks version if not present.
+	@if ! test -x $(GITLEAKS) || ! go version -m $(GITLEAKS) | awk '$$1 == "mod" && $$2 == "github.com/zricethezav/gitleaks/v8" && $$3 == "$(GITLEAKS_VERSION)" { found = 1 } END { exit !found }'; then \
+		go install github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION); \
+	fi
+
 .PHONY: protoc
 protoc: ## Install protoc compiler if not present.
 	@if ! test -x $(PROTOC) || ! $(PROTOC) --version | grep -q "libprotoc $(PROTOC_VERSION)"; then \
@@ -317,13 +374,13 @@ protoc: ## Install protoc compiler if not present.
 
 .PHONY: protoc-gen-go
 protoc-gen-go: ## Install protoc-gen-go if not present.
-	@if ! test -x $(PROTOC_GEN_GO) || ! $(PROTOC_GEN_GO) --version | grep -q "$(PROTOC_GEN_GO_VERSION)"; then \
+	@if ! test -x $(PROTOC_GEN_GO) || test "$$($(PROTOC_GEN_GO) --version | awk '{print $$NF}' | sed 's/^v//')" != "$(patsubst v%,%,$(PROTOC_GEN_GO_VERSION))"; then \
 		go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION); \
 	fi
 
 .PHONY: protoc-gen-go-grpc
 protoc-gen-go-grpc: ## Install protoc-gen-go-grpc if not present.
-	@if ! test -x $(PROTOC_GEN_GO_GRPC) || ! $(PROTOC_GEN_GO_GRPC) --version | grep -q "$(PROTOC_GEN_GO_GRPC_VERSION)"; then \
+	@if ! test -x $(PROTOC_GEN_GO_GRPC) || test "$$($(PROTOC_GEN_GO_GRPC) --version | awk '{print $$NF}' | sed 's/^v//')" != "$(patsubst v%,%,$(PROTOC_GEN_GO_GRPC_VERSION))"; then \
 		go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION); \
 	fi
 

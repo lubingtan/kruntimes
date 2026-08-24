@@ -108,7 +108,7 @@ controller wiring 累积不必要的冲突。
     - [x] 按有界 plugin 和 reason 统计 Filter-plugin 对 Pod 的 rejection；
     - [x] 按有界 stage 统计 stale `Reserve` 和 conflicting `Bind` 操作；
     - [x] 按有界 event source 统计 requested Pending Run wakeups；
-- [ ] Agent sandbox 所需的 Function-mode Runs：定义 mutually exclusive 的
+- [ ] Function-mode Runs：定义 mutually exclusive 的
   `Run.spec.mode.task` 和 `Run.spec.mode.function` 语义，让 function Run 可以 reserve
   预热 Runtime Pod，向 runtimed/runtime-server 注册 callable function，保持 ready 状态
   以支持多次低延迟 invocation，并在删除或 idle timeout 时释放 reservation。
@@ -128,6 +128,19 @@ controller wiring 累积不必要的冲突。
     constant；
   - [x] 在注册 inline function Run 前 review 并批准
     [Function Inline Source 物化](design/function-inline-source.md) API；
+  - [x] 删除 top-level `Run.spec.handler`、`Run.spec.entrypoint` 和 `Run.spec.args`；
+    handler 放在 `Run.spec.mode.function.handler` 下，task input 放在
+    `Run.spec.mode.task` 下；
+  - [x] review 并确认
+    [Function Runtime Server 协议](design/function-runtime-contract.md)；
+  - [x] 增加以 Run UID 为 key 的幂等 register/status/invoke/unregister protobuf operations；
+  - [ ] 实现内置 function adapters：
+    - [x] Bash FunctionRuntime adapter：handler validation、registration fencing、单个
+      in-flight invocation、有界输出和 unregister drain；
+    - [x] Python FunctionRuntime adapter：handler validation、registration fencing、单个
+      in-flight invocation、有界输出和 unregister drain；
+  - [ ] 增加有界 invocation outputs/artifact references，以及以 Run UID 和 invocation ID
+    为 key 的 structured logs；
   - [ ] 以可独立 review 的分片实现 function control-plane lifecycle：
     - [x] 增加 deterministic FunctionRuntime registration request builder，
       包含 immutable-input digest coverage；
@@ -145,60 +158,86 @@ controller wiring 累积不必要的冲突。
       fencing reconcile stale Runtime Pod assignment；
     - [ ] 增加 registration、retry、timeout、cancellation、deletion、restart recovery 和
       stale-pod fencing 的 unit、integration 和 E2E coverage；
-- [ ] Runtime gateway invoke path：为每个 Runtime 创建一个 gateway Service，把这个
-  Service 作为稳定的 Run invoke endpoint，将请求路由到拥有 assigned Runtime Pod 的
-  runtimed，并在 invoke path 上依赖 runtimed 的内存 ownership/readiness cache，而不是
-  同步读取 Kubernetes API。
+  - [ ] 覆盖 function registration、ready status、local/proxied invoke、多次 invocation、
+    idle timeout、explicit release、Runtime Pod restart recovery 和 cleanup。
+- [ ] Runtime gateway invoke path：在 Helm chart 中增加可选的共享 `runtime-gateway`
+  Deployment 和 ClusterIP Service。gateway 暴露稳定的 HTTP Run endpoint，解析目标 Run，并调用
+  其 Runtime 的 Kubernetes Service。Kubernetes 选择 ready Runtime Pod；runtimed 只在该 Runtime
+  内解析 owner。
   初始实现 TODO：
-  - [ ] reconcile Runtime-owned ClusterIP gateway Service 和专用 runtimed gateway port；
-  - [ ] reconcile Runtime-scoped TLS serving certificates，以及有界 CA publication、
-    rotation 和 Runtime Pod rollout；
-  - [ ] 实现 watch-backed ownership/readiness caches，以及有界 local 或 single-hop peer
-    routing；
-  - [ ] 在 stale-pod reassignment 前 fence registration epoch，并拒绝 Run UID、attempt 或
-    assigned Pod UID mismatch；
-  - [ ] 通过 Kubernetes SelfSubjectAccessReview 和有界 decision cache authorize caller；
-  - [ ] 执行 TLS、request、response、concurrency 和 proxy-loop limits；
-- [x] Function-mode API cleanup：删除 top-level `Run.spec.handler`、
-  `Run.spec.entrypoint` 和 `Run.spec.args`；handler 放在
-  `Run.spec.mode.function.handler` 下，task input 放在 `Run.spec.mode.task` 下。
-- [ ] Function-mode runtime contract：增加 runtime-server register、invoke 和
-  unregister APIs；定义有界 invoke request inputs、response outputs、artifact
-  references 和 log access，同时避免把高频 invocation history 写入 Run status。
+  - [x] 为共享 gateway Deployment、ClusterIP Service、专用 runtimed gRPC port 和
+    HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 以及 unit/render coverage；
+  - [ ] 定义 chart-managed TLS configuration，支持 existing Secret 和 optional cert-manager
+    integration；
+  - [x] 实现 Runtime-scoped Run lookup，以及有界 local 或 single-hop peer routing；
+  - [x] 使用 immutable Run UID 和 assigned Pod UID fence routing，在转发前拒绝 stale assignment；
+  - [x] 通过 Kubernetes TokenReview authenticate caller token，并通过 SubjectAccessReview
+    authorize target Run；
+  - [x] 增加 bounded authorization decision cache；
+  - [x] 执行每个 gateway 的有界 HTTP request concurrency limit；
+  - [ ] 执行 chart-managed TLS，并在需要时使显式 request 和 response limits 可配置；
+  - [x] 实现经过 review 的有界、支持分页的 `ListSessionFiles` contract：
+    - [x] 在 Session Mode design 中定义 HTTP、gRPC、SDK、排序、cursor、mutation-consistency 和
+      response-bound semantics；
+    - [x] 向 gRPC contract 增加 `limit`、`page_token` 与 `next_page_token`，并重新生成 client；
+    - [x] 在内置 Runtime Server、runtimed proxy、HTTP gateway 以及 Go/Python SDK 中实现一致的有界
+      cursor paging；
+      - [x] 在 Bash 和 Python Runtime Server 中执行 direct gRPC paging，使用共享 cursor encoding
+        和 UTF-8 byte-wise ordering；
+      - [x] 通过 gateway 映射 HTTP `limit` 与 `pageToken`，并通过 runtimed proxy routing
+        保留 page fields；
+    - [x] 增加 limits、ordering、invalid/mismatched token 与 traversal-safe multi-page listing 的
+      unit、integration 和 E2E coverage。
+- [x] Agent sandbox 的 Session-mode Runs：不引入独立 `Sandbox` CRD，而是通过预热 Runtime
+  Pod 上的 stateful、mutable workspace 提供 sandbox。已接受的
+  [Session Mode 设计](design/session-mode.zh.md) 使用 `Run.spec.mode.session`、由共享 gateway
+  转换为 runtimed 暴露的 `SessionRuntime` gRPC service 的 HTTP API 与 v0 trusted container backend。Session Run 通过专用 `runs: 1` Runtime 与
+  runtimed 本地 claim 门控实现独占，ephemeral；assigned Pod 丢失时终止，而不是在新 Pod 上静默恢复。
   初始实现 TODO：
-  - [x] review 并确认
-    [Function Runtime Server 协议](design/function-runtime-contract.md)；
-  - [x] 增加以 Run UID 为 key 的幂等 register/status/invoke/unregister protobuf operations；
-  - [ ] 实现内置 function adapters：
-    - [x] Bash FunctionRuntime adapter：handler validation、registration fencing、单个
-      in-flight invocation、有界输出和 unregister drain；
-    - [x] Python FunctionRuntime adapter：handler validation、registration fencing、单个
-      in-flight invocation、有界输出和 unregister drain；
-  - [ ] 增加有界 invocation outputs/artifact references，以及以 Run UID 和 invocation ID
-    为 key 的 structured logs；
-- [ ] Function-mode reliability and isolation：覆盖 function registration、ready
-  status、local/proxied invoke、多次 invocation、artifact reuse、idle timeout、
-  explicit release、runtime pod restart recovery、cleanup、service account 选择、
-  runtime pod security context、resource limits、network policy guidance，以及未来
-  gVisor、Kata、Firecracker 等更强 runtime。
-- [ ] Agent sandbox SDKs：为 agent 开发者提供 first-class SDK，优先支持 Python 和
-  Go。SDK 应暴露 sandbox-facing 语义，例如 create/open/reattach/disconnect/terminate、
-  command 或 tool execution、file operations、logs、artifacts 和 identity metadata；
-  默认隐藏底层 function-mode Run，除非调用方请求低层 metadata。SDK 还应隐藏 readiness
-  polling、gateway discovery、本地开发的 port-forward fallback、in-cluster direct URLs、
-  有界 outputs/artifacts、timeouts、幂等操作 retries、typed errors，并提供 guardrails，
-  建议或验证 AgentSandbox-style integration 使用每个 Runtime Pod 只承载一个 Run 的配置。
-- [ ] Agent sandbox workspace and file APIs：定义 agent 如何上传生成的 scripts 或
-  inputs、读取文件、列出 workspace 内容、获取 artifacts、stream 或 retrieve logs，并且
-  不把每个操作都变成 Kubernetes reconciliation loop。
-- [ ] Agent framework integration：为 agent frameworks 和 MCP-style tool servers 设计
-  一层轻量集成，使 tool call 可以 acquire 或 reuse 由 function-mode Run 支撑的 sandbox
-  handle，通过 gateway invoke，返回结构化结果，并按照 agent session policy cleanup、
-  disconnect、reattach 或 preserve sandbox。
-- [ ] Agent sandbox identity and connectivity：文档化并实现 stable Run identity、
-  gateway addressing、in-cluster/external access、service account/RBAC 边界、network
-  policy 和 multi-tenant naming 模型，使 agent platform 可以安全地把 sandbox handle
-  交给 sub-agents。
+  - [x] review 并确认 API、lifecycle、queue、data-plane、security 和 future-backend 设计；
+  - [x] 增加 `Run.spec.mode.session`、validation、generated CRDs 和 status conditions；拒绝
+    声明 `spec.workspace` 的 Session Run；
+  - [x] 将 source 与 artifact inputs 初始化到 Run-UID-scoped ephemeral workspace，在本地注册
+    session，并将 Run transition 到 `Ready`；
+  - [x] 实现内部 `SessionRuntime` contract，覆盖 lifecycle、workspace-constrained commands、
+    file operations、process groups 和 operation status；
+  - [x] 在共享 gateway 增加 authenticated versioned Session HTTP API、HTTP-to-`SessionRuntime`
+    translation，以及有界 request/response handling；
+  - [x] 由 owner runtimed 为现有 Kubernetes log collector 和 `krt logs` 输出 structured
+    Session output 与 audit logs；不创建单独的 gateway log store；
+  - [x] 实现每个 session 的 FIFO mutation queue：每次一个 active command 或 file mutation、
+    global 与 per-Run bounds、默认/最大 operation timeout、cancellation 和 graceful termination；
+    - [x] 在 owner runtimed 通过每个 Session 的 FIFO queue 串行 mutation，支持 Run 级 queue/timeout
+      限制、队列满拒绝与 Session close 时取消；
+    - [x] 暴露 global queue、operation timeout 上限，以及 runtimed 到 Runtime Server 的
+      session close deadline 的管理员配置接口；
+    - [x] 定义 backend-specific 的 graceful process-termination 配置；不会将通用 setting 注入
+      任意 custom Runtime image；
+  - [x] 将 operation history 与 audit events 写到 structured external logs；Run status 只保留
+    有界 readiness、endpoint 与 artifact reference 数据，大输出通过 ArtifactStore 导出；
+    - [x] 用单调的 `termination.mode` API 替换 `cancelRequested`：`Immediate` 用于 cancellation，
+      仅 Session 合法的 `Drain` 用于正常 completion；实现 `Ready -> Finalizing -> Succeeded` lifecycle，
+      以及彼此独立的 SDK `Close` 和 `Cancel` helper；
+    - [x] fence 新 gateway operation、drain 已接受的 operation，并在收集最终 artifact 前关闭本地
+      Runtime Server；
+    - [x] 仅在 Session Run 的 Runtime 配置 ArtifactStore 时提供 `$KRUNTIME_ARTIFACTS_DIR`；校验并上传
+      最终文件、在 status 保留 compact ref、在 Finalizing 重试 transient store failure，并确定性地使
+      invalid artifact 失败；
+    - [x] 增加 successful completion/export、finalization 期间 cancellation、transient store retry、
+      invalid artifact 与 Runtime Pod loss 的测试覆盖；
+  - [x] 增加 Python 和 Go SDK：create/open/wait/execute/files/logs/close helpers、typed errors、
+    direct in-cluster access 与 local port-forward support；
+  - [x] 增加 Kubernetes diagnosis agent 示例，使用 Session Run 实现 multi-step scripts、files、
+    results 和 cleanup；在 feature 被视为 supported 前用该示例发现剩余 product gaps；
+  - [x] 增加 registration、ordering、timeout、cancellation、idle expiry、cleanup、authorization、
+    file-boundary enforcement、Runtime Pod loss 和 gateway routing 的 unit、integration 与 E2E
+    coverage；
+    - [x] 通过 authenticated HTTP gateway 的 E2E 验证每个 Session 的 FIFO mutation ordering；
+    - [x] 通过 E2E 验证取消 Session Run 会终止活跃的 gateway command，并拒绝后续 gateway access；
+    - [x] 通过 focused unit、integration 与 E2E tests 验证 gateway routing、bearer-token
+      authentication、Run authorization、workspace file-boundary enforcement、registration
+      environment、structured command logs、idle/total timeout、Drain completion、SDK access，
+      以及 assigned Runtime Pod loss。
 - [ ] v0.x examples：增加 LLM agent 示例和 workflow 示例，并用这些示例反推缺失的
   产品和 API 能力。
 - [x] Workflow data sharing：设计并实现由 workflow demo 反推出的 first-class cross-Run
@@ -357,6 +396,9 @@ controller wiring 累积不必要的冲突。
 ### 迈向 v1.0
 
 - 稳定 CRD API。
+- [ ] 至少增加一个 secure Session backend，初始目标为 gVisor，用于执行不受信任的
+  LLM-generated code。在提供该能力前，定义 Runtime Server contract、isolation boundary、
+  resource accounting、networking policy，以及与 Session workspace 和 gateway API 的兼容性。
 - [ ] 仅在 Python 3.15 正式镜像可用、且包括 `grpcio` 在内的所有锁定 native dependency
   都发布兼容的 `cp315` wheels 后，才将 Python Runtime base image 恢复升级至受支持的
   Python 3.15 release。以镜像构建和 runtime test 作为升级 gate；不要依赖 slim
@@ -374,6 +416,9 @@ controller wiring 累积不必要的冲突。
   隔离的 case，并拆分快速反馈和较慢的 lifecycle coverage，同时保留完整 release gate。
 - [ ] Runtime 删除时清理其 runtime maintainer。定义 ownership 和 finalization，避免 orphaned
   maintainer 累积，同时保留仍需要 artifact cleanup 的 Run 的正确性。
+- [ ] 增加明确的 `Run` suspend 和 resume 语义。定义 Pending、正在执行的 task、function 和
+  Session Run 的 API 与 lifecycle 行为，包括 process、workspace、request 和 timeout accounting
+  中哪些保留、哪些丢弃；不能将其建模为 best-effort 的 boolean 开关。
 - 定义兼容性和迁移保证。
 - 记录弃用策略。
 - 明确生产环境的多租户隔离策略。

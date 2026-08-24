@@ -13,15 +13,16 @@ import (
 const (
 	MaxBackoff = 60 * time.Second
 
-	ReasonTimeout        = "Timeout"
-	ReasonPrepareSource  = "PrepareSource"
-	ReasonRuntimeExecute = "RuntimeExecute"
-	ReasonRuntimeError   = "RuntimeError"
-	ReasonExecutionLost  = "ExecutionLost"
-	ReasonCancelled      = "Cancelled"
-	ReasonPodGone        = "PodGone"
-	ReasonPodTerminating = "PodTerminating"
-	ReasonPodUnhealthy   = "PodUnhealthy"
+	ReasonTimeout         = "Timeout"
+	ReasonPrepareSource   = "PrepareSource"
+	ReasonRuntimeExecute  = "RuntimeExecute"
+	ReasonSessionRegister = "SessionRegister"
+	ReasonRuntimeError    = "RuntimeError"
+	ReasonExecutionLost   = "ExecutionLost"
+	ReasonCancelled       = "Cancelled"
+	ReasonPodGone         = "PodGone"
+	ReasonPodTerminating  = "PodTerminating"
+	ReasonPodUnhealthy    = "PodUnhealthy"
 )
 
 // WithDefaults fills in default values for a nil or zero RetryPolicy.

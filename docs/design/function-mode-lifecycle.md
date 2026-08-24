@@ -66,7 +66,10 @@ Function-mode status gains one stable endpoint reference:
 ```go
 type RunEndpointProtocol string
 
-const RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
+const (
+    RunEndpointProtocolHTTP  RunEndpointProtocol = "HTTP"
+    RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
+)
 
 type RunEndpoint struct {
     Protocol RunEndpointProtocol `json:"protocol"`
@@ -100,7 +103,7 @@ status:
   assignedPod: runtime-python-7f587b4668-njcks
   endpoint:
     protocol: HTTPS
-    url: https://python-gateway.kruntimes-demo.svc.cluster.local/v1/namespaces/kruntimes-demo/runs/kube-diagnose-agent/2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6/invoke
+    url: https://runtime-gateway.kruntimes-system.svc.cluster.local/v1/namespaces/kruntimes-demo/runtimes/python/runs/2c24c1f0-9f8f-4f80-82d5-3dd16a12d1e6:invoke
     caBundle: <base64-encoded-PEM>
   conditions:
     - type: Ready
@@ -223,25 +226,34 @@ Cancellation keeps the Run object and records a terminal status. Deletion is a
 separate user request and uses the finalizer path. Both operations are
 idempotent across controller and runtimed restarts.
 
-## Runtime Gateway Service
+## Runtime Gateway
 
-The Runtime controller creates one ClusterIP gateway Service for each Runtime.
-The Service is owned by the Runtime and selects all ready Runtime Pods in that
-pool on a dedicated runtimed gateway port. The controller also manages a
-Runtime-scoped CA and serving certificate Secret mounted only into runtimed.
-Certificates cover the gateway Service DNS name. Rotation publishes an
-overlapping old/new CA bundle before replacing serving certificates, then
-removes the retired CA after all Runtime Pods have rolled.
+The Helm chart optionally installs one shared `runtime-gateway` Deployment and
+ClusterIP Service for all Runtimes. `gateway.enabled` controls installation.
+The Deployment runs stateless HTTP gateway servers. The Service forwards client
+traffic only to gateway Pods, never directly to Runtime Pods. A gateway server
+reads the namespace, Runtime, and Run UID from the endpoint path, calls the
+Kubernetes Service for that Runtime on its dedicated gRPC port, and translates
+the HTTP invoke request to the internal runtimed gRPC request.
+
+Chart values configure replicas, RBAC, and the serving certificate Secret
+mounted into gateway Pods. The certificate covers the shared gateway Service DNS
+name. Certificate issuance and rotation are installation concerns, for example
+through a user-managed Secret or optional cert-manager chart resources; the
+Runtime controller does not manage gateway resources or certificates.
 
 ```text
-Runtime gateway Service
-  -> any runtimed in the Runtime pool
-     -> owning runtimed, directly or through one peer proxy hop
-        -> local Runtime Server
+client
+  -> shared runtime-gateway Service
+     -> runtime-gateway Pod
+        -> Kubernetes Service for the requested Runtime
+           -> ready Runtime Pod's runtimed
+              -> owning runtimed, directly or through one peer proxy hop
+                 -> local Runtime Server
 ```
 
-Every runtimed maintains a watch-backed cache for all function Runs assigned to
-its Runtime and namespace:
+Every runtimed maintains a watch-backed cache for function Runs in its Runtime
+and namespace:
 
 ```text
 Run namespace/name/UID -> assigned Pod address -> lifecycle readiness
@@ -259,11 +271,9 @@ handled as follows:
 - local concurrency limit reached: `429 Too Many Requests`.
 
 The peer request retains the original caller credential and is authorized by
-the owner too. Peer connections use TLS and verify the same Runtime-scoped CA;
-when connecting to an owning Pod address, the client verifies against the
-gateway Service DNS name carried by the shared serving certificate. A hop
-marker prevents proxy loops. Service routing and cache recovery must tolerate a
-request reaching a Pod whose watch cache has not yet observed the newest
+the owner too. Peer connections use mTLS with workload identities; a hop marker
+prevents proxy loops. Gateway selection and cache recovery must tolerate a
+request reaching a runtimed whose watch cache has not yet observed the newest
 assignment.
 
 ## Authentication and Authorization
@@ -362,7 +372,7 @@ that deployment choice, but it must not change scheduler semantics.
 
 | Component | Responsibility |
 | --- | --- |
-| Runtime controller | Reconcile the Runtime-owned gateway Service and ports. |
+| Helm chart | Optionally install the shared runtime-gateway Deployment, Service, RBAC, and TLS configuration. |
 | Scheduler | Assign generic Run capacity; treat Ready as active and non-terminal. |
 | runtimed | Register/unregister, own lifecycle status, maintain routing caches, authorize and proxy invokes, enforce local limits, and clean local state. |
 | Runtime Server | Hold registration and activity state, execute invokes, and expose idempotent local lifecycle APIs. |
@@ -377,9 +387,10 @@ They may create function Runs later, but they use only the public Run API.
 1. Add API prerequisites: `Ready`, assigned Pod UID, endpoint status,
    transition validation, finalizer constant, generated CRDs, and generic
    phase-classification tests.
-2. Add Runtime gateway Service reconciliation and Helm/RBAC coverage.
-3. Add Runtime-scoped gateway TLS certificate reconciliation, CA publication,
-   rotation, and pod rollout behavior.
+2. Add Helm templates, values, RBAC, and smoke coverage for the optional shared
+   runtime-gateway Deployment and Service.
+3. Define chart-managed TLS configuration, including an existing Secret and
+   optional cert-manager integration.
 4. Add Runtime Server register/status/invoke/unregister protobuf APIs and
    built-in Bash/Python adapters.
 5. Add runtimed registration lifecycle, finalization, shared retry integration,

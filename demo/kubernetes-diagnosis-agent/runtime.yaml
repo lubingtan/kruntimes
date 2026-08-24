@@ -1,0 +1,26 @@
+apiVersion: kruntimes.io/v1alpha1
+kind: Runtime
+metadata:
+  name: diagnosis-python
+spec:
+  port: 9092
+  replicas: 1
+  capacity:
+    resources:
+      runs: "1"
+  template:
+    spec:
+      serviceAccountName: diagnosis-runtime
+      containers:
+        - name: runtime
+          image: <registry>/diagnosis-python-runtime:0.1.0
+          args:
+            - --port=9092
+            - --work-dir=/workspace
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

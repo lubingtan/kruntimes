@@ -17,12 +17,14 @@ Examples: `feat(krt): add -f flag for stdin/file input`, `fix(scheduler): handle
 ## Build & Test Commands
 
 ```bash
-make build              # compile all 5 Go binaries
+make build              # compile all Go binaries
 make lint               # go fmt + go vet + golangci-lint (if installed) (scheduler, controller, runtimed, bash-runtime, krt)
 make test               # unit tests (skips integration and e2e)
 make test-integration   # envtest-based integration tests (real API server)
+make test-integration-run INTEGRATION_TEST=TestName # one envtest integration test
 make e2e-test           # E2E tests against a kind cluster (requires make e2e-setup first)
 make e2e                # full E2E: kind cluster + deploy + test
+make e2e-run E2E_TEST=TestName # full E2E setup, then the matching test only
 make proto              # regenerate Go gRPC code from api/runtime/v1/runtime.proto
 make proto-python       # regenerate Python gRPC stubs (requires uv)
 make proto-python       # regenerate Python gRPC stubs (requires uv)
@@ -43,9 +45,11 @@ for validating a change that affects deployed components.
 - For a clean environment, run `make e2e-cleanup` first, then run `make e2e`.
   There is no `e2e-clean` target.
 - E2E can exceed an interactive command timeout. Start it in a named `tmux`
-  session and redirect output to a unique file under `/tmp`; poll the log and
-  save the exit code to a companion file. Do not start a second run merely
-  because the caller returns before the background process completes.
+  session, redirect output to a unique file under `/tmp`, and save the exit
+  code to a companion file. Start an independent watcher that follows the
+  test process with `tail --pid`, then writes a log summary when it exits; do
+  not use fixed-interval sleep polling or start a second run merely because
+  the caller returns before the background process completes.
 - E2E needs Docker, kind, kubectl, Helm, the local Kubernetes API, and service
   ports. Run it with the required sandbox escalation.
 

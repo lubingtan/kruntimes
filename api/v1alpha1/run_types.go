@@ -9,19 +9,23 @@ import (
 )
 
 // RunPhase is the lifecycle phase of a Run.
-// +kubebuilder:validation:Enum=Pending;Scheduled;Running;Ready;Succeeded;Failed;Timeout;Cancelled
+// +kubebuilder:validation:Enum=Pending;Scheduled;Running;Ready;Finalizing;Succeeded;Failed;Timeout;Cancelled
 type RunPhase string
 
 const (
 	RunPending   RunPhase = "Pending"
 	RunScheduled RunPhase = "Scheduled"
 	RunRunning   RunPhase = "Running"
-	// RunReady is an active, non-terminal function Run that accepts invocations.
-	RunReady     RunPhase = "Ready"
-	RunSucceeded RunPhase = "Succeeded"
-	RunFailed    RunPhase = "Failed"
-	RunTimeout   RunPhase = "Timeout"
-	RunCancelled RunPhase = "Cancelled"
+	// RunReady is an active, non-terminal function or session Run that accepts
+	// data-plane requests.
+	RunReady RunPhase = "Ready"
+	// RunFinalizing is an active Session Run that has stopped accepting new
+	// operations while it drains and exports final artifacts.
+	RunFinalizing RunPhase = "Finalizing"
+	RunSucceeded  RunPhase = "Succeeded"
+	RunFailed     RunPhase = "Failed"
+	RunTimeout    RunPhase = "Timeout"
+	RunCancelled  RunPhase = "Cancelled"
 
 	// RunFunctionCleanupFinalizer ensures that a function registration is
 	// released before its Run is deleted.
@@ -29,16 +33,20 @@ const (
 )
 
 // RunEndpointProtocol identifies the public protocol for invoking a function Run.
-// +kubebuilder:validation:Enum=HTTPS
+// +kubebuilder:validation:Enum=HTTP;HTTPS
 type RunEndpointProtocol string
 
 const (
-	// RunEndpointProtocolHTTPS is the initial public invoke protocol.
+	// RunEndpointProtocolHTTP identifies a plain HTTP gateway endpoint, normally
+	// the cluster-local Runtime gateway Service.
+	RunEndpointProtocolHTTP RunEndpointProtocol = "HTTP"
+	// RunEndpointProtocolHTTPS identifies a TLS-terminated public endpoint.
 	RunEndpointProtocolHTTPS RunEndpointProtocol = "HTTPS"
 )
 
 // +kubebuilder:object:generate=true
-// RunEndpoint is a stable, bounded reference to a function Run invoke endpoint.
+// RunEndpoint is a stable, bounded reference to a function or session Run
+// endpoint.
 type RunEndpoint struct {
 	// Protocol identifies the endpoint protocol.
 	// +kubebuilder:validation:Required
@@ -54,6 +62,29 @@ type RunEndpoint struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=16384
 	CABundle []byte `json:"caBundle,omitempty"`
+}
+
+// RunTerminationMode describes how a Run is asked to terminate.
+// +kubebuilder:validation:Enum=Immediate;Drain
+type RunTerminationMode string
+
+const (
+	// RunTerminationImmediate stops the Run as soon as the runtime can apply
+	// cancellation. It is valid for every Run mode.
+	RunTerminationImmediate RunTerminationMode = "Immediate"
+	// RunTerminationDrain is valid only for Session Runs. It prevents new
+	// operations, drains accepted operations, and finalizes exported artifacts.
+	RunTerminationDrain RunTerminationMode = "Drain"
+)
+
+// +kubebuilder:object:generate=true
+// RunTermination requests an irreversible termination transition. A Session
+// Run may escalate Drain to Immediate, but cannot remove or downgrade a
+// request.
+type RunTermination struct {
+	// Mode selects immediate cancellation or Session-specific graceful drain.
+	// +kubebuilder:validation:Required
+	Mode RunTerminationMode `json:"mode"`
 }
 
 // ArtifactType describes how an artifact is represented in storage.
@@ -215,9 +246,9 @@ type RunResourceRequirements struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.commitSHA) || has(self.repoURL)",message="commitSHA requires repoURL"
 // +kubebuilder:validation:XValidation:rule="!has(self.inlinePath) || (!self.inlinePath.startsWith('/') && !self.inlinePath.split('/').exists(segment, size(segment) == 0 || segment == '.' || segment == '..'))",message="inlinePath must be a relative file path without empty, '.' or '..' segments"
 type CodeSource struct {
-	// Inline is a standalone script. In task mode, runtimed writes it to the
-	// default script file and does not pass Entrypoint or Args to the Runtime
-	// Server. In function mode, InlinePath identifies the file to materialize.
+	// Inline is a standalone script. In task and session modes, runtimed writes
+	// it to the default script file. In function mode, InlinePath identifies the
+	// file to materialize.
 	// Mutually exclusive with RepoURL.
 	// +optional
 	// 256 KiB keeps simple scripts well below the Kubernetes object size limit.
@@ -248,7 +279,7 @@ type CodeSource struct {
 
 // +kubebuilder:object:generate=true
 // RunMode contains mutually exclusive execution-mode-specific configuration.
-// +kubebuilder:validation:XValidation:rule="has(self.task) != has(self.function)",message="exactly one of task or function must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.task) && !has(self.function) && !has(self.session)) || (!has(self.task) && has(self.function) && !has(self.session)) || (!has(self.task) && !has(self.function) && has(self.session))",message="exactly one of task, function, or session must be set"
 type RunMode struct {
 	// Task configures one-shot process execution.
 	// +optional
@@ -257,6 +288,10 @@ type RunMode struct {
 	// Function configures callable function execution.
 	// +optional
 	Function *RunFunctionMode `json:"function,omitempty"`
+
+	// Session configures a stateful agent sandbox session.
+	// +optional
+	Session *RunSessionMode `json:"session,omitempty"`
 }
 
 // +kubebuilder:object:generate=true
@@ -292,6 +327,30 @@ type RunFunctionMode struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	IdleTimeoutSeconds *int32 `json:"idleTimeoutSeconds,omitempty"`
+}
+
+// +kubebuilder:object:generate=true
+// RunSessionMode configures a stateful, mutable workspace reserved by one Run.
+// It is a trusted-workload preview; a Session Run holds exclusive v0 Runtime
+// capacity until it terminates.
+type RunSessionMode struct {
+	// IdleTimeoutSeconds is the duration after the last accepted command or file
+	// mutation before the session is closed.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	IdleTimeoutSeconds *int32 `json:"idleTimeoutSeconds,omitempty"`
+
+	// QueueSize limits queued command and file-mutation operations for this
+	// session. runtimed also applies its administrator-configured global limit.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32
+	QueueSize *int32 `json:"queueSize,omitempty"`
+
+	// OperationTimeout limits one command or file-mutation operation. runtimed
+	// rejects values above its administrator-configured maximum.
+	// +optional
+	OperationTimeout *metav1.Duration `json:"operationTimeout,omitempty"`
 }
 
 const (
@@ -384,9 +443,11 @@ type RunAffinityTerm struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.mode.task) || !has(self.mode.task.entrypoint) || (has(self.source) && has(self.source.inline)) || (!self.mode.task.entrypoint.startsWith('/') && !self.mode.task.entrypoint.split('/').exists(segment, segment == '..'))",message="mode.task.entrypoint must be a relative path that does not contain '..'"
 // +kubebuilder:validation:XValidation:rule="!has(self.source) || !has(self.source.inlinePath) || (has(self.mode.function) && has(self.source.inline))",message="source.inlinePath is only valid for function mode with inline source"
 // +kubebuilder:validation:XValidation:rule="!has(self.mode.function) || !has(self.source) || !has(self.source.inline) || has(self.source.inlinePath)",message="function mode inline source requires source.inlinePath"
+// +kubebuilder:validation:XValidation:rule="!has(self.mode.session) || !has(self.workspace)",message="session mode does not support spec.workspace"
+// +kubebuilder:validation:XValidation:rule="!has(self.termination) || self.termination.mode != 'Drain' || has(self.mode.session)",message="termination.mode Drain is only valid for session mode"
 // +kubebuilder:validation:XValidation:rule="self.runtime == oldSelf.runtime && has(self.source) == has(oldSelf.source) && (!has(self.source) || self.source == oldSelf.source) && self.mode == oldSelf.mode && has(self.artifactInputs) == has(oldSelf.artifactInputs) && (!has(self.artifactInputs) || self.artifactInputs == oldSelf.artifactInputs) && has(self.env) == has(oldSelf.env) && (!has(self.env) || self.env == oldSelf.env) && has(self.timeout) == has(oldSelf.timeout) && (!has(self.timeout) || self.timeout == oldSelf.timeout) && has(self.retryPolicy) == has(oldSelf.retryPolicy) && (!has(self.retryPolicy) || self.retryPolicy == oldSelf.retryPolicy) && has(self.resources) == has(oldSelf.resources) && (!has(self.resources) || self.resources == oldSelf.resources)",message="runtime, source, mode, artifactInputs, env, timeout, retryPolicy, and resources are immutable after Run creation"
 // +kubebuilder:validation:XValidation:rule="has(self.workspace) == has(oldSelf.workspace) && (!has(self.workspace) || self.workspace == oldSelf.workspace) && has(self.affinity) == has(oldSelf.affinity) && (!has(self.affinity) || self.affinity == oldSelf.affinity)",message="workspace and affinity are immutable after Run creation"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.cancelRequested) || !oldSelf.cancelRequested || (has(self.cancelRequested) && self.cancelRequested)",message="cancelRequested may not transition from true to false"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.termination) || (has(self.termination) && (self.termination == oldSelf.termination || (oldSelf.termination.mode == 'Drain' && self.termination.mode == 'Immediate')))",message="termination may not be removed, downgraded, or changed except from Drain to Immediate"
 type RunSpec struct {
 	// Runtime is the execution environment type (e.g., "python").
 	// It maps to the "runtime" label on Runtime Pods.
@@ -434,9 +495,11 @@ type RunSpec struct {
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
-	// CancelRequested is set to true to request cancellation of a running Run.
+	// Termination requests an irreversible termination transition. Immediate is
+	// valid for every Run mode; Drain is valid only for Session Runs and may be
+	// escalated to Immediate.
 	// +optional
-	CancelRequested bool `json:"cancelRequested,omitempty"`
+	Termination *RunTermination `json:"termination,omitempty"`
 
 	// RetryPolicy is the retry strategy for the Run. If nil, no retries are attempted.
 	// +optional
@@ -457,6 +520,18 @@ func (s RunSpec) EffectiveEntrypoint() string {
 		return s.Mode.Task.Entrypoint
 	}
 	return ""
+}
+
+// HasImmediateTermination reports whether the Run requested immediate
+// cancellation.
+func (s RunSpec) HasImmediateTermination() bool {
+	return s.Termination != nil && s.Termination.Mode == RunTerminationImmediate
+}
+
+// HasDrainTermination reports whether the Session Run requested graceful
+// completion.
+func (s RunSpec) HasDrainTermination() bool {
+	return s.Termination != nil && s.Termination.Mode == RunTerminationDrain
 }
 
 // EffectiveArgs returns the task args after applying the Run mode compatibility
@@ -517,8 +592,8 @@ type RunStatus struct {
 	// +kubebuilder:validation:MaxLength=253
 	AssignedPodUID string `json:"assignedPodUID,omitempty"`
 
-	// Endpoint is the stable gateway endpoint for a ready function Run.
-	// It is absent for one-shot task Runs.
+	// Endpoint is the stable gateway endpoint for a ready function or session
+	// Run. It is absent for one-shot task Runs.
 	// +optional
 	Endpoint *RunEndpoint `json:"endpoint,omitempty"`
 

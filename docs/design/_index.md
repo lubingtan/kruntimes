@@ -7,7 +7,9 @@ implemented.
 
 ## Documents
 
-- [Function Mode and Agent Sandboxes](function-mode/)
+- [Function Mode](function-mode/)
+- [Task Execution Lifecycle](task-execution-lifecycle/)
+- [Session Mode for Agent Sandboxes](session-mode/)
 - [Function Inline Source Materialization](function-inline-source/)
 - [Function Mode Lifecycle and Invoke Dataplane](function-mode-lifecycle/)
 - [Function Runtime Server Contract](function-runtime-contract/)

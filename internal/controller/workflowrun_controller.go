@@ -1066,7 +1066,7 @@ func isTerminalWorkflowPhase(phase v1alpha1.WorkflowPhase) bool {
 
 func hasActiveChildRuns(childRuns map[string]*v1alpha1.Run) bool {
 	for _, run := range childRuns {
-		if !isTerminalRunPhase(run.Status.Phase) && !run.Spec.CancelRequested {
+		if !isTerminalRunPhase(run.Status.Phase) && !run.Spec.HasImmediateTermination() {
 			return true
 		}
 	}
@@ -1084,11 +1084,11 @@ func hasActiveChildWorkflowRuns(childWorkflows map[string]*v1alpha1.WorkflowRun)
 
 func (r *WorkflowRunReconciler) applyRequestChildCancellation(ctx context.Context, resources *workflowRunResources) error {
 	for _, run := range resources.childRuns {
-		if run.Spec.CancelRequested || isTerminalRunPhase(run.Status.Phase) {
+		if run.Spec.HasImmediateTermination() || isTerminalRunPhase(run.Status.Phase) {
 			continue
 		}
 		base := run.DeepCopy()
-		run.Spec.CancelRequested = true
+		run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 		if err := r.Patch(ctx, run, client.MergeFrom(base)); err != nil {
 			return fmt.Errorf("request cancellation of child run %s/%s: %w", run.Namespace, run.Name, err)
 		}

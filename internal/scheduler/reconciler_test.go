@@ -192,8 +192,8 @@ func TestReconcileCancelsPendingRun(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: v1alpha1.RunSpec{
-			Runtime:         "missing",
-			CancelRequested: true,
+			Runtime:     "missing",
+			Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate},
 		},
 		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunPending},
 	}

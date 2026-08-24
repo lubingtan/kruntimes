@@ -5,16 +5,24 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -25,14 +33,19 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/transport/spdy"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	"github.com/kruntimes/kruntimes/internal/krt"
+	runretry "github.com/kruntimes/kruntimes/internal/retry"
+	"github.com/kruntimes/kruntimes/internal/runstatus"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
+	"github.com/kruntimes/kruntimes/sdk/go/sandbox"
 )
 
 const testNamespace = "default"
@@ -53,6 +66,13 @@ func pythonRuntimeImage() string {
 		return image
 	}
 	return "kruntimes-python-runtime:latest"
+}
+
+func diagnosisRuntimeImage() string {
+	if image := os.Getenv("KRUNTIMES_DIAGNOSIS_RUNTIME_IMAGE"); image != "" {
+		return image
+	}
+	return "kruntimes-diagnosis-runtime:latest"
 }
 
 func runtimedImage() string {
@@ -265,7 +285,7 @@ func waitForRuntimePod(t *testing.T, name, runtimeImage, daemonImage string, run
 		)
 		if err == nil {
 			for _, pod := range pods.Items {
-				if isRuntimePodReady(&pod, runtimeImage, daemonImage, runsCapacity) {
+				if isRuntimePodReady(&pod, runtimeImage, daemonImage, runsCapacity) && runtimeServiceHasReadyEndpoint(ctx, name) {
 					return
 				}
 			}
@@ -280,6 +300,27 @@ func waitForRuntimePod(t *testing.T, name, runtimeImage, daemonImage string, run
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// runtimeServiceHasReadyEndpoint verifies that the Runtime Service can route
+// gateway requests to a ready runtimed Pod. Pod readiness alone does not prove
+// that the EndpointSlice controller has published the Service endpoint yet.
+func runtimeServiceHasReadyEndpoint(ctx context.Context, runtimeName string) bool {
+	var slices discoveryv1.EndpointSliceList
+	if err := k8sClient.List(ctx, &slices,
+		client.InNamespace(testNamespace),
+		client.MatchingLabels{discoveryv1.LabelServiceName: "runtime-" + runtimeName},
+	); err != nil {
+		return false
+	}
+	for _, slice := range slices.Items {
+		for _, endpoint := range slice.Endpoints {
+			if endpoint.Conditions.Ready == nil || *endpoint.Conditions.Ready {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func dumpRuntimeDiagnostics(t *testing.T, name, runtimeImage, daemonImage string, runsCapacity int32, lastErr error) {
@@ -500,6 +541,9 @@ func assertCancelledRun(t *testing.T, run *v1alpha1.Run) {
 	if completed.Status != metav1.ConditionFalse || completed.Reason != "Cancelled" {
 		t.Fatalf("expected Completed=False reason=Cancelled, got status=%s reason=%s", completed.Status, completed.Reason)
 	}
+	if ready := findRunCondition(run, runstatus.ConditionReady); ready != nil && ready.Status != metav1.ConditionFalse {
+		t.Fatalf("expected terminal Ready condition to be false, got status=%s reason=%s", ready.Status, ready.Reason)
+	}
 }
 
 func requestRunCancel(t *testing.T, run *v1alpha1.Run) {
@@ -508,13 +552,28 @@ func requestRunCancel(t *testing.T, run *v1alpha1.Run) {
 		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), run); err != nil {
 			t.Fatalf("get run for cancel: %v", err)
 		}
-		run.Spec.CancelRequested = true
+		run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 		if err := k8sClient.Update(context.Background(), run); err == nil {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("failed to request cancellation for run %s", run.Name)
+}
+
+func requestRunDrain(t *testing.T, run *v1alpha1.Run) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		if err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(run), run); err != nil {
+			t.Fatalf("get run for drain: %v", err)
+		}
+		run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain}
+		if err := k8sClient.Update(context.Background(), run); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("failed to request drain for run %s", run.Name)
 }
 
 func waitForRunDeleted(t *testing.T, run *v1alpha1.Run, timeout time.Duration) {
@@ -542,6 +601,788 @@ func waitForRunDeleted(t *testing.T, run *v1alpha1.Run, timeout time.Duration) {
 func taskMode(args ...string) v1alpha1.RunMode {
 	return v1alpha1.RunMode{
 		Task: &v1alpha1.RunTaskMode{Args: args},
+	}
+}
+
+func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-gateway-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+			Env: []corev1.EnvVar{
+				{Name: "KRUNTIMES_SESSION_DEFAULT", Value: "registration"},
+			},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTP {
+		t.Fatalf("Session Run endpoint = %#v, want HTTP gateway endpoint", run.Status.Endpoint)
+	}
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+
+	statusResponse := waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	var sessionStatus struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(statusResponse, &sessionStatus); err != nil {
+		t.Fatalf("decode Session status response: %v", err)
+	}
+	if sessionStatus.State != "SESSION_STATE_READY" {
+		t.Fatalf("Session state = %q, want SESSION_STATE_READY", sessionStatus.State)
+	}
+
+	unauthenticated := waitForGatewayResponse(t, http.MethodGet, baseURL, "", nil, http.StatusUnauthorized)
+	if !strings.Contains(string(unauthenticated), "bearer token is required") {
+		t.Fatalf("unauthenticated response = %s", unauthenticated)
+	}
+	unauthorizedToken := sessionGatewayTokenWithoutRunAccess(t)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, unauthorizedToken, nil, http.StatusForbidden)
+
+	payload := []byte(`{"command":{"argv":["sh","-c","printf gateway-ok"]}}`)
+	operationResponse := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, payload, http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(operationResponse, &operation); err != nil {
+		t.Fatalf("decode Session operation response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "gateway-ok" {
+		t.Fatalf("Session command result = %#v, want successful gateway-ok output", operation.Command)
+	}
+	waitForSessionCommandLogs(t, run, "gateway-ok")
+
+	envPayload := []byte(`{"command":{"argv":["sh","-c","printf '%s:%s' \"$KRUNTIMES_SESSION_DEFAULT\" \"$KRUNTIMES_SESSION_COMMAND\""],"env":{"KRUNTIMES_SESSION_COMMAND":"command"}}}`)
+	envResponse := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, envPayload, http.StatusOK)
+	if err := json.Unmarshal(envResponse, &operation); err != nil {
+		t.Fatalf("decode Session environment response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "registration:command" {
+		t.Fatalf("Session command environment result = %#v, want registration:command", operation.Command)
+	}
+
+	writePayload := []byte(`{"writeFile":{"path":"notes/result.txt","contents":"Z2F0ZXdheS1maWxl","createParents":true}}`)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, writePayload, http.StatusOK)
+	escapingWrite := []byte(`{"writeFile":{"path":"../outside.txt","contents":"ZXNjYXBl","createParents":true}}`)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token, escapingWrite, http.StatusBadRequest)
+
+	filesResponse := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files?path=notes", token, nil, http.StatusOK)
+	var files struct {
+		Entries []struct {
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(filesResponse, &files); err != nil {
+		t.Fatalf("decode Session files response: %v", err)
+	}
+	if !containsSessionFile(files.Entries, "result.txt") {
+		t.Fatalf("Session files = %#v, want result.txt", files.Entries)
+	}
+
+	fileResponse := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/notes/result.txt", token, nil, http.StatusOK)
+	var file struct {
+		Contents []byte `json:"contents"`
+	}
+	if err := json.Unmarshal(fileResponse, &file); err != nil {
+		t.Fatalf("decode Session file response: %v", err)
+	}
+	if string(file.Contents) != "gateway-file" {
+		t.Fatalf("Session file contents = %q, want gateway-file", file.Contents)
+	}
+
+	requestRunCancel(t, run)
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
+	assertCancelledRun(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestSessionGatewaySerializesMutations(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-fifo-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-fifo-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create FIFO Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	firstResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := gatewayRequest(ctx, http.MethodPost, baseURL+"/operations:execute", token,
+			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 1; printf first > result.txt"]}}`), http.StatusOK)
+		firstResult <- err
+	}()
+
+	// Reading is not a mutation, so this confirms that the first command is
+	// active before the second mutation is submitted to the owner queue.
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/started", token, nil, http.StatusOK)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"writeFile":{"path":"result.txt","contents":"c2Vjb25k"}}`), http.StatusOK)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("execute first FIFO mutation: %v", err)
+	}
+
+	response := waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/result.txt", token, nil, http.StatusOK)
+	var file struct {
+		Contents []byte `json:"contents"`
+	}
+	if err := json.Unmarshal(response, &file); err != nil {
+		t.Fatalf("decode FIFO result file: %v", err)
+	}
+	if string(file.Contents) != "second" {
+		t.Fatalf("serialized mutation result = %q, want second", file.Contents)
+	}
+}
+
+func TestSessionRunCancellationTerminatesActiveGatewayCommand(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-cancel-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-cancel-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create cancellation Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	commandResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := gatewayRequest(ctx, http.MethodPost, baseURL+"/operations:execute", token,
+			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 20; printf completed > completed"]}}`), http.StatusOK)
+		commandResult <- err
+	}()
+
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/started", token, nil, http.StatusOK)
+	requestRunCancel(t, run)
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
+	assertCancelledRun(t, run)
+	if err := <-commandResult; err == nil {
+		t.Fatal("active Session command succeeded after its Run was cancelled")
+	}
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestSessionRunDrainCompletesAcceptedGatewayCommand(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-drain-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-drain-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create draining Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	commandResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := gatewayRequest(ctx, http.MethodPost, baseURL+"/operations:execute", token,
+			[]byte(`{"command":{"argv":["sh","-c","printf started > started; sleep 15; printf completed > completed"]}}`), http.StatusOK)
+		commandResult <- err
+	}()
+
+	// A successful read proves runtimed accepted the command before Drain
+	// fenced later operations.
+	_ = waitForGatewayResponse(t, http.MethodGet, baseURL+"/files/started", token, nil, http.StatusOK)
+	requestRunDrain(t, run)
+	waitForRunPhase(t, run, 10*time.Second, v1alpha1.RunFinalizing)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"writeFile":{"path":"rejected.txt","contents":"cmVqZWN0ZWQ="}}`), http.StatusConflict)
+	if err := <-commandResult; err != nil {
+		t.Fatalf("accepted Session command did not complete during Drain: %v", err)
+	}
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunSucceeded)
+}
+
+func TestSandboxSDKUsesGatewayServicePortForward(t *testing.T) {
+	runtimeName := fmt.Sprintf("sdk-session-gateway-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	serviceAccount, token := newSessionGatewayServiceAccount(t)
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceAccount.Name, Namespace: testNamespace},
+		Rules: []rbacv1.PolicyRule{
+			{APIGroups: []string{v1alpha1.GroupVersion.Group}, Resources: []string{"runs"}, Verbs: []string{"create", "get", "update"}},
+			{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"get"}},
+			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), role); err != nil {
+		t.Fatalf("create SDK test Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccount.Name, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(t.Context(), binding); err != nil {
+		t.Fatalf("create SDK test RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), binding) })
+
+	sdkConfig := rest.CopyConfig(restConfig)
+	sdkConfig.BearerToken = token
+	sdkConfig.BearerTokenFile = ""
+	forward, err := sandbox.StartGatewayPortForward(t.Context(), sdkConfig, testNamespace, "kruntimes-gateway", 80)
+	if err != nil {
+		t.Fatalf("start SDK Runtime gateway port-forward: %v", err)
+	}
+	t.Cleanup(forward.Close)
+	sdk, err := sandbox.NewFromRESTConfig(sdkConfig, sandbox.Config{HTTPClient: forward})
+	if err != nil {
+		t.Fatalf("create Sandbox SDK client: %v", err)
+	}
+	session, err := sdk.Create(t.Context(), sandbox.CreateOptions{GenerateName: "e2e-sdk-session-", Namespace: testNamespace, Runtime: runtimeName})
+	if err != nil {
+		t.Fatalf("create SDK Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), session.Run()) })
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := session.Wait(ctx); err != nil {
+		t.Fatalf("wait for SDK Session Run: %v", err)
+	}
+	result, err := session.Execute(ctx, sandbox.Command{Argv: []string{"sh", "-c", "printf sdk-port-forward"}})
+	if err != nil {
+		t.Fatalf("execute SDK Session command: %v", err)
+	}
+	if result.ExitCode != 0 || string(result.Stdout) != "sdk-port-forward" {
+		t.Fatalf("SDK Session command result = %#v, want successful sdk-port-forward output", result)
+	}
+	for _, name := range []string{"alpha.txt", "beta.txt", "gamma.txt"} {
+		if err := session.WriteFile(ctx, "pages/"+name, []byte(name), true); err != nil {
+			t.Fatalf("write SDK Session page file %q: %v", name, err)
+		}
+	}
+	page, err := session.ListFiles(ctx, sandbox.ListFilesOptions{Directory: "pages", Limit: 2})
+	if err != nil {
+		t.Fatalf("list first SDK Session file page: %v", err)
+	}
+	if got, want := sessionFilePaths(page.Entries), []string{"alpha.txt", "beta.txt"}; !slices.Equal(got, want) || page.NextPageToken == "" {
+		t.Fatalf("first SDK Session file page = %#v, want %#v and next token", page, want)
+	}
+	page, err = session.ListFiles(ctx, sandbox.ListFilesOptions{Directory: "pages", Limit: 2, PageToken: page.NextPageToken})
+	if err != nil {
+		t.Fatalf("list second SDK Session file page: %v", err)
+	}
+	if got, want := sessionFilePaths(page.Entries), []string{"gamma.txt"}; !slices.Equal(got, want) || page.NextPageToken != "" {
+		t.Fatalf("second SDK Session file page = %#v, want %#v and no next token", page, want)
+	}
+	if err := session.Close(ctx); err != nil {
+		t.Fatalf("close SDK Session Run: %v", err)
+	}
+	if session.Run().Status.Phase != v1alpha1.RunSucceeded {
+		t.Fatalf("SDK Close phase = %s, want Succeeded", session.Run().Status.Phase)
+	}
+
+	cancelled, err := sdk.Create(t.Context(), sandbox.CreateOptions{GenerateName: "e2e-sdk-cancel-", Namespace: testNamespace, Runtime: runtimeName})
+	if err != nil {
+		t.Fatalf("create SDK cancellation Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), cancelled.Run()) })
+	if err := cancelled.Wait(ctx); err != nil {
+		t.Fatalf("wait for SDK cancellation Session Run: %v", err)
+	}
+	if err := cancelled.Cancel(ctx); err != nil {
+		t.Fatalf("cancel SDK Session Run: %v", err)
+	}
+	if cancelled.Run().Status.Phase != v1alpha1.RunCancelled {
+		t.Fatalf("SDK Cancel phase = %s, want Cancelled", cancelled.Run().Status.Phase)
+	}
+}
+
+func sessionFilePaths(entries []sandbox.FileInfo) []string {
+	paths := make([]string, len(entries))
+	for i := range entries {
+		paths[i] = entries[i].Path
+	}
+	return paths
+}
+
+func TestKubernetesDiagnosisRuntimeCanReadNamespace(t *testing.T) {
+	name := fmt.Sprintf("diagnosis-runtime-%d", time.Now().UnixNano())
+	serviceAccountName := "diagnosis-reader-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: serviceAccountName, Namespace: testNamespace}}
+	if err := k8sClient.Create(t.Context(), serviceAccount); err != nil {
+		t.Fatalf("create diagnosis Runtime ServiceAccount: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), serviceAccount) })
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceAccountName, Namespace: testNamespace},
+		Rules:      []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}}},
+	}
+	if err := k8sClient.Create(t.Context(), role); err != nil {
+		t.Fatalf("create diagnosis Runtime Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccountName, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(t.Context(), binding); err != nil {
+		t.Fatalf("create diagnosis Runtime RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), binding) })
+
+	runtimeObject := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: v1alpha1.RuntimeSpec{
+			Template: runtimePodTemplate(diagnosisRuntimeImage(), 9092),
+			Port:     9092,
+			Replicas: 1,
+			Capacity: &v1alpha1.RuntimeCapacity{Resources: corev1.ResourceList{
+				corev1.ResourceName(v1alpha1.RuntimeResourceRuns): *resource.NewQuantity(1, resource.DecimalSI),
+			}},
+		},
+	}
+	runtimeObject.Spec.Template.Spec.ServiceAccountName = serviceAccountName
+	if err := k8sClient.Create(t.Context(), runtimeObject); err != nil {
+		t.Fatalf("create diagnosis Runtime: %v", err)
+	}
+	cleanupRuntime(t, name)
+	waitForRuntimePod(t, name, diagnosisRuntimeImage(), runtimedImage(), 1, "diagnosis Runtime Pod")
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-diagnosis-", Namespace: testNamespace},
+		Spec:       v1alpha1.RunSpec{Runtime: name, Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create diagnosis Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 45*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["kubectl","get","pods","--namespace","default","--output","json"]}}`), http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(response, &operation); err != nil {
+		t.Fatalf("decode diagnosis command response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 {
+		t.Fatalf("diagnosis kubectl command failed: %s", operation.Command.Stdout)
+	}
+	var pods corev1.PodList
+	if err := json.Unmarshal(operation.Command.Stdout, &pods); err != nil || len(pods.Items) == 0 {
+		t.Fatalf("diagnosis kubectl output = %s, unmarshal error = %v", operation.Command.Stdout, err)
+	}
+}
+
+func TestSessionRunExpiresWhenIdle(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-idle-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+	idleTimeout := int32(1)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-idle-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{IdleTimeoutSeconds: &idleTimeout}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create idle Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 10*time.Second, v1alpha1.RunTimeout)
+}
+
+func TestSessionRunExpiresWhenTotalTimeoutReached(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-total-timeout-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+	timeout := metav1.Duration{Duration: 5 * time.Second}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-total-timeout-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Timeout: &timeout,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	waitForRunPhase(t, run, 15*time.Second, v1alpha1.RunTimeout)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || condition.Reason != runretry.ReasonTimeout {
+		t.Fatalf("Completed condition = %#v, want Timeout", condition)
+	}
+}
+
+func TestSessionRunFailsWhenAssignedRuntimePodIsLost(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-pod-loss-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-pod-loss-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	podName := run.Status.AssignedPod
+	if podName == "" {
+		t.Fatal("Session Run reached Ready without an assigned Runtime Pod")
+	}
+	if err := k8sClient.Delete(context.Background(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: run.Namespace},
+	}); err != nil {
+		t.Fatalf("delete assigned Runtime Pod %s: %v", podName, err)
+	}
+
+	// A Ready session owns an ephemeral workspace on this exact Pod. It must
+	// become terminal rather than be re-registered on a replacement Pod.
+	waitForRunPhase(t, run, 60*time.Second, v1alpha1.RunFailed)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || (condition.Reason != runretry.ReasonPodGone && condition.Reason != runretry.ReasonPodTerminating) {
+		t.Fatalf("Completed condition = %#v, want PodGone or PodTerminating", condition)
+	}
+}
+
+func containsSessionFile(entries []struct {
+	Path string `json:"path"`
+}, path string) bool {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForSessionCommandLogs(t *testing.T, run *v1alpha1.Run, message string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		stream, err := coreClientset.CoreV1().Pods(run.Namespace).GetLogs(run.Status.AssignedPod, &corev1.PodLogOptions{Container: "runtimed"}).Stream(ctx)
+		if err == nil {
+			contents, readErr := io.ReadAll(stream)
+			_ = stream.Close()
+			if readErr == nil && containsSessionCommandLogs(string(contents), string(run.UID), message) {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for structured Session logs for Run %s", run.Name)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func containsSessionCommandLogs(contents, runUID, message string) bool {
+	stdoutFound := false
+	auditFound := false
+	for _, raw := range strings.Split(strings.TrimSuffix(contents, "\n"), "\n") {
+		var line struct {
+			RunUID    string `json:"run_uid"`
+			Stream    string `json:"stream"`
+			Message   string `json:"message"`
+			Operation string `json:"operation"`
+			Outcome   string `json:"outcome"`
+		}
+		if json.Unmarshal([]byte(raw), &line) != nil || line.RunUID != runUID || line.Operation != "command" || line.Outcome != "succeeded" {
+			continue
+		}
+		if line.Stream == "stdout" && line.Message == message {
+			stdoutFound = true
+		}
+		if line.Stream == "audit" && line.Message == "session operation completed" {
+			auditFound = true
+		}
+	}
+	return stdoutFound && auditFound
+}
+
+func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {
+	t.Helper()
+	ctx := context.Background()
+	serviceAccount, token := newSessionGatewayServiceAccount(t)
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceAccount.Name, Namespace: testNamespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups:     []string{v1alpha1.GroupVersion.Group},
+			Resources:     []string{"runs"},
+			ResourceNames: []string{run.Name},
+			Verbs:         []string{"get"},
+		}},
+	}
+	if err := k8sClient.Create(ctx, role); err != nil {
+		t.Fatalf("create gateway test Role: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, role) })
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name, Namespace: testNamespace},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: serviceAccount.Name, Namespace: testNamespace}},
+	}
+	if err := k8sClient.Create(ctx, binding); err != nil {
+		t.Fatalf("create gateway test RoleBinding: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, binding) })
+
+	return token
+}
+
+func sessionGatewayTokenWithoutRunAccess(t *testing.T) string {
+	t.Helper()
+	_, token := newSessionGatewayServiceAccount(t)
+	return token
+}
+
+func newSessionGatewayServiceAccount(t *testing.T) (*corev1.ServiceAccount, string) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "session-gateway-user-" + suffix, Namespace: testNamespace}}
+	if err := k8sClient.Create(ctx, serviceAccount); err != nil {
+		t.Fatalf("create gateway test ServiceAccount: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, serviceAccount) })
+
+	response, err := coreClientset.CoreV1().ServiceAccounts(testNamespace).CreateToken(ctx, serviceAccount.Name, &authenticationv1.TokenRequest{}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create gateway test ServiceAccount token: %v", err)
+	}
+	if response.Status.Token == "" {
+		t.Fatal("gateway test ServiceAccount token is empty")
+	}
+	return serviceAccount, response.Status.Token
+}
+
+func waitForGatewayPod(t *testing.T) *corev1.Pod {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for {
+		pods, err := coreClientset.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app.kubernetes.io/component=runtime-gateway"})
+		if err == nil {
+			for i := range pods.Items {
+				if podReady(&pods.Items[i]) {
+					return &pods.Items[i]
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for Runtime gateway Pod: %v", err)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func podReady(pod *corev1.Pod) bool {
+	if pod == nil || pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func gatewayEndpointURL(t *testing.T, pod *corev1.Pod, endpoint string) string {
+	t.Helper()
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Path == "" {
+		t.Fatalf("parse gateway endpoint %q: %v", endpoint, err)
+	}
+	localPort := availableLocalPort(t)
+	closer, err := forwardPodPort(t.Context(), pod.Namespace, pod.Name, localPort, 8084)
+	if err != nil {
+		t.Fatalf("port-forward Runtime gateway: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	return fmt.Sprintf("http://127.0.0.1:%d%s", localPort, parsed.EscapedPath())
+}
+
+func availableLocalPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve local port: %v", err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body []byte, expectedStatus int) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	lastResult := "no response"
+	for {
+		requestCtx, requestCancel := context.WithTimeout(ctx, 2*time.Second)
+		request, err := http.NewRequestWithContext(requestCtx, method, requestURL, bytes.NewReader(body))
+		if err != nil {
+			requestCancel()
+			t.Fatalf("create gateway request: %v", err)
+		}
+		if len(body) > 0 {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			contents, readErr := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			requestCancel()
+			if readErr != nil {
+				t.Fatalf("read gateway response: %v", readErr)
+			}
+			if response.StatusCode == expectedStatus {
+				return contents
+			}
+			lastResult = fmt.Sprintf("status %d: %s", response.StatusCode, contents)
+			if response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("gateway response status = %d, want %d: %s", response.StatusCode, expectedStatus, contents)
+			}
+		} else {
+			requestCancel()
+			lastResult = err.Error()
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for gateway response status %d: %s", expectedStatus, lastResult)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func gatewayRequest(ctx context.Context, method, requestURL, token string, body []byte, expectedStatus int) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create gateway request: %w", err)
+	}
+	if len(body) > 0 {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("send gateway request: %w", err)
+	}
+	defer response.Body.Close()
+	contents, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read gateway response: %w", err)
+	}
+	if response.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("gateway response status = %d, want %d: %s", response.StatusCode, expectedStatus, contents)
+	}
+	return contents, nil
+}
+
+func forwardPodPort(ctx context.Context, namespace, podName string, localPort, remotePort int) (io.Closer, error) {
+	transport, upgrader, err := spdy.RoundTripperFor(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("build port-forward transport: %w", err)
+	}
+	requestURL := coreClientset.CoreV1().RESTClient().Post().Namespace(namespace).Resource("pods").Name(podName).SubResource("portforward").URL()
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, requestURL)
+	stopCh := make(chan struct{})
+	readyCh := make(chan struct{})
+	forwarder, err := portforward.NewOnAddresses(dialer, []string{"127.0.0.1"}, []string{fmt.Sprintf("%d:%d", localPort, remotePort)}, stopCh, readyCh, io.Discard, io.Discard)
+	if err != nil {
+		return nil, fmt.Errorf("create port-forward: %w", err)
+	}
+	running := &e2ePortForward{stopCh: stopCh, done: make(chan error, 1)}
+	go func() { running.done <- forwarder.ForwardPorts() }()
+	select {
+	case <-readyCh:
+		return running, nil
+	case err := <-running.done:
+		return nil, fmt.Errorf("port-forward to Pod %s exited: %w", podName, err)
+	case <-ctx.Done():
+		_ = running.Close()
+		return nil, ctx.Err()
+	}
+}
+
+type e2ePortForward struct {
+	stopCh chan struct{}
+	done   chan error
+	once   sync.Once
+}
+
+func (f *e2ePortForward) Close() error {
+	f.once.Do(func() { close(f.stopCh) })
+	select {
+	case err := <-f.done:
+		return err
+	case <-time.After(2 * time.Second):
+		return fmt.Errorf("timed out stopping port-forward")
 	}
 }
 
@@ -761,8 +1602,8 @@ func TestWorkflowRunCancellationPropagatesToActionChildRun(t *testing.T) {
 
 	actionRun := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: actionRunName, Namespace: testNamespace}}
 	waitForRunPhase(t, actionRun, 30*time.Second, v1alpha1.RunCancelled)
-	if !actionRun.Spec.CancelRequested {
-		t.Fatalf("Action child Run %s cancelRequested=false, want true", actionRun.Name)
+	if !actionRun.Spec.HasImmediateTermination() {
+		t.Fatalf("Action child Run %s does not request immediate termination", actionRun.Name)
 	}
 	waitForWorkflowRunPhase(t, workflowRun, 30*time.Second, v1alpha1.WorkflowCancelled)
 }
@@ -1323,6 +2164,63 @@ func TestFilesystemArtifacts(t *testing.T) {
 	assertFilesystemArtifactMissing(t, claimName, report.Location.Filesystem.Path)
 }
 
+func TestSessionRunExportsArtifactsOnDrain(t *testing.T) {
+	runtimeName := "bash-session-artifacts"
+	claimName := "e2e-session-artifacts"
+	ensureFilesystemRuntime(t, runtimeName, claimName)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-artifacts-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create Session artifact Run: %v", err)
+	}
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["sh","-c","printf session-report > \"$KRUNTIME_ARTIFACTS_DIR/report.txt\"; printf done"]}}`), http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(response, &operation); err != nil {
+		t.Fatalf("decode Session artifact command response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "done" {
+		t.Fatalf("Session artifact command = %#v, want successful done output", operation.Command)
+	}
+
+	requestRunDrain(t, run)
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunSucceeded)
+	if run.Status.ArtifactStore == nil || run.Status.ArtifactStore.Filesystem == nil ||
+		run.Status.ArtifactStore.Filesystem.VolumeClaimName != claimName {
+		t.Fatalf("artifact store cleanup snapshot = %#v", run.Status.ArtifactStore)
+	}
+	if len(run.Status.ArtifactRefs) != 1 || run.Status.ArtifactRefs[0].Name != "report.txt" {
+		t.Fatalf("artifact refs = %#v, want report.txt", run.Status.ArtifactRefs)
+	}
+
+	destination := filepath.Join(t.TempDir(), "report.txt")
+	if _, err := krt.DownloadArtifact(t.Context(), k8sClient, restConfig, testNamespace, run.Name, "report.txt", destination, 19095); err != nil {
+		t.Fatalf("download Session artifact: %v", err)
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "session-report" {
+		t.Fatalf("downloaded Session artifact = %q, want session-report", contents)
+	}
+}
+
 func TestRunStagesArtifactInputs(t *testing.T) {
 	runtimeName := "bash-artifact-inputs"
 	claimName := "e2e-artifact-inputs"
@@ -1365,6 +2263,41 @@ func TestRunStagesArtifactInputs(t *testing.T) {
 		t.Fatalf("create artifact consumer: %v", err)
 	}
 	waitForRun(t, consumer, 30*time.Second)
+
+	sessionConsumer := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-artifact-consumer-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			ArtifactInputs: []v1alpha1.ArtifactInput{
+				{Ref: report, Path: "inputs/report.txt"},
+				{Ref: bundle, Path: "inputs/bundle"},
+			},
+			Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), sessionConsumer); err != nil {
+		t.Fatalf("create Session artifact consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), sessionConsumer) })
+	waitForRunPhase(t, sessionConsumer, 30*time.Second, v1alpha1.RunReady)
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), sessionConsumer.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, sessionConsumer)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["sh","-c","printf '%s:%s' \"$(cat inputs/report.txt)\" \"$(cat inputs/bundle/data.txt)\""]}}`), http.StatusOK)
+	var operation struct {
+		Command struct {
+			ExitCode int32  `json:"exitCode"`
+			Stdout   []byte `json:"stdout"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(response, &operation); err != nil {
+		t.Fatalf("decode Session artifact input response: %v", err)
+	}
+	if operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "report:nested" {
+		t.Fatalf("Session artifact input result = %#v, want report:nested", operation.Command)
+	}
+	requestRunCancel(t, sessionConsumer)
+	waitForRunPhase(t, sessionConsumer, 20*time.Second, v1alpha1.RunCancelled)
 
 	missing := report.DeepCopy()
 	missing.Name = "missing.txt"

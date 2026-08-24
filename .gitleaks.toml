@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented Session file-pagination cursors"
+regexTarget = "match"
+regexes = [
+  '''eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJiIn0''',
+  '''eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJidWlsZC5sb2cifQ''',
+]

@@ -57,6 +57,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s-runtimed" ((include "kruntimes.fullname" .) | trunc 54 | trimSuffix "-") }}
 {{- end }}
 
+{{- define "kruntimes.gateway.name" -}}
+{{- printf "%s-gateway" ((include "kruntimes.fullname" .) | trunc 56 | trimSuffix "-") }}
+{{- end }}
+
 {{- define "kruntimes.controller.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "kruntimes.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -67,6 +71,12 @@ app.kubernetes.io/component: controller
 app.kubernetes.io/name: {{ include "kruntimes.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: scheduler
+{{- end }}
+
+{{- define "kruntimes.gateway.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "kruntimes.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: runtime-gateway
 {{- end }}
 
 {{- define "kruntimes.controller.labels" -}}
@@ -85,6 +95,12 @@ app: kruntimes-scheduler
 {{ include "kruntimes.labels" . }}
 app.kubernetes.io/component: runtimed
 app: kruntimes-runtimed
+{{- end }}
+
+{{- define "kruntimes.gateway.labels" -}}
+{{ include "kruntimes.labels" . }}
+app.kubernetes.io/component: runtime-gateway
+app: kruntimes-runtime-gateway
 {{- end }}
 
 {{- define "kruntimes.image" -}}

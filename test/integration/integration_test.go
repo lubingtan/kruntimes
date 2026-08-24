@@ -2,12 +2,18 @@ package integration
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,11 +30,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	webhookserver "sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	workspaceadmission "github.com/kruntimes/kruntimes/internal/admission"
 	"github.com/kruntimes/kruntimes/internal/runtimed"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
 	"github.com/kruntimes/kruntimes/internal/scheduler"
+	"github.com/kruntimes/kruntimes/runtimes/bash"
 )
 
 var (
@@ -74,7 +82,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic("failed to create manager: " + err.Error())
 	}
-	workspaceadmission.RegisterRunWorkspaceValidator(
+	workspaceadmission.RegisterRunAdmissionValidator(
 		testMgr.GetWebhookServer(),
 		testMgr.GetAPIReader(),
 		allowSubjectAccessReviewer{},
@@ -167,6 +175,73 @@ func TestRunWorkspaceAdmissionWebhook(t *testing.T) {
 	}
 }
 
+func TestSessionFilePaginationContract(t *testing.T) {
+	workDir := t.TempDir()
+	runtimeServer := grpc.NewServer()
+	pb.RegisterSessionRuntimeServer(runtimeServer, bash.NewServer(workDir))
+	listener, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen for Session Runtime: %v", err)
+	}
+	defer listener.Close()
+	go func() { _ = runtimeServer.Serve(listener) }()
+	defer runtimeServer.Stop()
+
+	connection, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial Session Runtime: %v", err)
+	}
+	defer connection.Close()
+	client := pb.NewSessionRuntimeClient(connection)
+	identity := &pb.SessionIdentity{RunUid: "pagination-run", AssignedPodUid: "runtime-pod"}
+	if _, err := client.RegisterSession(t.Context(), &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}); err != nil {
+		t.Fatalf("register Session: %v", err)
+	}
+	for _, name := range []string{"z", "a", "\u00e9", "b"} {
+		if _, err := client.ExecuteSessionOperation(t.Context(), &pb.ExecuteSessionOperationRequest{
+			Identity: identity,
+			Operation: &pb.ExecuteSessionOperationRequest_WriteFile{WriteFile: &pb.SessionFileWrite{
+				Path: "pages/" + name, Contents: []byte(name), CreateParents: true,
+			}},
+		}); err != nil {
+			t.Fatalf("write Session file %q: %v", name, err)
+		}
+	}
+
+	first, err := client.ListSessionFiles(t.Context(), &pb.ListSessionFilesRequest{Identity: identity, Path: "pages", Limit: 2})
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+	if got, want := integrationSessionFilePaths(first.Entries), []string{"a", "b"}; !slices.Equal(got, want) || first.NextPageToken == "" {
+		t.Fatalf("first page = %#v, want %#v and next token", first, want)
+	}
+	second, err := client.ListSessionFiles(t.Context(), &pb.ListSessionFilesRequest{Identity: identity, Path: "pages", Limit: 2, PageToken: first.NextPageToken})
+	if err != nil {
+		t.Fatalf("list second page: %v", err)
+	}
+	if got, want := integrationSessionFilePaths(second.Entries), []string{"z", "\u00e9"}; !slices.Equal(got, want) || second.NextPageToken != "" {
+		t.Fatalf("second page = %#v, want %#v and no next token", second, want)
+	}
+
+	for _, request := range []*pb.ListSessionFilesRequest{
+		{Identity: identity, Path: "pages", Limit: 1001},
+		{Identity: identity, Path: "other", PageToken: first.NextPageToken},
+		{Identity: identity, Path: "../outside"},
+	} {
+		if _, err := client.ListSessionFiles(t.Context(), request); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("ListSessionFiles(%#v) error = %v, want InvalidArgument", request, err)
+		}
+	}
+}
+
+func integrationSessionFilePaths(entries []*pb.SessionFileInfo) []string {
+	paths := make([]string, len(entries))
+	for i := range entries {
+		paths[i] = entries[i].Path
+	}
+	return paths
+}
+
 func integrationRun(namespace, workspaceName string) *v1alpha1.Run {
 	return &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: "workspace-admission-", Namespace: namespace},
@@ -185,7 +260,7 @@ func runWorkspaceValidatingWebhookConfiguration() *admissionregistrationv1.Valid
 	matchPolicy := admissionregistrationv1.Equivalent
 	sideEffects := admissionregistrationv1.SideEffectClassNone
 	timeoutSeconds := int32(5)
-	path := workspaceadmission.RunWorkspaceValidationPath
+	path := workspaceadmission.RunValidationPath
 	return &admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{Name: "run-workspace.integration.kruntimes.io"},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{{
@@ -683,22 +758,47 @@ func TestCRDValidationRejectsRunWithoutMode(t *testing.T) {
 	}
 }
 
-func TestCRDValidationRejectsRunModeWithBothTaskAndFunction(t *testing.T) {
+func TestCRDValidationRejectsRunModeWithMultipleModes(t *testing.T) {
+	ctx := context.Background()
+	ns := testNamespace(t, "test-run-validation-")
+
+	for _, mode := range []v1alpha1.RunMode{
+		{
+			Task:    &v1alpha1.RunTaskMode{Args: []string{"echo hello"}},
+			Session: &v1alpha1.RunSessionMode{},
+		},
+		{
+			Function: &v1alpha1.RunFunctionMode{Handler: "main.invoke"},
+			Session:  &v1alpha1.RunSessionMode{},
+		},
+	} {
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "mixed-mode-", Namespace: ns.Name},
+			Spec: v1alpha1.RunSpec{
+				Runtime: "bash",
+				Mode:    mode,
+			},
+		}
+		if err := k8sClient.Create(ctx, run); !apierrors.IsInvalid(err) {
+			t.Fatalf("mixed run mode error = %v, want Invalid", err)
+		}
+	}
+}
+
+func TestCRDValidationRejectsSessionRunWorkspace(t *testing.T) {
 	ctx := context.Background()
 	ns := testNamespace(t, "test-run-validation-")
 
 	run := &v1alpha1.Run{
-		ObjectMeta: metav1.ObjectMeta{Name: "mixed-mode", Namespace: ns.Name},
+		ObjectMeta: metav1.ObjectMeta{Name: "session-workspace", Namespace: ns.Name},
 		Spec: v1alpha1.RunSpec{
-			Runtime: "bash",
-			Mode: v1alpha1.RunMode{
-				Task:     &v1alpha1.RunTaskMode{Args: []string{"echo hello"}},
-				Function: &v1alpha1.RunFunctionMode{Handler: "main.invoke"},
-			},
+			Runtime:   "bash",
+			Mode:      v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+			Workspace: &v1alpha1.RunWorkspaceReference{Name: "workspace"},
 		},
 	}
 	if err := k8sClient.Create(ctx, run); !apierrors.IsInvalid(err) {
-		t.Fatalf("mixed run mode error = %v, want Invalid", err)
+		t.Fatalf("session Run workspace error = %v, want Invalid", err)
 	}
 }
 
@@ -1081,17 +1181,50 @@ func TestCRDValidationRunExecutionInputsAreImmutable(t *testing.T) {
 		})
 	}
 
-	t.Run("cancel-request-is-one-way", func(t *testing.T) {
+	t.Run("termination-request-is-one-way", func(t *testing.T) {
 		run := newRun(t)
 		if err := updateRun(run, func(run *v1alpha1.Run) {
-			run.Spec.CancelRequested = true
+			run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
 		}); err != nil {
-			t.Fatalf("request run cancellation: %v", err)
+			t.Fatalf("request immediate run termination: %v", err)
 		}
 		if err := updateRun(run, func(run *v1alpha1.Run) {
-			run.Spec.CancelRequested = false
+			run.Spec.Termination = nil
 		}); !apierrors.IsInvalid(err) {
-			t.Fatalf("clearing run cancellation error = %v, want Invalid", err)
+			t.Fatalf("clearing run termination error = %v, want Invalid", err)
+		}
+	})
+
+	t.Run("drain-termination-requires-session-mode", func(t *testing.T) {
+		run := newRun(t)
+		if err := updateRun(run, func(run *v1alpha1.Run) {
+			run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain}
+		}); !apierrors.IsInvalid(err) {
+			t.Fatalf("request drain termination for task Run error = %v, want Invalid", err)
+		}
+	})
+
+	t.Run("drain-termination-is-one-way", func(t *testing.T) {
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{GenerateName: "session-", Namespace: ns.Name},
+			Spec: v1alpha1.RunSpec{
+				Runtime:     "bash",
+				Mode:        v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+				Termination: &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationDrain},
+			},
+		}
+		if err := k8sClient.Create(ctx, run); err != nil {
+			t.Fatalf("create draining Session Run: %v", err)
+		}
+		if err := updateRun(run, func(run *v1alpha1.Run) {
+			run.Spec.Termination.Mode = v1alpha1.RunTerminationImmediate
+		}); err != nil {
+			t.Fatalf("escalating drain termination error = %v", err)
+		}
+		if err := updateRun(run, func(run *v1alpha1.Run) {
+			run.Spec.Termination.Mode = v1alpha1.RunTerminationDrain
+		}); !apierrors.IsInvalid(err) {
+			t.Fatalf("downgrading immediate termination error = %v, want Invalid", err)
 		}
 	})
 
@@ -1635,7 +1768,7 @@ func TestCRDValidationRejectsUnsupportedFunctionEndpointProtocol(t *testing.T) {
 			return err
 		}
 		run.Status.Phase = v1alpha1.RunReady
-		run.Status.Endpoint = &v1alpha1.RunEndpoint{Protocol: v1alpha1.RunEndpointProtocol("HTTP"), URL: "http://example.invalid/invoke"}
+		run.Status.Endpoint = &v1alpha1.RunEndpoint{Protocol: v1alpha1.RunEndpointProtocol("FTP"), URL: "ftp://example.invalid/invoke"}
 		return k8sClient.Status().Update(ctx, run)
 	})
 	if !apierrors.IsInvalid(err) {

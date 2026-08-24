@@ -68,8 +68,55 @@ controller:
       cpu: 500m
       memory: 256Mi
 
+gateway:
+  enabled: false
+  image: ghcr.io/kruntimes/gateway
+  imagePullPolicy: IfNotPresent
+  replicas: 2
+  httpBindAddress: ":8084"
+  metricsBindAddress: ":8085"
+  probeBindAddress: ":8086"
+  servicePort: 80
+  httpPort: 8084
+  metricsPort: 8085
+  probePort: 8086
+  authorizationCacheTTL: 30s
+  authorizationCacheCapacity: 1024
+  maxConcurrentRequests: 128
+  podAnnotations: {}
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 runtimed:
   image: ghcr.io/kruntimes/runtimed
+  session:
+    # Platform-wide upper bounds. A Session Run may only lower queueSize and
+    # operationTimeout in its own spec.
+    maxQueueSize: 32
+    maxOperationTimeout: 5m
+    # Bounds how long runtimed waits for the Runtime Server to finish closing a
+    # session after cancelling in-flight work.
+    closeTimeout: 5s
 
 workspace:
   emptyDir:

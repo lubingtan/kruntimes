@@ -19,7 +19,7 @@ import (
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 )
 
-func TestRunWorkspaceValidator(t *testing.T) {
+func TestRunAdmissionValidator(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add kruntimes scheme: %v", err)
@@ -95,7 +95,7 @@ func TestRunWorkspaceValidator(t *testing.T) {
 					return authorizationv1.SubjectAccessReviewStatus{}, nil
 				}
 			}
-			validator := &RunWorkspaceValidator{
+			validator := &RunAdmissionValidator{
 				Reader:   reader,
 				Reviewer: reviewer,
 				Decoder:  admissionwebhook.NewDecoder(scheme),
@@ -108,7 +108,7 @@ func TestRunWorkspaceValidator(t *testing.T) {
 	}
 }
 
-func TestRunWorkspaceValidatorBoundsAuthorizationTimeout(t *testing.T) {
+func TestRunAdmissionValidatorBoundsAuthorizationTimeout(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add kruntimes scheme: %v", err)
@@ -117,7 +117,7 @@ func TestRunWorkspaceValidatorBoundsAuthorizationTimeout(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "build", Namespace: "default"},
 		Spec:       v1alpha1.PersistentWorkspaceSpec{Runtime: "bash"},
 	}
-	validator := &RunWorkspaceValidator{
+	validator := &RunAdmissionValidator{
 		Reader:               fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(workspace).Build(),
 		Decoder:              admissionwebhook.NewDecoder(scheme),
 		AuthorizationTimeout: 100 * time.Millisecond,
@@ -138,7 +138,7 @@ func TestRunWorkspaceValidatorBoundsAuthorizationTimeout(t *testing.T) {
 	}
 }
 
-func TestRunWorkspaceValidatorFencesControllerWorkflowChildRuns(t *testing.T) {
+func TestRunAdmissionValidatorFencesControllerWorkflowChildRuns(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add kruntimes scheme: %v", err)
@@ -197,7 +197,7 @@ func TestRunWorkspaceValidatorFencesControllerWorkflowChildRuns(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			reader := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(workflowRun, test.workspace).Build()
 			sarCalled := false
-			validator := &RunWorkspaceValidator{
+			validator := &RunAdmissionValidator{
 				Reader:                           reader,
 				Decoder:                          admissionwebhook.NewDecoder(scheme),
 				WorkflowControllerServiceAccount: ServiceAccountIdentity{Namespace: "kruntimes", Name: "kruntimes-controller"},

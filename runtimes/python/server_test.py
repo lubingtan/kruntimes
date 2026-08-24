@@ -1,7 +1,10 @@
+import json
+import signal
+import subprocess
 import tempfile
 import time
 import unittest
-import json
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -22,11 +25,16 @@ class TestPythonRuntime(unittest.TestCase):
             self.servicer,
             self.server,
         )
+        runtime_pb2_grpc.add_SessionRuntimeServicer_to_server(
+            self.servicer,
+            self.server,
+        )
         port = self.server.add_insecure_port("localhost:0")
         self.server.start()
         self.channel = grpc.insecure_channel(f"localhost:{port}")
         self.stub = runtime_pb2_grpc.RuntimeStub(self.channel)
         self.function_stub = runtime_pb2_grpc.FunctionRuntimeStub(self.channel)
+        self.session_stub = runtime_pb2_grpc.SessionRuntimeStub(self.channel)
 
     def tearDown(self):
         self.server.stop(0)
@@ -66,6 +74,190 @@ class TestPythonRuntime(unittest.TestCase):
             runtime_pb2.FUNCTION_REGISTRATION_STATE_READY,
         )
         return response.registration
+
+    def _register_session(self, working_dir, run_uid="session-run", pod_uid="pod-a", env=None):
+        return self.session_stub.RegisterSession(
+            runtime_pb2.RegisterSessionRequest(
+                identity=runtime_pb2.SessionIdentity(
+                    run_uid=run_uid,
+                    assigned_pod_uid=pod_uid,
+                ),
+                working_dir=working_dir,
+                env=env or {},
+            )
+        )
+
+    def test_session_registration_status_close_and_assignment_fencing(self):
+        session_dir = self._prepare_inline("# session")
+        registered = self._register_session(session_dir)
+        self.assertEqual(registered.state, runtime_pb2.SESSION_STATE_READY)
+        self.assertGreater(registered.last_activity_unix_nano, 0)
+
+        # The same Run assignment may be retried without creating new state.
+        self._register_session(session_dir)
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self._register_session(session_dir, pod_uid="pod-b")
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+        identity = runtime_pb2.SessionIdentity(
+            run_uid="session-run",
+            assigned_pod_uid="pod-a",
+        )
+        current = self.session_stub.GetSessionStatus(
+            runtime_pb2.GetSessionStatusRequest(identity=identity)
+        )
+        self.assertEqual(current.state, runtime_pb2.SESSION_STATE_READY)
+        self.session_stub.CloseSession(runtime_pb2.CloseSessionRequest(identity=identity))
+        self.session_stub.CloseSession(runtime_pb2.CloseSessionRequest(identity=identity))
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.session_stub.GetSessionStatus(
+                runtime_pb2.GetSessionStatusRequest(identity=identity)
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.NOT_FOUND)
+
+    def test_session_registration_rejects_escaping_workspace(self):
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self._register_session(tempfile.mkdtemp())
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    def test_session_executes_commands_and_confines_files(self):
+        session_dir = self._prepare_inline("# session")
+        self._register_session(
+            session_dir, env={"KRUNTIMES_SESSION_DEFAULT": "session"}
+        )
+        identity = runtime_pb2.SessionIdentity(
+            run_uid="session-run",
+            assigned_pod_uid="pod-a",
+        )
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.session_stub.ExecuteSessionOperation(
+                runtime_pb2.ExecuteSessionOperationRequest(identity=identity)
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                create_directory=runtime_pb2.SessionDirectoryCreate(
+                    path="scratch/nested",
+                ),
+            )
+        )
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                write_file=runtime_pb2.SessionFileWrite(
+                    path="notes/hello.txt",
+                    contents=b"hello\n",
+                    create_parents=True,
+                ),
+            )
+        )
+        read = self.session_stub.ReadSessionFile(
+            runtime_pb2.ReadSessionFileRequest(
+                identity=identity,
+                path="notes/hello.txt",
+                max_bytes=1024,
+            )
+        )
+        self.assertEqual(read.contents, b"hello\n")
+        self.assertFalse(read.truncated)
+        listed = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(identity=identity)
+        )
+        notes = next((entry for entry in listed.entries if entry.path == "notes"), None)
+        self.assertIsNotNone(notes)
+        self.assertTrue(notes.directory)
+        operation = self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                command=runtime_pb2.SessionCommand(
+                    argv=["bash", "-c", "printf '%s:%s:' \"$KRUNTIMES_SESSION_DEFAULT\" \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"],
+                    env={"KRUNTIMES_SESSION_TEST": "environment"},
+                ),
+            )
+        )
+        self.assertEqual(operation.command.exit_code, 0)
+        self.assertEqual(operation.command.stdout, b"session:environment:hello\n")
+        self.assertFalse(operation.command.timed_out)
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                rename_file=runtime_pb2.SessionFileRename(
+                    source_path="notes/hello.txt",
+                    destination_path="notes/greeting.txt",
+                ),
+            )
+        )
+        self.session_stub.ExecuteSessionOperation(
+            runtime_pb2.ExecuteSessionOperationRequest(
+                identity=identity,
+                delete_file=runtime_pb2.SessionFileDelete(
+                    path="notes",
+                    recursive=True,
+                ),
+            )
+        )
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.session_stub.ReadSessionFile(
+                runtime_pb2.ReadSessionFileRequest(
+                    identity=identity,
+                    path="../outside",
+                    max_bytes=1,
+                )
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    def test_session_file_listing_pages_are_bounded_and_cross_runtime(self):
+        session_dir = self.work_dir / "session-pages"
+        session_dir.mkdir()
+        self._register_session(str(session_dir))
+        identity = runtime_pb2.SessionIdentity(
+            run_uid="session-run",
+            assigned_pod_uid="pod-a",
+        )
+        for name in ("z", "b", "a", "\u00e9"):
+            (session_dir / name).write_text(name)
+
+        first = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(identity=identity, limit=2)
+        )
+        self.assertEqual([entry.path for entry in first.entries], ["a", "b"])
+        self.assertTrue(first.next_page_token)
+
+        second = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(
+                identity=identity,
+                limit=2,
+                page_token=first.next_page_token,
+            )
+        )
+        self.assertEqual([entry.path for entry in second.entries], ["z", "\u00e9"])
+        self.assertFalse(second.next_page_token)
+
+        # This token is encoded as the documented cross-runtime JSON cursor. A
+        # Bash Runtime Server must accept the same unpadded base64url value.
+        bash_token = "eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJiIn0"
+        from_bash = self.session_stub.ListSessionFiles(
+            runtime_pb2.ListSessionFilesRequest(
+                identity=identity,
+                limit=2,
+                page_token=bash_token,
+            )
+        )
+        self.assertEqual([entry.path for entry in from_bash.entries], ["z", "\u00e9"])
+
+        for request in (
+            runtime_pb2.ListSessionFilesRequest(identity=identity, limit=1001),
+            runtime_pb2.ListSessionFilesRequest(identity=identity, page_token="not-a-token"),
+            runtime_pb2.ListSessionFilesRequest(
+                identity=identity,
+                path="other",
+                page_token=first.next_page_token,
+            ),
+        ):
+            with self.assertRaises(grpc.RpcError) as ctx:
+                self.session_stub.ListSessionFiles(request)
+            self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
     def _wait_for_function_in_flight(self, registration, timeout=5):
         deadline = time.time() + timeout
@@ -510,6 +702,29 @@ sys.stderr.write("y" * 4096)
         status = self._wait("bad-entrypoint")
         self.assertEqual(status.state, runtime_pb2.EXECUTION_STATE_FAILED)
         self.assertIn("entrypoint", status.error_message)
+
+
+class TestSessionTermination(unittest.TestCase):
+    def test_session_termination_grace_is_configured(self):
+        runtime = PythonRuntime(
+            tempfile.mkdtemp(),
+            session_termination_grace_seconds=0.25,
+        )
+        process = mock.Mock()
+        process.wait.side_effect = [subprocess.TimeoutExpired("command", 0.25), None]
+
+        with mock.patch("server.terminate_process_group") as terminate:
+            runtime._stop_session_process(process)
+
+        self.assertEqual(process.wait.call_args_list[0], mock.call(timeout=0.25))
+        self.assertEqual(process.wait.call_count, 2)
+        self.assertEqual(terminate.call_count, 2)
+        self.assertEqual(terminate.call_args_list[0][0][1], signal.SIGTERM)
+        self.assertEqual(terminate.call_args_list[1][0][1], signal.SIGKILL)
+
+    def test_session_termination_grace_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            PythonRuntime(tempfile.mkdtemp(), session_termination_grace_seconds=0)
 
 
 if __name__ == "__main__":

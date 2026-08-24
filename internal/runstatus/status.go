@@ -20,6 +20,11 @@ func SetTerminal(run *v1alpha1.Run, phase v1alpha1.RunPhase, reason, message str
 	run.Status.Phase = phase
 	run.Status.Message = message
 	run.Status.CompletionTime = &now
+	if meta.FindStatusCondition(run.Status.Conditions, ConditionReady) != nil {
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: ConditionReady, Status: metav1.ConditionFalse, Reason: reason, Message: message,
+		})
+	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 		Type: ConditionRunning, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	})

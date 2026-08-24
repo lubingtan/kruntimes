@@ -551,3 +551,319 @@ var FunctionRuntime_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "api/runtime/v1/runtime.proto",
 }
+
+const (
+	SessionRuntime_RegisterSession_FullMethodName         = "/executor.v1.SessionRuntime/RegisterSession"
+	SessionRuntime_GetSessionStatus_FullMethodName        = "/executor.v1.SessionRuntime/GetSessionStatus"
+	SessionRuntime_ExecuteSessionOperation_FullMethodName = "/executor.v1.SessionRuntime/ExecuteSessionOperation"
+	SessionRuntime_ReadSessionFile_FullMethodName         = "/executor.v1.SessionRuntime/ReadSessionFile"
+	SessionRuntime_ListSessionFiles_FullMethodName        = "/executor.v1.SessionRuntime/ListSessionFiles"
+	SessionRuntime_CloseSession_FullMethodName            = "/executor.v1.SessionRuntime/CloseSession"
+)
+
+// SessionRuntimeClient is the client API for SessionRuntime service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// SessionRuntime is an optional Runtime Server extension for stateful session
+// Runs. runtimed also implements this service for gateway traffic, forwarding
+// requests only to the assigned Pod of the same Runtime when it is not the
+// owner. runtimed owns queue admission and operation lifecycle; the Runtime
+// Server owns local workspace confinement and process execution.
+type SessionRuntimeClient interface {
+	// RegisterSession creates or resumes one local Session Run workspace.
+	RegisterSession(ctx context.Context, in *RegisterSessionRequest, opts ...grpc.CallOption) (*SessionStatus, error)
+	// GetSessionStatus returns local session state for recovery and idle checks.
+	GetSessionStatus(ctx context.Context, in *GetSessionStatusRequest, opts ...grpc.CallOption) (*SessionStatus, error)
+	// ExecuteSessionOperation executes one mutation already admitted by runtimed.
+	ExecuteSessionOperation(ctx context.Context, in *ExecuteSessionOperationRequest, opts ...grpc.CallOption) (*ExecuteSessionOperationResponse, error)
+	// ReadSessionFile returns bounded contents of one workspace-relative file.
+	ReadSessionFile(ctx context.Context, in *ReadSessionFileRequest, opts ...grpc.CallOption) (*ReadSessionFileResponse, error)
+	// ListSessionFiles lists workspace-relative directory entries.
+	ListSessionFiles(ctx context.Context, in *ListSessionFilesRequest, opts ...grpc.CallOption) (*ListSessionFilesResponse, error)
+	// CloseSession removes local state after runtimed has fenced new operations.
+	CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error)
+}
+
+type sessionRuntimeClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSessionRuntimeClient(cc grpc.ClientConnInterface) SessionRuntimeClient {
+	return &sessionRuntimeClient{cc}
+}
+
+func (c *sessionRuntimeClient) RegisterSession(ctx context.Context, in *RegisterSessionRequest, opts ...grpc.CallOption) (*SessionStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionStatus)
+	err := c.cc.Invoke(ctx, SessionRuntime_RegisterSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) GetSessionStatus(ctx context.Context, in *GetSessionStatusRequest, opts ...grpc.CallOption) (*SessionStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionStatus)
+	err := c.cc.Invoke(ctx, SessionRuntime_GetSessionStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) ExecuteSessionOperation(ctx context.Context, in *ExecuteSessionOperationRequest, opts ...grpc.CallOption) (*ExecuteSessionOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecuteSessionOperationResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_ExecuteSessionOperation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) ReadSessionFile(ctx context.Context, in *ReadSessionFileRequest, opts ...grpc.CallOption) (*ReadSessionFileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadSessionFileResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_ReadSessionFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) ListSessionFiles(ctx context.Context, in *ListSessionFilesRequest, opts ...grpc.CallOption) (*ListSessionFilesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSessionFilesResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_ListSessionFiles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionRuntimeClient) CloseSession(ctx context.Context, in *CloseSessionRequest, opts ...grpc.CallOption) (*CloseSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseSessionResponse)
+	err := c.cc.Invoke(ctx, SessionRuntime_CloseSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SessionRuntimeServer is the server API for SessionRuntime service.
+// All implementations must embed UnimplementedSessionRuntimeServer
+// for forward compatibility.
+//
+// SessionRuntime is an optional Runtime Server extension for stateful session
+// Runs. runtimed also implements this service for gateway traffic, forwarding
+// requests only to the assigned Pod of the same Runtime when it is not the
+// owner. runtimed owns queue admission and operation lifecycle; the Runtime
+// Server owns local workspace confinement and process execution.
+type SessionRuntimeServer interface {
+	// RegisterSession creates or resumes one local Session Run workspace.
+	RegisterSession(context.Context, *RegisterSessionRequest) (*SessionStatus, error)
+	// GetSessionStatus returns local session state for recovery and idle checks.
+	GetSessionStatus(context.Context, *GetSessionStatusRequest) (*SessionStatus, error)
+	// ExecuteSessionOperation executes one mutation already admitted by runtimed.
+	ExecuteSessionOperation(context.Context, *ExecuteSessionOperationRequest) (*ExecuteSessionOperationResponse, error)
+	// ReadSessionFile returns bounded contents of one workspace-relative file.
+	ReadSessionFile(context.Context, *ReadSessionFileRequest) (*ReadSessionFileResponse, error)
+	// ListSessionFiles lists workspace-relative directory entries.
+	ListSessionFiles(context.Context, *ListSessionFilesRequest) (*ListSessionFilesResponse, error)
+	// CloseSession removes local state after runtimed has fenced new operations.
+	CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error)
+	mustEmbedUnimplementedSessionRuntimeServer()
+}
+
+// UnimplementedSessionRuntimeServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedSessionRuntimeServer struct{}
+
+func (UnimplementedSessionRuntimeServer) RegisterSession(context.Context, *RegisterSessionRequest) (*SessionStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterSession not implemented")
+}
+func (UnimplementedSessionRuntimeServer) GetSessionStatus(context.Context, *GetSessionStatusRequest) (*SessionStatus, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSessionStatus not implemented")
+}
+func (UnimplementedSessionRuntimeServer) ExecuteSessionOperation(context.Context, *ExecuteSessionOperationRequest) (*ExecuteSessionOperationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecuteSessionOperation not implemented")
+}
+func (UnimplementedSessionRuntimeServer) ReadSessionFile(context.Context, *ReadSessionFileRequest) (*ReadSessionFileResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadSessionFile not implemented")
+}
+func (UnimplementedSessionRuntimeServer) ListSessionFiles(context.Context, *ListSessionFilesRequest) (*ListSessionFilesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSessionFiles not implemented")
+}
+func (UnimplementedSessionRuntimeServer) CloseSession(context.Context, *CloseSessionRequest) (*CloseSessionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CloseSession not implemented")
+}
+func (UnimplementedSessionRuntimeServer) mustEmbedUnimplementedSessionRuntimeServer() {}
+func (UnimplementedSessionRuntimeServer) testEmbeddedByValue()                        {}
+
+// UnsafeSessionRuntimeServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SessionRuntimeServer will
+// result in compilation errors.
+type UnsafeSessionRuntimeServer interface {
+	mustEmbedUnimplementedSessionRuntimeServer()
+}
+
+func RegisterSessionRuntimeServer(s grpc.ServiceRegistrar, srv SessionRuntimeServer) {
+	// If the following call panics, it indicates UnimplementedSessionRuntimeServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&SessionRuntime_ServiceDesc, srv)
+}
+
+func _SessionRuntime_RegisterSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).RegisterSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_RegisterSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).RegisterSession(ctx, req.(*RegisterSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_GetSessionStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSessionStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).GetSessionStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_GetSessionStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).GetSessionStatus(ctx, req.(*GetSessionStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_ExecuteSessionOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecuteSessionOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).ExecuteSessionOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_ExecuteSessionOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).ExecuteSessionOperation(ctx, req.(*ExecuteSessionOperationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_ReadSessionFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadSessionFileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).ReadSessionFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_ReadSessionFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).ReadSessionFile(ctx, req.(*ReadSessionFileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_ListSessionFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSessionFilesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).ListSessionFiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_ListSessionFiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).ListSessionFiles(ctx, req.(*ListSessionFilesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionRuntime_CloseSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRuntimeServer).CloseSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRuntime_CloseSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRuntimeServer).CloseSession(ctx, req.(*CloseSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// SessionRuntime_ServiceDesc is the grpc.ServiceDesc for SessionRuntime service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SessionRuntime_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "executor.v1.SessionRuntime",
+	HandlerType: (*SessionRuntimeServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RegisterSession",
+			Handler:    _SessionRuntime_RegisterSession_Handler,
+		},
+		{
+			MethodName: "GetSessionStatus",
+			Handler:    _SessionRuntime_GetSessionStatus_Handler,
+		},
+		{
+			MethodName: "ExecuteSessionOperation",
+			Handler:    _SessionRuntime_ExecuteSessionOperation_Handler,
+		},
+		{
+			MethodName: "ReadSessionFile",
+			Handler:    _SessionRuntime_ReadSessionFile_Handler,
+		},
+		{
+			MethodName: "ListSessionFiles",
+			Handler:    _SessionRuntime_ListSessionFiles_Handler,
+		},
+		{
+			MethodName: "CloseSession",
+			Handler:    _SessionRuntime_CloseSession_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api/runtime/v1/runtime.proto",
+}

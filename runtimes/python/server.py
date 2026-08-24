@@ -1,3 +1,5 @@
+import base64
+import bisect
 import json
 import os
 import re
@@ -17,6 +19,10 @@ from function import FunctionEntry, clone_registration, terminate_process_group
 
 DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024
 OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n"
+DEFAULT_SESSION_TERMINATION_GRACE_SECONDS = 2
+DEFAULT_SESSION_FILE_PAGE_SIZE = 100
+MAX_SESSION_FILE_PAGE_SIZE = 1000
+SESSION_FILE_PAGE_TOKEN_VERSION = 1
 DEFAULT_FUNCTION_INVOKE_TIMEOUT_SECONDS = 30
 MAX_FUNCTION_INVOKE_TIMEOUT_SECONDS = 5 * 60
 DEFAULT_FUNCTION_DRAIN_TIMEOUT_SECONDS = 30
@@ -83,15 +89,26 @@ class BoundedBuffer:
 class PythonRuntime(
     runtime_pb2_grpc.RuntimeServicer,
     runtime_pb2_grpc.FunctionRuntimeServicer,
+    runtime_pb2_grpc.SessionRuntimeServicer,
 ):
-    def __init__(self, work_dir="/workspace", output_limit=DEFAULT_OUTPUT_LIMIT_BYTES):
+    def __init__(
+        self,
+        work_dir="/workspace",
+        output_limit=DEFAULT_OUTPUT_LIMIT_BYTES,
+        session_termination_grace_seconds=DEFAULT_SESSION_TERMINATION_GRACE_SECONDS,
+    ):
+        if session_termination_grace_seconds <= 0:
+            raise ValueError("session termination grace must be positive")
         self.base_dir = Path(work_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.output_limit = output_limit
+        self.session_termination_grace_seconds = session_termination_grace_seconds
         self._tasks = {}
         self._lock = threading.Lock()
         self._functions = {}
         self._functions_lock = threading.Lock()
+        self._sessions = {}
+        self._sessions_lock = threading.Lock()
 
     def Execute(self, request, context):
         task_id = request.id
@@ -351,6 +368,269 @@ class PythonRuntime(
                     registration=clone_registration(registration),
                 )
 
+    def RegisterSession(self, request, context):
+        try:
+            identity = self._validate_session_identity(request.identity)
+            working_dir = self._runtime_working_dir(request.working_dir)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+
+        with self._sessions_lock:
+            current = self._sessions.get(identity.run_uid)
+            if current is not None:
+                if not self._session_identity_matches(current["identity"], identity):
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "session assignment is stale",
+                    )
+                return self._session_status(current)
+            entry = {
+                "identity": self._clone_session_identity(identity),
+                "working_dir": working_dir,
+                "env": dict(request.env),
+                "state": runtime_pb2.SESSION_STATE_READY,
+                "last_activity_unix_nano": time.time_ns(),
+            }
+            self._sessions[identity.run_uid] = entry
+            return self._session_status(entry)
+
+    def GetSessionStatus(self, request, context):
+        entry = self._match_session(request.identity, context)
+        return self._session_status(entry)
+
+    def ExecuteSessionOperation(self, request, context):
+        entry = self._match_session(request.identity, context)
+        operation = request.WhichOneof("operation")
+        if operation == "command":
+            result = self._execute_session_command(entry, request.command, context)
+            return runtime_pb2.ExecuteSessionOperationResponse(command=result)
+        if operation == "write_file":
+            self._write_session_file(entry, request.write_file, context)
+        elif operation == "create_directory":
+            self._create_session_directory(entry, request.create_directory, context)
+        elif operation == "delete_file":
+            self._delete_session_file(entry, request.delete_file, context)
+        elif operation == "rename_file":
+            self._rename_session_file(entry, request.rename_file, context)
+        else:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "exactly one session operation is required",
+            )
+        return runtime_pb2.ExecuteSessionOperationResponse()
+
+    def _execute_session_command(self, entry, request, context):
+        if bool(request.argv) == bool(request.shell):
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "exactly one of argv or shell is required",
+            )
+        try:
+            working_dir = self._session_path(
+                entry,
+                request.working_directory,
+                allow_root=True,
+            )
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+
+        command = ["bash", "-c", request.shell] if request.shell else list(request.argv)
+        env = os.environ.copy()
+        env.update(entry["env"])
+        env.update(request.env)
+        stdout = BoundedBuffer(self.output_limit)
+        stderr = BoundedBuffer(self.output_limit)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(working_dir),
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as error:
+            context.abort(grpc.StatusCode.INTERNAL, f"start session command: {error}")
+
+        def cancel_process():
+            if process.poll() is None:
+                self._stop_session_process(process)
+
+        context.add_callback(cancel_process)
+        stdout_thread = threading.Thread(
+            target=self._read_session_stream,
+            args=(process.stdout, stdout),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=self._read_session_stream,
+            args=(process.stderr, stderr),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        timed_out = False
+        try:
+            if process.stdin is not None:
+                process.stdin.write(request.stdin)
+                process.stdin.close()
+            timeout = self._session_command_timeout(request.timeout_millis, context)
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            self._stop_session_process(process)
+        finally:
+            stdout_thread.join()
+            stderr_thread.join()
+        self._touch_session(entry)
+        return runtime_pb2.SessionCommandResult(
+            exit_code=-1 if timed_out else process.returncode,
+            stdout=stdout.snapshot().encode(),
+            stderr=stderr.snapshot().encode(),
+            timed_out=timed_out,
+        )
+
+    def ReadSessionFile(self, request, context):
+        entry = self._match_session(request.identity, context)
+        if request.max_bytes <= 0:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "max bytes must be positive")
+        try:
+            path = self._session_path(entry, request.path)
+            max_bytes = min(request.max_bytes, self.output_limit)
+            with path.open("rb") as file:
+                contents = file.read(max_bytes + 1)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except OSError as error:
+            self._abort_session_file_error(context, "read", error)
+        return runtime_pb2.ReadSessionFileResponse(
+            contents=contents[:max_bytes],
+            truncated=len(contents) > max_bytes,
+        )
+
+    def ListSessionFiles(self, request, context):
+        entry = self._match_session(request.identity, context)
+        try:
+            directory = self._session_path(entry, request.path, allow_root=True)
+            limit, after = self._session_file_page_request(request)
+            paths, has_more = self._read_session_file_page(directory, after, limit)
+            entries = []
+            for path in paths:
+                info = path.stat()
+                entries.append(runtime_pb2.SessionFileInfo(
+                    path=path.name,
+                    directory=path.is_dir(),
+                    size_bytes=info.st_size,
+                ))
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except OSError as error:
+            self._abort_session_file_error(context, "list", error)
+        next_page_token = ""
+        if has_more:
+            next_page_token = self._encode_session_file_page_token(request.path, paths[-1].name)
+        return runtime_pb2.ListSessionFilesResponse(
+            entries=entries,
+            next_page_token=next_page_token,
+        )
+
+    def _write_session_file(self, entry, request, context):
+        if len(request.contents) > self.output_limit:
+            context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "file contents exceed the Runtime Server transfer limit",
+            )
+        try:
+            path = self._session_path(
+                entry,
+                request.path,
+                allow_missing_parent=request.create_parents,
+            )
+            if request.create_parents:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path = self._session_path(entry, request.path)
+            path.write_bytes(request.contents)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except OSError as error:
+            self._abort_session_file_error(context, "write", error)
+        self._touch_session(entry)
+        return None
+
+    def _create_session_directory(self, entry, request, context):
+        try:
+            path = self._session_path(entry, request.path, allow_missing_parent=True)
+            path.mkdir(parents=True, exist_ok=True)
+            path = self._session_path(entry, request.path)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except OSError as error:
+            self._abort_session_file_error(context, "create directory", error)
+        self._touch_session(entry)
+        return None
+
+    def _delete_session_file(self, entry, request, context):
+        try:
+            path = self._session_path(entry, request.path)
+            if path.is_dir() and not request.recursive:
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "recursive must be true to delete a directory",
+                )
+            if path.is_dir():
+                import shutil
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except OSError as error:
+            self._abort_session_file_error(context, "delete", error)
+        self._touch_session(entry)
+        return None
+
+    def _rename_session_file(self, entry, request, context):
+        try:
+            source = self._session_path(entry, request.source_path)
+            destination = self._session_path(entry, request.destination_path)
+            if destination.exists() or destination.is_symlink():
+                if not request.overwrite:
+                    context.abort(grpc.StatusCode.ALREADY_EXISTS, "destination already exists")
+                if destination.is_dir():
+                    import shutil
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            source.rename(destination)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except OSError as error:
+            self._abort_session_file_error(context, "rename", error)
+        self._touch_session(entry)
+        return None
+
+    def CloseSession(self, request, context):
+        try:
+            identity = self._validate_session_identity(request.identity)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+
+        with self._sessions_lock:
+            entry = self._sessions.get(identity.run_uid)
+            if entry is not None:
+                if not self._session_identity_matches(entry["identity"], identity):
+                    context.abort(
+                        grpc.StatusCode.FAILED_PRECONDITION,
+                        "session assignment is stale",
+                    )
+                entry["state"] = runtime_pb2.SESSION_STATE_CLOSED
+                entry["last_activity_unix_nano"] = time.time_ns()
+                del self._sessions[identity.run_uid]
+        return runtime_pb2.CloseSessionResponse(
+            identity=self._clone_session_identity(identity),
+        )
+
     @staticmethod
     def _status_response(task_id, task):
         return runtime_pb2.StatusResponse(
@@ -419,12 +699,12 @@ class PythonRuntime(
             )
         if len(request.registration_digest) > 128:
             raise ValueError("registration digest must be no larger than 128 bytes")
-        working_dir = self._function_working_dir(request.working_dir)
+        working_dir = self._runtime_working_dir(request.working_dir)
         handler = self._parse_python_handler(request.handler)
         self._validate_python_handler(working_dir, handler, request.env)
         return working_dir, handler
 
-    def _function_working_dir(self, working_dir):
+    def _runtime_working_dir(self, working_dir):
         if not working_dir:
             raise ValueError("working directory is required")
         try:
@@ -436,6 +716,157 @@ class PythonRuntime(
         if not candidate.is_dir():
             raise ValueError("working directory must be a directory")
         return candidate
+
+    @staticmethod
+    def _validate_session_identity(identity):
+        if identity is None or not identity.run_uid or not identity.assigned_pod_uid:
+            raise ValueError("session run uid and assigned pod uid are required")
+        return identity
+
+    @staticmethod
+    def _clone_session_identity(identity):
+        return runtime_pb2.SessionIdentity(
+            run_uid=identity.run_uid,
+            assigned_pod_uid=identity.assigned_pod_uid,
+        )
+
+    @staticmethod
+    def _session_identity_matches(left, right):
+        return (
+            left.run_uid == right.run_uid
+            and left.assigned_pod_uid == right.assigned_pod_uid
+        )
+
+    def _match_session(self, identity, context):
+        try:
+            identity = self._validate_session_identity(identity)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        with self._sessions_lock:
+            entry = self._sessions.get(identity.run_uid)
+            if entry is None:
+                context.abort(grpc.StatusCode.NOT_FOUND, "session not found")
+            if not self._session_identity_matches(entry["identity"], identity):
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "session assignment is stale",
+                )
+            return entry
+
+    def _session_status(self, entry):
+        return runtime_pb2.SessionStatus(
+            identity=self._clone_session_identity(entry["identity"]),
+            state=entry["state"],
+            last_activity_unix_nano=entry["last_activity_unix_nano"],
+        )
+
+    @staticmethod
+    def _touch_session(entry):
+        entry["last_activity_unix_nano"] = time.time_ns()
+
+    @staticmethod
+    def _session_file_page_request(request):
+        limit = request.limit or DEFAULT_SESSION_FILE_PAGE_SIZE
+        if limit < 1 or limit > MAX_SESSION_FILE_PAGE_SIZE:
+            raise ValueError(
+                f"limit must be between 1 and {MAX_SESSION_FILE_PAGE_SIZE}"
+            )
+        if not request.page_token:
+            return limit, ""
+        try:
+            encoded = request.page_token.encode("ascii")
+            encoded += b"=" * (-len(encoded) % 4)
+            token = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            raise ValueError("page token is invalid")
+        if (
+            not isinstance(token, dict)
+            or set(token) != {"v", "path", "after"}
+            or type(token["v"]) is not int
+            or token["v"] != SESSION_FILE_PAGE_TOKEN_VERSION
+            or not isinstance(token["path"], str)
+            or token["path"] != request.path
+            or not isinstance(token["after"], str)
+            or not token["after"]
+        ):
+            raise ValueError("page token does not match the requested directory")
+        return limit, token["after"]
+
+    @staticmethod
+    def _encode_session_file_page_token(path, after):
+        value = json.dumps(
+            {"v": SESSION_FILE_PAGE_TOKEN_VERSION, "path": path, "after": after},
+            separators=(",", ":"),
+        )
+        return base64.urlsafe_b64encode(value.encode()).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _read_session_file_page(directory, after, limit):
+        candidates = []
+        after_key = after.encode("utf-8")
+        for path in directory.iterdir():
+            name_key = path.name.encode("utf-8")
+            if name_key <= after_key:
+                continue
+            index = bisect.bisect_left([item[0] for item in candidates], name_key)
+            candidates.insert(index, (name_key, path))
+            if len(candidates) > limit + 1:
+                candidates.pop()
+        has_more = len(candidates) > limit
+        return [path for _, path in candidates[:limit]], has_more
+
+    @staticmethod
+    def _session_command_timeout(timeout_millis, context):
+        timeout = timeout_millis / 1000 if timeout_millis > 0 else None
+        remaining = context.time_remaining()
+        if remaining is not None:
+            timeout = min(timeout, remaining) if timeout is not None else remaining
+        return timeout
+
+    @staticmethod
+    def _read_session_stream(stream, buffer):
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    return
+                buffer.write(chunk)
+        finally:
+            stream.close()
+
+    def _session_path(self, entry, requested, allow_root=False, allow_missing_parent=False):
+        root = entry["working_dir"].resolve(strict=True)
+        if not requested:
+            if allow_root:
+                return root
+            raise ValueError("file path is required")
+        candidate_path = Path(requested)
+        if candidate_path.is_absolute():
+            raise ValueError("file path must be workspace-relative")
+        cleaned = Path(os.path.normpath(str(candidate_path)))
+        if cleaned == Path("."):
+            if allow_root:
+                return root
+            raise ValueError("file path must not be the workspace root")
+        if ".." in cleaned.parts:
+            raise ValueError("file path must not escape the workspace")
+        candidate = root / cleaned
+        parent = candidate.parent
+        if allow_missing_parent:
+            while not parent.exists():
+                parent = parent.parent
+        try:
+            parent.resolve(strict=True).relative_to(root)
+            if candidate.exists() or candidate.is_symlink():
+                candidate.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError):
+            raise ValueError("file path must not escape the session workspace")
+        return candidate
+
+    @staticmethod
+    def _abort_session_file_error(context, operation, error):
+        code = grpc.StatusCode.NOT_FOUND if isinstance(error, FileNotFoundError) else grpc.StatusCode.INTERNAL
+        context.abort(code, f"{operation} session file: {error}")
 
     @staticmethod
     def _parse_python_handler(handler):
@@ -618,6 +1049,14 @@ class PythonRuntime(
         terminate_process_group(process, signal.SIGTERM)
         try:
             process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            terminate_process_group(process, signal.SIGKILL)
+            process.wait()
+
+    def _stop_session_process(self, process):
+        terminate_process_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=self.session_termination_grace_seconds)
         except subprocess.TimeoutExpired:
             terminate_process_group(process, signal.SIGKILL)
             process.wait()

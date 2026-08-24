@@ -31,6 +31,26 @@ service FunctionRuntime {
     rpc UnregisterFunction(UnregisterFunctionRequest) returns (UnregisterFunctionResponse);
 }
 
+// SessionRuntime is an optional Runtime Server extension for stateful session
+// Runs. runtimed also implements this service for gateway traffic, forwarding
+// requests only to the assigned Pod of the same Runtime when it is not the
+// owner. runtimed owns queue admission and operation lifecycle; the Runtime
+// Server owns local workspace confinement and process execution.
+service SessionRuntime {
+    // RegisterSession creates or resumes one local Session Run workspace.
+    rpc RegisterSession(RegisterSessionRequest) returns (SessionStatus);
+    // GetSessionStatus returns local session state for recovery and idle checks.
+    rpc GetSessionStatus(GetSessionStatusRequest) returns (SessionStatus);
+    // ExecuteSessionOperation executes one mutation already admitted by runtimed.
+    rpc ExecuteSessionOperation(ExecuteSessionOperationRequest) returns (ExecuteSessionOperationResponse);
+    // ReadSessionFile returns bounded contents of one workspace-relative file.
+    rpc ReadSessionFile(ReadSessionFileRequest) returns (ReadSessionFileResponse);
+    // ListSessionFiles lists workspace-relative directory entries.
+    rpc ListSessionFiles(ListSessionFilesRequest) returns (ListSessionFilesResponse);
+    // CloseSession removes local state after runtimed has fenced new operations.
+    rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}
+
 message ExecuteRequest {
     string id = 1;
     repeated string args = 2;
@@ -161,4 +181,189 @@ message UnregisterFunctionRequest {
 
 message UnregisterFunctionResponse {
     FunctionRegistration registration = 1;
+}
+
+// SessionIdentity fences a Runtime Server-local session to one Run assignment.
+message SessionIdentity {
+    // Kubernetes Run UID, not its mutable name.
+    string run_uid = 1;
+    // Kubernetes UID of the Runtime Pod assigned to this Run. It fences a
+    // recreated Pod that happens to reuse the same name.
+    string assigned_pod_uid = 2;
+}
+
+enum SessionState {
+    SESSION_STATE_UNSPECIFIED = 0;
+    SESSION_STATE_REGISTERING = 1;
+    SESSION_STATE_READY = 2;
+    SESSION_STATE_CLOSING = 3;
+    SESSION_STATE_CLOSED = 4;
+    SESSION_STATE_FAILED = 5;
+}
+
+message RegisterSessionRequest {
+    // Immutable assignment identity for the Session Run to register.
+    SessionIdentity identity = 1;
+    // Absolute path prepared by the owner runtimed below this Runtime's workspace.
+    string working_dir = 2;
+    // Environment overrides available to every session command.
+    map<string, string> env = 3;
+    // Idle lifetime requested by the Run. runtimed applies its own upper bound.
+    int64 idle_timeout_seconds = 4;
+}
+
+message GetSessionStatusRequest {
+    // Immutable assignment identity for the Session Run to inspect.
+    SessionIdentity identity = 1;
+}
+
+message SessionStatus {
+    // Immutable assignment identity of the local session.
+    SessionIdentity identity = 1;
+    // Current local Runtime Server lifecycle state.
+    SessionState state = 2;
+    // Unix timestamp for the latest accepted session operation.
+    int64 last_activity_unix_nano = 3;
+    // Runtime-defined terminal error when state is SESSION_STATE_FAILED.
+    string fatal_error = 4;
+}
+
+// ExecuteSessionOperationRequest carries exactly one mutation. Owner runtimed
+// serializes it in the session queue and applies policy before calling the
+// local Runtime Server.
+message ExecuteSessionOperationRequest {
+    // Immutable assignment identity for the Session Run receiving this operation.
+    SessionIdentity identity = 1;
+    oneof operation {
+        // Executes one command in the session workspace.
+        SessionCommand command = 2;
+        // Writes one bounded file in the session workspace.
+        SessionFileWrite write_file = 3;
+        // Creates one directory in the session workspace.
+        SessionDirectoryCreate create_directory = 4;
+        // Deletes one file or directory in the session workspace.
+        SessionFileDelete delete_file = 5;
+        // Renames one file or directory in the session workspace.
+        SessionFileRename rename_file = 6;
+    }
+}
+
+message SessionCommand {
+    // argv executes a program directly. It must not be combined with shell.
+    repeated string argv = 1;
+    // shell explicitly executes this text through the Runtime's shell. It must
+    // not be combined with argv.
+    string shell = 2;
+    // WorkingDirectory is workspace-relative. An empty value means the session
+    // workspace root.
+    string working_directory = 3;
+    // Per-command environment overrides. These take precedence over session
+    // environment values.
+    map<string, string> env = 4;
+    // Bounded standard input passed to the command.
+    bytes stdin = 5;
+    // TimeoutMillis is bounded by runtimed before this local call.
+    int64 timeout_millis = 6;
+}
+
+message ExecuteSessionOperationResponse {
+    // Command result when the request operation is command. It is absent for
+    // successful file mutations.
+    SessionCommandResult command = 1;
+}
+
+message SessionCommandResult {
+    // Process exit code. A timeout uses -1.
+    int32 exit_code = 1;
+    // Bounded standard output captured from the process.
+    bytes stdout = 2;
+    // Bounded standard error captured from the process.
+    bytes stderr = 3;
+    // True when runtimed's operation timeout terminated the process group.
+    bool timed_out = 4;
+}
+
+message ReadSessionFileRequest {
+    // Immutable assignment identity for the Session Run owning the file.
+    SessionIdentity identity = 1;
+    // Workspace-relative file path to read.
+    string path = 2;
+    // MaxBytes bounds response contents. runtimed supplies a bounded value.
+    int64 max_bytes = 3;
+}
+
+message ReadSessionFileResponse {
+    // File bytes, limited by the requested and configured maximum.
+    bytes contents = 1;
+    // True when the file contains bytes beyond contents.
+    bool truncated = 2;
+}
+
+message ListSessionFilesRequest {
+    // Immutable assignment identity for the Session Run owning the directory.
+    SessionIdentity identity = 1;
+    // An empty path lists the session workspace root.
+    string path = 2;
+    // Maximum direct children to return. Zero asks the Runtime Server to use
+    // its default; a non-zero value must be within the supported page bounds.
+    int32 limit = 3;
+    // Opaque cursor returned by a prior ListSessionFiles response for this
+    // directory. An empty value starts at the first direct child.
+    string page_token = 4;
+}
+
+message SessionFileInfo {
+    // Entry name relative to the directory requested by ListSessionFiles.
+    string path = 1;
+    // Whether the entry is a directory.
+    bool directory = 2;
+    // Entry size in bytes as reported by the Runtime filesystem.
+    int64 size_bytes = 3;
+}
+
+message ListSessionFilesResponse {
+    // Direct child entries in the requested workspace-relative directory.
+    repeated SessionFileInfo entries = 1;
+    // Opaque cursor for the next page. Empty means there are no later entries.
+    string next_page_token = 2;
+}
+
+message SessionFileWrite {
+    // Workspace-relative destination file path.
+    string path = 1;
+    // Bounded bytes to write to path.
+    bytes contents = 2;
+    // Whether missing parent directories may be created.
+    bool create_parents = 3;
+}
+
+message SessionDirectoryCreate {
+    // Workspace-relative directory path to create, including missing parents.
+    string path = 1;
+}
+
+message SessionFileDelete {
+    // Workspace-relative file or directory path to delete.
+    string path = 1;
+    // Whether a directory and its descendants may be deleted.
+    bool recursive = 2;
+}
+
+message SessionFileRename {
+    // Existing workspace-relative source path.
+    string source_path = 1;
+    // New workspace-relative destination path.
+    string destination_path = 2;
+    // Whether an existing destination may be replaced.
+    bool overwrite = 3;
+}
+
+message CloseSessionRequest {
+    // Immutable assignment identity for the Session Run to close.
+    SessionIdentity identity = 1;
+}
+
+message CloseSessionResponse {
+    // Immutable assignment identity of the closed session.
+    SessionIdentity identity = 1;
 }

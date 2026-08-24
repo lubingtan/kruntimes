@@ -7,6 +7,7 @@ import (
 	"net"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"k8s.io/klog/v2"
@@ -19,10 +20,12 @@ func main() {
 	var (
 		port    int
 		workDir string
+		grace   time.Duration
 	)
 
 	flag.IntVar(&port, "port", 9091, "gRPC listen port")
 	flag.StringVar(&workDir, "work-dir", "", "Workspace directory (default /workspace)")
+	flag.DurationVar(&grace, "session-termination-grace", 2*time.Second, "Grace period before force-killing a cancelled Session command process group")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -32,9 +35,10 @@ func main() {
 	}
 
 	srv := grpc.NewServer()
-	runtimeServer := bash.NewServer(workDir)
+	runtimeServer := bash.NewServerWithSessionTerminationGrace(workDir, grace)
 	pb.RegisterRuntimeServer(srv, runtimeServer)
 	pb.RegisterFunctionRuntimeServer(srv, runtimeServer)
+	pb.RegisterSessionRuntimeServer(srv, runtimeServer)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

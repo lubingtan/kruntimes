@@ -126,7 +126,7 @@ wiring from accumulating avoidable conflicts.
     - [x] count stale `Reserve` and conflicting `Bind` operations by bounded
       stage;
     - [x] count requested Pending Run wakeups by bounded event source;
-- [ ] Function-mode Runs for agent sandboxes: define mutually exclusive
+- [ ] Function-mode Runs: define mutually exclusive
   `Run.spec.mode.task` and `Run.spec.mode.function` semantics so a function Run
   can reserve a pre-warmed Runtime Pod, register a callable function with
   runtimed/runtime-server, stay ready for repeated low-latency invocations, and
@@ -149,6 +149,20 @@ wiring from accumulating avoidable conflicts.
   - [x] review and approve the
     [Function Inline Source Materialization](design/function-inline-source.md)
     API before registering inline function Runs;
+  - [x] remove top-level `Run.spec.handler`, `Run.spec.entrypoint`, and
+    `Run.spec.args`; keep handler under `Run.spec.mode.function.handler` and
+    task input under `Run.spec.mode.task`;
+  - [x] review and approve the
+    [Function Runtime Server Contract](design/function-runtime-contract.md);
+  - [x] add idempotent register/status/invoke/unregister protobuf operations
+    keyed by Run UID;
+  - [ ] implement built-in function adapters:
+    - [x] Bash FunctionRuntime adapter with handler validation, registration
+      fencing, one in-flight invocation, bounded output, and unregister drain;
+    - [x] Python FunctionRuntime adapter with handler validation, registration
+      fencing, one in-flight invocation, bounded output, and unregister drain;
+  - [ ] add bounded invocation outputs/artifact references and structured logs
+    keyed by Run UID and invocation ID;
   - [ ] implement the function control-plane lifecycle in independently
     reviewable slices:
     - [x] add a deterministic FunctionRuntime registration request builder,
@@ -168,71 +182,109 @@ wiring from accumulating avoidable conflicts.
       reconcile stale Runtime Pod assignments with assignment-UID fencing;
     - [ ] add unit, integration, and E2E coverage for registration, retry,
       timeout, cancellation, deletion, restart recovery, and stale-pod fencing;
-- [ ] Runtime gateway invoke path: create one gateway Service per Runtime, use
-  that Service as the stable Run invoke endpoint, route requests to the
-  runtimed that owns the assigned Runtime Pod, and rely on runtimed's in-memory
-  ownership/readiness cache instead of synchronous Kubernetes API reads on the
-  invoke path.
+  - [ ] cover function registration, ready status, local and proxied invoke,
+    repeated invocation, idle timeout, explicit release, Runtime Pod restart
+    recovery, and cleanup.
+- [ ] Runtime gateway invoke path: add an optional shared `runtime-gateway`
+  Deployment and ClusterIP Service to the Helm chart. The gateway exposes the
+  stable HTTP Run endpoint, resolves the requested Run, and calls the
+  Kubernetes Service for its Runtime. Kubernetes selects a ready Runtime Pod;
+  runtimed resolves ownership only within that Runtime.
   Initial implementation TODO:
-  - [ ] reconcile a Runtime-owned ClusterIP gateway Service and dedicated
-    runtimed gateway port;
-  - [ ] reconcile Runtime-scoped TLS serving certificates and bounded CA
-    publication, rotation, and Runtime Pod rollout;
-  - [ ] implement watch-backed ownership/readiness caches and bounded local or
-    single-hop peer routing;
-  - [ ] fence registration epochs before stale-pod reassignment and reject
-    mismatched Run UID, attempt, or assigned Pod UID;
-  - [ ] authorize callers through Kubernetes SelfSubjectAccessReview with a
-    bounded decision cache;
-  - [ ] enforce TLS, request, response, concurrency, and proxy-loop limits;
-- [x] Function-mode API cleanup: remove top-level `Run.spec.handler`,
-  `Run.spec.entrypoint`, and `Run.spec.args`; keep handler under
-  `Run.spec.mode.function.handler` and task input under `Run.spec.mode.task`.
-- [ ] Function-mode runtime contract: add runtime-server register, invoke, and
-  unregister APIs; define bounded invoke request inputs, response outputs,
-  artifact references, and log access without writing high-frequency invocation
-  history into Run status.
+  - [x] add Helm templates, `gateway.enabled`, values, RBAC, a dedicated
+    runtimed gRPC port, HTTP-to-gRPC adapter, and unit/render coverage for the
+    shared gateway Deployment and ClusterIP Service;
+  - [ ] define chart-managed TLS configuration for an existing Secret and
+    optional cert-manager integration;
+  - [x] implement Runtime-scoped Run lookup and bounded local or single-hop
+    peer routing;
+  - [x] fence routing with immutable Run UID and assigned Pod UID, rejecting
+    stale assignments before forwarding;
+  - [x] authenticate caller tokens through Kubernetes TokenReview and authorize
+    the target Run through SubjectAccessReview;
+  - [x] add a bounded authorization decision cache;
+  - [x] enforce a bounded per-gateway HTTP request concurrency limit;
+  - [ ] enforce chart-managed TLS and make explicit request and response limits
+    configurable where needed;
+  - [x] implement the reviewed bounded, paginated `ListSessionFiles` contract:
+    - [x] define HTTP, gRPC, SDK, ordering, cursor, mutation-consistency, and
+      response-bound semantics in the Session Mode design;
+    - [x] add `limit`, `page_token`, and `next_page_token` to the gRPC contract
+      and regenerate clients;
+    - [x] implement identical bounded cursor paging in built-in Runtime Servers,
+      runtimed proxying, the HTTP gateway, and Go/Python SDKs;
+      - [x] enforce direct gRPC paging in Bash and Python Runtime Servers with
+        shared cursor encoding and UTF-8 byte-wise ordering;
+      - [x] map HTTP `limit` and `pageToken` through the gateway and preserve
+        page fields through runtimed proxy routing;
+    - [x] add unit, integration, and E2E coverage for limits, ordering, invalid
+      or mismatched tokens, and traversal-safe multi-page listings.
+- [x] Session-mode Runs for agent sandboxes: provide a stateful, mutable
+  workspace on a warm Runtime Pod without introducing a separate `Sandbox` CRD.
+  The accepted [Session Mode design](design/session-mode.md) uses
+  `Run.spec.mode.session`, an HTTP API translated by the shared gateway to the
+  `SessionRuntime` gRPC service exposed by runtimed, and a v0 trusted container
+  backend.
+  A Session Run is exclusive through its dedicated `runs: 1` Runtime and the
+  runtimed local claim gate, ephemeral, and
+  terminates on assigned Pod loss rather than silently resuming on a new Pod.
   Initial implementation TODO:
-  - [x] review and approve the
-    [Function Runtime Server Contract](design/function-runtime-contract.md);
-  - [x] add idempotent register/status/invoke/unregister protobuf operations
-    keyed by Run UID;
-  - [ ] implement built-in function adapters:
-    - [x] Bash FunctionRuntime adapter with handler validation, registration
-      fencing, one in-flight invocation, bounded output, and unregister drain;
-    - [x] Python FunctionRuntime adapter with handler validation, registration
-      fencing, one in-flight invocation, bounded output, and unregister drain;
-  - [ ] add bounded invocation outputs/artifact references and structured logs
-    keyed by Run UID and invocation ID;
-- [ ] Function-mode reliability and isolation: cover function registration,
-  ready status, local and proxied invoke, repeated invocation, artifact reuse,
-  idle timeout, explicit release, runtime pod restart recovery, cleanup, service
-  account selection, runtime pod security context, resource limits, network
-  policy guidance, and future stronger runtimes such as gVisor, Kata, or
-  Firecracker.
-- [ ] Agent sandbox SDKs: provide first-class SDKs for agent developers,
-  starting with Python and Go. The SDK should expose sandbox-facing semantics
-  such as create/open/reattach/disconnect/terminate, command or tool execution,
-  file operations, logs, artifacts, and identity metadata while hiding the
-  underlying function-mode Run unless low-level metadata is requested. It should
-  also hide readiness polling, gateway discovery, port-forward fallback for
-  local development, direct in-cluster URLs, bounded outputs/artifacts,
-  timeouts, retries for idempotent operations, typed errors, and guardrails that
-  recommend or verify one Run per Runtime Pod for AgentSandbox-style
-  integrations.
-- [ ] Agent sandbox workspace and file APIs: define how agents upload generated
-  scripts or inputs, read files, list workspace content, fetch artifacts, and
-  stream or retrieve logs without treating every operation as a Kubernetes
-  reconciliation loop.
-- [ ] Agent framework integration: design a thin integration layer for agent
-  frameworks and MCP-style tool servers so a tool call can acquire or reuse a
-  sandbox handle backed by a function-mode Run, invoke it through the gateway,
-  return structured results, and clean up, disconnect, reattach, or preserve the
-  sandbox according to the agent session policy.
-- [ ] Agent sandbox identity and connectivity: document and implement the model
-  for stable Run identity, gateway addressing, in-cluster and external access,
-  service account/RBAC boundaries, network policy, and multi-tenant naming so
-  agent platforms can safely hand a sandbox handle to sub-agents.
+  - [x] review and approve the API, lifecycle, queue, data-plane, security, and
+    future-backend design;
+  - [x] add `Run.spec.mode.session`, validation, generated CRDs, and status
+    conditions; reject a Session Run that declares `spec.workspace`;
+  - [x] initialize source and artifact inputs into a Run-UID-scoped ephemeral
+    workspace, register the session locally, and transition the Run to `Ready`;
+  - [x] implement the internal `SessionRuntime` contract for lifecycle,
+    workspace-constrained commands, file operations, process groups, and
+    operation status;
+  - [x] add the authenticated versioned Session HTTP API to the shared gateway,
+    HTTP-to-`SessionRuntime` translation, and bounded request/response handling;
+  - [x] emit structured Session output and audit logs from owner runtimed for
+    existing Kubernetes log collectors and `krt logs`; do not create a separate
+    gateway log store;
+  - [x] implement the per-session FIFO mutation queue: one active command or
+    file mutation, global and per-Run bounds, default/max operation timeout,
+    cancellation, and graceful termination;
+    - [x] serialize owner-runtimed mutations with per-Session FIFO queues,
+      Run-scoped queue/timeout limits, queue-full rejection, and cancellation
+      on Session close;
+    - [x] expose administrator configuration for global queue and operation
+      timeout limits, plus the runtimed-to-Runtime-Server close deadline;
+    - [x] define backend-specific graceful process-termination configuration.
+      A common setting is not injected into arbitrary custom Runtime images;
+  - [x] keep operation history and audit events in structured external logs,
+    retain only bounded readiness, endpoint, and artifact-reference data in Run
+    status, and export large outputs through ArtifactStore;
+    - [x] replace `cancelRequested` with a monotonic `termination.mode` API:
+      `Immediate` for cancellation and Session-only `Drain` for normal
+      completion; implement `Ready -> Finalizing -> Succeeded` and distinct SDK
+      `Close` and `Cancel` helpers;
+    - [x] fence new gateway operations, drain already accepted operations, and
+      close the local Runtime Server before collecting final artifacts;
+    - [x] provide `$KRUNTIME_ARTIFACTS_DIR` only for Session Runs whose Runtime
+      has an ArtifactStore; validate and upload final files, retain compact refs
+      in status, retry transient store failures while Finalizing, and fail
+      invalid artifacts deterministically;
+    - [x] cover successful completion/export, cancellation during finalization,
+      transient store retry, invalid artifacts, and Runtime Pod loss in tests;
+  - [x] add Python and Go SDKs with create/open/wait/execute/files/logs/close
+    helpers, typed errors, direct in-cluster access, and local port-forward
+    support;
+  - [x] add a Kubernetes diagnosis agent example that uses a Session Run for
+    multi-step scripts, files, results, and cleanup; use it to find remaining
+    product gaps before calling the feature supported;
+  - [x] add unit, integration, and E2E coverage for registration, ordering,
+    timeout, cancellation, idle expiry, cleanup, authorization, file-boundary
+    enforcement, Runtime Pod loss, and gateway routing;
+    - [x] verify per-session FIFO mutation ordering through the authenticated
+      HTTP gateway in E2E;
+    - [x] verify that cancelling a Session Run terminates an active gateway
+      command and rejects subsequent gateway access in E2E;
+    - [x] verify gateway routing, bearer-token authentication, Run authorization,
+      workspace file-boundary enforcement, registration environment, structured
+      command logs, idle and total timeout, Drain completion, SDK access, and
+      assigned Runtime Pod loss across focused unit, integration, and E2E tests.
 - [ ] v0.x examples: add LLM agent and workflow examples, then use those
   examples to identify missing product and API capabilities.
 - [x] Workflow data sharing: design and implement first-class cross-Run storage
@@ -419,6 +471,10 @@ wiring from accumulating avoidable conflicts.
 ### Toward v1.0
 
 - Stabilize CRD APIs.
+- [ ] Add at least one secure Session backend, initially gVisor, for untrusted
+  LLM-generated code. Define the Runtime Server contract, isolation boundary,
+  resource accounting, networking policy, and compatibility with the Session
+  workspace and gateway APIs before making it available.
 - [ ] Restore the Python runtime base image to a supported Python 3.15 release
   only after its final image is available and every locked native dependency,
   including `grpcio`, publishes compatible `cp315` wheels. Keep the image build
@@ -444,6 +500,10 @@ wiring from accumulating avoidable conflicts.
 - [ ] Clean up a Runtime's runtime maintainer when the Runtime is deleted.
   Define ownership and finalization so orphaned maintainers do not accumulate,
   while preserving artifact cleanup for Runs that still require it.
+- [ ] Add explicit `Run` suspend and resume semantics. Define API and lifecycle
+  behavior for Pending, executing task, function, and Session Runs, including
+  what is retained or discarded for processes, workspaces, requests, and
+  timeout accounting; do not model this as a best-effort boolean switch.
 - Define compatibility and migration guarantees.
 - Document deprecation policy.
 - Clarify multi-tenant isolation strategy for production environments.

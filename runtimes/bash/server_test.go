@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,30 @@ func startFunctionTestServer(t *testing.T, outputLimit int) (pb.FunctionRuntimeC
 		t.Fatalf("dial: %v", err)
 	}
 	return pb.NewFunctionRuntimeClient(conn), workDir, func() {
+		conn.Close()
+		srv.Stop()
+	}
+}
+
+func startSessionTestServer(t *testing.T) (pb.SessionRuntimeClient, string, func()) {
+	t.Helper()
+
+	workDir := t.TempDir()
+	srv := grpc.NewServer()
+	runtimeServer := NewServer(workDir)
+	pb.RegisterSessionRuntimeServer(srv, runtimeServer)
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return pb.NewSessionRuntimeClient(conn), workDir, func() {
 		conn.Close()
 		srv.Stop()
 	}
@@ -155,6 +180,220 @@ func TestFunctionRuntimeRegisterInvokeAndUnregister(t *testing.T) {
 	if _, err := client.FunctionStatus(context.Background(), &pb.FunctionStatusRequest{Registration: registration}); status.Code(err) != codes.NotFound {
 		t.Fatalf("FunctionStatus after unregister = %v, want NotFound", err)
 	}
+}
+
+func TestSessionRuntimeRegisterStatusCloseAndAssignmentFencing(t *testing.T) {
+	client, workDir, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	identity := &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"}
+	request := &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}
+	registered, err := client.RegisterSession(context.Background(), request)
+	if err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	if registered.State != pb.SessionState_SESSION_STATE_READY || registered.LastActivityUnixNano == 0 {
+		t.Fatalf("registration status = %#v, want ready with activity", registered)
+	}
+
+	// Re-registering the same Run assignment is idempotent.
+	if _, err := client.RegisterSession(context.Background(), request); err != nil {
+		t.Fatalf("idempotent RegisterSession: %v", err)
+	}
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{
+		Identity:   &pb.SessionIdentity{RunUid: identity.RunUid, AssignedPodUid: "pod-b"},
+		WorkingDir: workDir,
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("RegisterSession stale assignment = %v, want FailedPrecondition", err)
+	}
+
+	current, err := client.GetSessionStatus(context.Background(), &pb.GetSessionStatusRequest{Identity: identity})
+	if err != nil {
+		t.Fatalf("GetSessionStatus: %v", err)
+	}
+	if current.State != pb.SessionState_SESSION_STATE_READY {
+		t.Fatalf("session state = %v, want ready", current.State)
+	}
+	if _, err := client.CloseSession(context.Background(), &pb.CloseSessionRequest{Identity: identity}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	if _, err := client.CloseSession(context.Background(), &pb.CloseSessionRequest{Identity: identity}); err != nil {
+		t.Fatalf("idempotent CloseSession: %v", err)
+	}
+	if _, err := client.GetSessionStatus(context.Background(), &pb.GetSessionStatusRequest{Identity: identity}); status.Code(err) != codes.NotFound {
+		t.Fatalf("GetSessionStatus after close = %v, want NotFound", err)
+	}
+}
+
+func TestNewServerWithSessionTerminationGrace(t *testing.T) {
+	configured := 17 * time.Millisecond
+	if got := NewServerWithSessionTerminationGrace(t.TempDir(), configured).sessionTerminationGrace; got != configured {
+		t.Fatalf("Session termination grace = %s, want %s", got, configured)
+	}
+	if got := NewServerWithSessionTerminationGrace(t.TempDir(), 0).sessionTerminationGrace; got != processTerminationGrace {
+		t.Fatalf("default Session termination grace = %s, want %s", got, processTerminationGrace)
+	}
+}
+
+func TestSessionRuntimeRejectsEscapingWorkspace(t *testing.T) {
+	client, _, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	_, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{
+		Identity:   &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"},
+		WorkingDir: t.TempDir(),
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("RegisterSession escaping workspace = %v, want InvalidArgument", err)
+	}
+}
+
+func TestSessionRuntimeExecutesCommandsAndConfinesFiles(t *testing.T) {
+	client, workDir, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	identity := &pb.SessionIdentity{RunUid: "session-run", AssignedPodUid: "pod-a"}
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{
+		Identity:   identity,
+		WorkingDir: workDir,
+		Env: map[string]string{
+			"KRUNTIMES_SESSION_DEFAULT": "session",
+		},
+	}); err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{Identity: identity}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ExecuteSessionOperation without operation = %v, want InvalidArgument", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_CreateDirectory{CreateDirectory: &pb.SessionDirectoryCreate{
+			Path: "scratch/nested",
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation create directory: %v", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_WriteFile{WriteFile: &pb.SessionFileWrite{
+			Path: "notes/hello.txt", Contents: []byte("hello\n"), CreateParents: true,
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation write: %v", err)
+	}
+	read, err := client.ReadSessionFile(context.Background(), &pb.ReadSessionFileRequest{Identity: identity, Path: "notes/hello.txt", MaxBytes: 1024})
+	if err != nil {
+		t.Fatalf("ReadSessionFile: %v", err)
+	}
+	if got := string(read.Contents); got != "hello\n" || read.Truncated {
+		t.Fatalf("read = %#v, want hello without truncation", read)
+	}
+	listed, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity})
+	if err != nil {
+		t.Fatalf("ListSessionFiles: %v", err)
+	}
+	var notes *pb.SessionFileInfo
+	for _, entry := range listed.Entries {
+		if entry.Path == "notes" {
+			notes = entry
+			break
+		}
+	}
+	if notes == nil || !notes.Directory {
+		t.Fatalf("directory entries = %#v, want notes directory", listed.Entries)
+	}
+	operation, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_Command{Command: &pb.SessionCommand{
+			Argv: []string{"bash", "-c", "printf '%s:%s:' \"$KRUNTIMES_SESSION_DEFAULT\" \"$KRUNTIMES_SESSION_TEST\"; cat notes/hello.txt"},
+			Env:  map[string]string{"KRUNTIMES_SESSION_TEST": "environment"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteSessionOperation command: %v", err)
+	}
+	if operation.Command == nil || operation.Command.ExitCode != 0 || string(operation.Command.Stdout) != "session:environment:hello\n" || operation.Command.TimedOut {
+		t.Fatalf("command result = %#v", operation)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_RenameFile{RenameFile: &pb.SessionFileRename{
+			SourcePath: "notes/hello.txt", DestinationPath: "notes/greeting.txt",
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation rename: %v", err)
+	}
+	if _, err := client.ExecuteSessionOperation(context.Background(), &pb.ExecuteSessionOperationRequest{
+		Identity: identity,
+		Operation: &pb.ExecuteSessionOperationRequest_DeleteFile{DeleteFile: &pb.SessionFileDelete{
+			Path: "notes", Recursive: true,
+		}},
+	}); err != nil {
+		t.Fatalf("ExecuteSessionOperation delete: %v", err)
+	}
+	if _, err := client.ReadSessionFile(context.Background(), &pb.ReadSessionFileRequest{Identity: identity, Path: "../outside", MaxBytes: 1}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ReadSessionFile escaping path = %v, want InvalidArgument", err)
+	}
+}
+
+func TestSessionRuntimeListsFilesInBoundedPages(t *testing.T) {
+	client, workDir, cleanup := startSessionTestServer(t)
+	defer cleanup()
+
+	identity := &pb.SessionIdentity{RunUid: "session-pages", AssignedPodUid: "pod-a"}
+	if _, err := client.RegisterSession(context.Background(), &pb.RegisterSessionRequest{Identity: identity, WorkingDir: workDir}); err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	for _, name := range []string{"z", "b", "a", "\u00e9"} {
+		if err := os.WriteFile(filepath.Join(workDir, name), []byte(name), 0o644); err != nil {
+			t.Fatalf("write session file %q: %v", name, err)
+		}
+	}
+
+	first, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity, Limit: 2})
+	if err != nil {
+		t.Fatalf("ListSessionFiles first page: %v", err)
+	}
+	if got, want := sessionFileNames(first.Entries), []string{"a", "b"}; !slices.Equal(got, want) || first.NextPageToken == "" {
+		t.Fatalf("first page = %#v, want entries %v and a next page token", first, want)
+	}
+
+	second, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity, Limit: 2, PageToken: first.NextPageToken})
+	if err != nil {
+		t.Fatalf("ListSessionFiles second page: %v", err)
+	}
+	if got, want := sessionFileNames(second.Entries), []string{"z", "\u00e9"}; !slices.Equal(got, want) || second.NextPageToken != "" {
+		t.Fatalf("second page = %#v, want final entries %v", second, want)
+	}
+
+	// This token is encoded as the documented cross-runtime JSON cursor. A
+	// Python Runtime Server must accept the same unpadded base64url value.
+	pythonToken := "eyJ2IjoxLCJwYXRoIjoiIiwiYWZ0ZXIiOiJiIn0"
+	fromPython, err := client.ListSessionFiles(context.Background(), &pb.ListSessionFilesRequest{Identity: identity, Limit: 2, PageToken: pythonToken})
+	if err != nil {
+		t.Fatalf("ListSessionFiles Python token: %v", err)
+	}
+	if got, want := sessionFileNames(fromPython.Entries), []string{"z", "\u00e9"}; !slices.Equal(got, want) {
+		t.Fatalf("Python token page entries = %v, want %v", got, want)
+	}
+
+	for _, request := range []*pb.ListSessionFilesRequest{
+		{Identity: identity, Limit: maxSessionFilePageSize + 1},
+		{Identity: identity, PageToken: "not-a-token"},
+		{Identity: identity, Path: "other", PageToken: first.NextPageToken},
+	} {
+		if _, err := client.ListSessionFiles(context.Background(), request); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("ListSessionFiles request %#v error = %v, want InvalidArgument", request, err)
+		}
+	}
+}
+
+func sessionFileNames(entries []*pb.SessionFileInfo) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Path)
+	}
+	return names
 }
 
 func TestFunctionRuntimeRegistrationFencing(t *testing.T) {

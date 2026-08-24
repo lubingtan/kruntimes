@@ -131,6 +131,64 @@ func (FunctionRegistrationState) EnumDescriptor() ([]byte, []int) {
 	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{1}
 }
 
+type SessionState int32
+
+const (
+	SessionState_SESSION_STATE_UNSPECIFIED SessionState = 0
+	SessionState_SESSION_STATE_REGISTERING SessionState = 1
+	SessionState_SESSION_STATE_READY       SessionState = 2
+	SessionState_SESSION_STATE_CLOSING     SessionState = 3
+	SessionState_SESSION_STATE_CLOSED      SessionState = 4
+	SessionState_SESSION_STATE_FAILED      SessionState = 5
+)
+
+// Enum value maps for SessionState.
+var (
+	SessionState_name = map[int32]string{
+		0: "SESSION_STATE_UNSPECIFIED",
+		1: "SESSION_STATE_REGISTERING",
+		2: "SESSION_STATE_READY",
+		3: "SESSION_STATE_CLOSING",
+		4: "SESSION_STATE_CLOSED",
+		5: "SESSION_STATE_FAILED",
+	}
+	SessionState_value = map[string]int32{
+		"SESSION_STATE_UNSPECIFIED": 0,
+		"SESSION_STATE_REGISTERING": 1,
+		"SESSION_STATE_READY":       2,
+		"SESSION_STATE_CLOSING":     3,
+		"SESSION_STATE_CLOSED":      4,
+		"SESSION_STATE_FAILED":      5,
+	}
+)
+
+func (x SessionState) Enum() *SessionState {
+	p := new(SessionState)
+	*p = x
+	return p
+}
+
+func (x SessionState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SessionState) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_runtime_v1_runtime_proto_enumTypes[2].Descriptor()
+}
+
+func (SessionState) Type() protoreflect.EnumType {
+	return &file_api_runtime_v1_runtime_proto_enumTypes[2]
+}
+
+func (x SessionState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SessionState.Descriptor instead.
+func (SessionState) EnumDescriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{2}
+}
+
 type ExecuteRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Id             string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1300,6 +1358,1232 @@ func (x *UnregisterFunctionResponse) GetRegistration() *FunctionRegistration {
 	return nil
 }
 
+// SessionIdentity fences a Runtime Server-local session to one Run assignment.
+type SessionIdentity struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Kubernetes Run UID, not its mutable name.
+	RunUid string `protobuf:"bytes,1,opt,name=run_uid,json=runUid,proto3" json:"run_uid,omitempty"`
+	// Kubernetes UID of the Runtime Pod assigned to this Run. It fences a
+	// recreated Pod that happens to reuse the same name.
+	AssignedPodUid string `protobuf:"bytes,2,opt,name=assigned_pod_uid,json=assignedPodUid,proto3" json:"assigned_pod_uid,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SessionIdentity) Reset() {
+	*x = SessionIdentity{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionIdentity) ProtoMessage() {}
+
+func (x *SessionIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionIdentity.ProtoReflect.Descriptor instead.
+func (*SessionIdentity) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *SessionIdentity) GetRunUid() string {
+	if x != nil {
+		return x.RunUid
+	}
+	return ""
+}
+
+func (x *SessionIdentity) GetAssignedPodUid() string {
+	if x != nil {
+		return x.AssignedPodUid
+	}
+	return ""
+}
+
+type RegisterSessionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity for the Session Run to register.
+	Identity *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Absolute path prepared by the owner runtimed below this Runtime's workspace.
+	WorkingDir string `protobuf:"bytes,2,opt,name=working_dir,json=workingDir,proto3" json:"working_dir,omitempty"`
+	// Environment overrides available to every session command.
+	Env map[string]string `protobuf:"bytes,3,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Idle lifetime requested by the Run. runtimed applies its own upper bound.
+	IdleTimeoutSeconds int64 `protobuf:"varint,4,opt,name=idle_timeout_seconds,json=idleTimeoutSeconds,proto3" json:"idle_timeout_seconds,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *RegisterSessionRequest) Reset() {
+	*x = RegisterSessionRequest{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterSessionRequest) ProtoMessage() {}
+
+func (x *RegisterSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterSessionRequest.ProtoReflect.Descriptor instead.
+func (*RegisterSessionRequest) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *RegisterSessionRequest) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *RegisterSessionRequest) GetWorkingDir() string {
+	if x != nil {
+		return x.WorkingDir
+	}
+	return ""
+}
+
+func (x *RegisterSessionRequest) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *RegisterSessionRequest) GetIdleTimeoutSeconds() int64 {
+	if x != nil {
+		return x.IdleTimeoutSeconds
+	}
+	return 0
+}
+
+type GetSessionStatusRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity for the Session Run to inspect.
+	Identity      *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSessionStatusRequest) Reset() {
+	*x = GetSessionStatusRequest{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSessionStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSessionStatusRequest) ProtoMessage() {}
+
+func (x *GetSessionStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSessionStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetSessionStatusRequest) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *GetSessionStatusRequest) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+type SessionStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity of the local session.
+	Identity *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Current local Runtime Server lifecycle state.
+	State SessionState `protobuf:"varint,2,opt,name=state,proto3,enum=executor.v1.SessionState" json:"state,omitempty"`
+	// Unix timestamp for the latest accepted session operation.
+	LastActivityUnixNano int64 `protobuf:"varint,3,opt,name=last_activity_unix_nano,json=lastActivityUnixNano,proto3" json:"last_activity_unix_nano,omitempty"`
+	// Runtime-defined terminal error when state is SESSION_STATE_FAILED.
+	FatalError    string `protobuf:"bytes,4,opt,name=fatal_error,json=fatalError,proto3" json:"fatal_error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionStatus) Reset() {
+	*x = SessionStatus{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionStatus) ProtoMessage() {}
+
+func (x *SessionStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionStatus.ProtoReflect.Descriptor instead.
+func (*SessionStatus) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *SessionStatus) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *SessionStatus) GetState() SessionState {
+	if x != nil {
+		return x.State
+	}
+	return SessionState_SESSION_STATE_UNSPECIFIED
+}
+
+func (x *SessionStatus) GetLastActivityUnixNano() int64 {
+	if x != nil {
+		return x.LastActivityUnixNano
+	}
+	return 0
+}
+
+func (x *SessionStatus) GetFatalError() string {
+	if x != nil {
+		return x.FatalError
+	}
+	return ""
+}
+
+// ExecuteSessionOperationRequest carries exactly one mutation. Owner runtimed
+// serializes it in the session queue and applies policy before calling the
+// local Runtime Server.
+type ExecuteSessionOperationRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity for the Session Run receiving this operation.
+	Identity *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Types that are valid to be assigned to Operation:
+	//
+	//	*ExecuteSessionOperationRequest_Command
+	//	*ExecuteSessionOperationRequest_WriteFile
+	//	*ExecuteSessionOperationRequest_CreateDirectory
+	//	*ExecuteSessionOperationRequest_DeleteFile
+	//	*ExecuteSessionOperationRequest_RenameFile
+	Operation     isExecuteSessionOperationRequest_Operation `protobuf_oneof:"operation"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExecuteSessionOperationRequest) Reset() {
+	*x = ExecuteSessionOperationRequest{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecuteSessionOperationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecuteSessionOperationRequest) ProtoMessage() {}
+
+func (x *ExecuteSessionOperationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecuteSessionOperationRequest.ProtoReflect.Descriptor instead.
+func (*ExecuteSessionOperationRequest) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *ExecuteSessionOperationRequest) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *ExecuteSessionOperationRequest) GetOperation() isExecuteSessionOperationRequest_Operation {
+	if x != nil {
+		return x.Operation
+	}
+	return nil
+}
+
+func (x *ExecuteSessionOperationRequest) GetCommand() *SessionCommand {
+	if x != nil {
+		if x, ok := x.Operation.(*ExecuteSessionOperationRequest_Command); ok {
+			return x.Command
+		}
+	}
+	return nil
+}
+
+func (x *ExecuteSessionOperationRequest) GetWriteFile() *SessionFileWrite {
+	if x != nil {
+		if x, ok := x.Operation.(*ExecuteSessionOperationRequest_WriteFile); ok {
+			return x.WriteFile
+		}
+	}
+	return nil
+}
+
+func (x *ExecuteSessionOperationRequest) GetCreateDirectory() *SessionDirectoryCreate {
+	if x != nil {
+		if x, ok := x.Operation.(*ExecuteSessionOperationRequest_CreateDirectory); ok {
+			return x.CreateDirectory
+		}
+	}
+	return nil
+}
+
+func (x *ExecuteSessionOperationRequest) GetDeleteFile() *SessionFileDelete {
+	if x != nil {
+		if x, ok := x.Operation.(*ExecuteSessionOperationRequest_DeleteFile); ok {
+			return x.DeleteFile
+		}
+	}
+	return nil
+}
+
+func (x *ExecuteSessionOperationRequest) GetRenameFile() *SessionFileRename {
+	if x != nil {
+		if x, ok := x.Operation.(*ExecuteSessionOperationRequest_RenameFile); ok {
+			return x.RenameFile
+		}
+	}
+	return nil
+}
+
+type isExecuteSessionOperationRequest_Operation interface {
+	isExecuteSessionOperationRequest_Operation()
+}
+
+type ExecuteSessionOperationRequest_Command struct {
+	// Executes one command in the session workspace.
+	Command *SessionCommand `protobuf:"bytes,2,opt,name=command,proto3,oneof"`
+}
+
+type ExecuteSessionOperationRequest_WriteFile struct {
+	// Writes one bounded file in the session workspace.
+	WriteFile *SessionFileWrite `protobuf:"bytes,3,opt,name=write_file,json=writeFile,proto3,oneof"`
+}
+
+type ExecuteSessionOperationRequest_CreateDirectory struct {
+	// Creates one directory in the session workspace.
+	CreateDirectory *SessionDirectoryCreate `protobuf:"bytes,4,opt,name=create_directory,json=createDirectory,proto3,oneof"`
+}
+
+type ExecuteSessionOperationRequest_DeleteFile struct {
+	// Deletes one file or directory in the session workspace.
+	DeleteFile *SessionFileDelete `protobuf:"bytes,5,opt,name=delete_file,json=deleteFile,proto3,oneof"`
+}
+
+type ExecuteSessionOperationRequest_RenameFile struct {
+	// Renames one file or directory in the session workspace.
+	RenameFile *SessionFileRename `protobuf:"bytes,6,opt,name=rename_file,json=renameFile,proto3,oneof"`
+}
+
+func (*ExecuteSessionOperationRequest_Command) isExecuteSessionOperationRequest_Operation() {}
+
+func (*ExecuteSessionOperationRequest_WriteFile) isExecuteSessionOperationRequest_Operation() {}
+
+func (*ExecuteSessionOperationRequest_CreateDirectory) isExecuteSessionOperationRequest_Operation() {}
+
+func (*ExecuteSessionOperationRequest_DeleteFile) isExecuteSessionOperationRequest_Operation() {}
+
+func (*ExecuteSessionOperationRequest_RenameFile) isExecuteSessionOperationRequest_Operation() {}
+
+type SessionCommand struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// argv executes a program directly. It must not be combined with shell.
+	Argv []string `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
+	// shell explicitly executes this text through the Runtime's shell. It must
+	// not be combined with argv.
+	Shell string `protobuf:"bytes,2,opt,name=shell,proto3" json:"shell,omitempty"`
+	// WorkingDirectory is workspace-relative. An empty value means the session
+	// workspace root.
+	WorkingDirectory string `protobuf:"bytes,3,opt,name=working_directory,json=workingDirectory,proto3" json:"working_directory,omitempty"`
+	// Per-command environment overrides. These take precedence over session
+	// environment values.
+	Env map[string]string `protobuf:"bytes,4,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Bounded standard input passed to the command.
+	Stdin []byte `protobuf:"bytes,5,opt,name=stdin,proto3" json:"stdin,omitempty"`
+	// TimeoutMillis is bounded by runtimed before this local call.
+	TimeoutMillis int64 `protobuf:"varint,6,opt,name=timeout_millis,json=timeoutMillis,proto3" json:"timeout_millis,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionCommand) Reset() {
+	*x = SessionCommand{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionCommand) ProtoMessage() {}
+
+func (x *SessionCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionCommand.ProtoReflect.Descriptor instead.
+func (*SessionCommand) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *SessionCommand) GetArgv() []string {
+	if x != nil {
+		return x.Argv
+	}
+	return nil
+}
+
+func (x *SessionCommand) GetShell() string {
+	if x != nil {
+		return x.Shell
+	}
+	return ""
+}
+
+func (x *SessionCommand) GetWorkingDirectory() string {
+	if x != nil {
+		return x.WorkingDirectory
+	}
+	return ""
+}
+
+func (x *SessionCommand) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *SessionCommand) GetStdin() []byte {
+	if x != nil {
+		return x.Stdin
+	}
+	return nil
+}
+
+func (x *SessionCommand) GetTimeoutMillis() int64 {
+	if x != nil {
+		return x.TimeoutMillis
+	}
+	return 0
+}
+
+type ExecuteSessionOperationResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Command result when the request operation is command. It is absent for
+	// successful file mutations.
+	Command       *SessionCommandResult `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExecuteSessionOperationResponse) Reset() {
+	*x = ExecuteSessionOperationResponse{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecuteSessionOperationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecuteSessionOperationResponse) ProtoMessage() {}
+
+func (x *ExecuteSessionOperationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecuteSessionOperationResponse.ProtoReflect.Descriptor instead.
+func (*ExecuteSessionOperationResponse) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ExecuteSessionOperationResponse) GetCommand() *SessionCommandResult {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+type SessionCommandResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Process exit code. A timeout uses -1.
+	ExitCode int32 `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	// Bounded standard output captured from the process.
+	Stdout []byte `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
+	// Bounded standard error captured from the process.
+	Stderr []byte `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
+	// True when runtimed's operation timeout terminated the process group.
+	TimedOut      bool `protobuf:"varint,4,opt,name=timed_out,json=timedOut,proto3" json:"timed_out,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionCommandResult) Reset() {
+	*x = SessionCommandResult{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionCommandResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionCommandResult) ProtoMessage() {}
+
+func (x *SessionCommandResult) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionCommandResult.ProtoReflect.Descriptor instead.
+func (*SessionCommandResult) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *SessionCommandResult) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *SessionCommandResult) GetStdout() []byte {
+	if x != nil {
+		return x.Stdout
+	}
+	return nil
+}
+
+func (x *SessionCommandResult) GetStderr() []byte {
+	if x != nil {
+		return x.Stderr
+	}
+	return nil
+}
+
+func (x *SessionCommandResult) GetTimedOut() bool {
+	if x != nil {
+		return x.TimedOut
+	}
+	return false
+}
+
+type ReadSessionFileRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity for the Session Run owning the file.
+	Identity *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Workspace-relative file path to read.
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// MaxBytes bounds response contents. runtimed supplies a bounded value.
+	MaxBytes      int64 `protobuf:"varint,3,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadSessionFileRequest) Reset() {
+	*x = ReadSessionFileRequest{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadSessionFileRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadSessionFileRequest) ProtoMessage() {}
+
+func (x *ReadSessionFileRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadSessionFileRequest.ProtoReflect.Descriptor instead.
+func (*ReadSessionFileRequest) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ReadSessionFileRequest) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *ReadSessionFileRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ReadSessionFileRequest) GetMaxBytes() int64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
+type ReadSessionFileResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// File bytes, limited by the requested and configured maximum.
+	Contents []byte `protobuf:"bytes,1,opt,name=contents,proto3" json:"contents,omitempty"`
+	// True when the file contains bytes beyond contents.
+	Truncated     bool `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadSessionFileResponse) Reset() {
+	*x = ReadSessionFileResponse{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadSessionFileResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadSessionFileResponse) ProtoMessage() {}
+
+func (x *ReadSessionFileResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadSessionFileResponse.ProtoReflect.Descriptor instead.
+func (*ReadSessionFileResponse) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *ReadSessionFileResponse) GetContents() []byte {
+	if x != nil {
+		return x.Contents
+	}
+	return nil
+}
+
+func (x *ReadSessionFileResponse) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+type ListSessionFilesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity for the Session Run owning the directory.
+	Identity *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	// An empty path lists the session workspace root.
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// Maximum direct children to return. Zero asks the Runtime Server to use
+	// its default; a non-zero value must be within the supported page bounds.
+	Limit int32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Opaque cursor returned by a prior ListSessionFiles response for this
+	// directory. An empty value starts at the first direct child.
+	PageToken     string `protobuf:"bytes,4,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionFilesRequest) Reset() {
+	*x = ListSessionFilesRequest{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionFilesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionFilesRequest) ProtoMessage() {}
+
+func (x *ListSessionFilesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionFilesRequest.ProtoReflect.Descriptor instead.
+func (*ListSessionFilesRequest) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *ListSessionFilesRequest) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+func (x *ListSessionFilesRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ListSessionFilesRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListSessionFilesRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
+type SessionFileInfo struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Entry name relative to the directory requested by ListSessionFiles.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// Whether the entry is a directory.
+	Directory bool `protobuf:"varint,2,opt,name=directory,proto3" json:"directory,omitempty"`
+	// Entry size in bytes as reported by the Runtime filesystem.
+	SizeBytes     int64 `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionFileInfo) Reset() {
+	*x = SessionFileInfo{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionFileInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionFileInfo) ProtoMessage() {}
+
+func (x *SessionFileInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionFileInfo.ProtoReflect.Descriptor instead.
+func (*SessionFileInfo) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *SessionFileInfo) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SessionFileInfo) GetDirectory() bool {
+	if x != nil {
+		return x.Directory
+	}
+	return false
+}
+
+func (x *SessionFileInfo) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+type ListSessionFilesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Direct child entries in the requested workspace-relative directory.
+	Entries []*SessionFileInfo `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	// Opaque cursor for the next page. Empty means there are no later entries.
+	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSessionFilesResponse) Reset() {
+	*x = ListSessionFilesResponse{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSessionFilesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSessionFilesResponse) ProtoMessage() {}
+
+func (x *ListSessionFilesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSessionFilesResponse.ProtoReflect.Descriptor instead.
+func (*ListSessionFilesResponse) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *ListSessionFilesResponse) GetEntries() []*SessionFileInfo {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *ListSessionFilesResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
+}
+
+type SessionFileWrite struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Workspace-relative destination file path.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// Bounded bytes to write to path.
+	Contents []byte `protobuf:"bytes,2,opt,name=contents,proto3" json:"contents,omitempty"`
+	// Whether missing parent directories may be created.
+	CreateParents bool `protobuf:"varint,3,opt,name=create_parents,json=createParents,proto3" json:"create_parents,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionFileWrite) Reset() {
+	*x = SessionFileWrite{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionFileWrite) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionFileWrite) ProtoMessage() {}
+
+func (x *SessionFileWrite) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionFileWrite.ProtoReflect.Descriptor instead.
+func (*SessionFileWrite) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *SessionFileWrite) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SessionFileWrite) GetContents() []byte {
+	if x != nil {
+		return x.Contents
+	}
+	return nil
+}
+
+func (x *SessionFileWrite) GetCreateParents() bool {
+	if x != nil {
+		return x.CreateParents
+	}
+	return false
+}
+
+type SessionDirectoryCreate struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Workspace-relative directory path to create, including missing parents.
+	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionDirectoryCreate) Reset() {
+	*x = SessionDirectoryCreate{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionDirectoryCreate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionDirectoryCreate) ProtoMessage() {}
+
+func (x *SessionDirectoryCreate) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionDirectoryCreate.ProtoReflect.Descriptor instead.
+func (*SessionDirectoryCreate) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *SessionDirectoryCreate) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+type SessionFileDelete struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Workspace-relative file or directory path to delete.
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// Whether a directory and its descendants may be deleted.
+	Recursive     bool `protobuf:"varint,2,opt,name=recursive,proto3" json:"recursive,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionFileDelete) Reset() {
+	*x = SessionFileDelete{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionFileDelete) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionFileDelete) ProtoMessage() {}
+
+func (x *SessionFileDelete) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionFileDelete.ProtoReflect.Descriptor instead.
+func (*SessionFileDelete) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *SessionFileDelete) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SessionFileDelete) GetRecursive() bool {
+	if x != nil {
+		return x.Recursive
+	}
+	return false
+}
+
+type SessionFileRename struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Existing workspace-relative source path.
+	SourcePath string `protobuf:"bytes,1,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
+	// New workspace-relative destination path.
+	DestinationPath string `protobuf:"bytes,2,opt,name=destination_path,json=destinationPath,proto3" json:"destination_path,omitempty"`
+	// Whether an existing destination may be replaced.
+	Overwrite     bool `protobuf:"varint,3,opt,name=overwrite,proto3" json:"overwrite,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionFileRename) Reset() {
+	*x = SessionFileRename{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionFileRename) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionFileRename) ProtoMessage() {}
+
+func (x *SessionFileRename) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionFileRename.ProtoReflect.Descriptor instead.
+func (*SessionFileRename) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *SessionFileRename) GetSourcePath() string {
+	if x != nil {
+		return x.SourcePath
+	}
+	return ""
+}
+
+func (x *SessionFileRename) GetDestinationPath() string {
+	if x != nil {
+		return x.DestinationPath
+	}
+	return ""
+}
+
+func (x *SessionFileRename) GetOverwrite() bool {
+	if x != nil {
+		return x.Overwrite
+	}
+	return false
+}
+
+type CloseSessionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity for the Session Run to close.
+	Identity      *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloseSessionRequest) Reset() {
+	*x = CloseSessionRequest{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloseSessionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloseSessionRequest) ProtoMessage() {}
+
+func (x *CloseSessionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloseSessionRequest.ProtoReflect.Descriptor instead.
+func (*CloseSessionRequest) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *CloseSessionRequest) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
+type CloseSessionResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Immutable assignment identity of the closed session.
+	Identity      *SessionIdentity `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CloseSessionResponse) Reset() {
+	*x = CloseSessionResponse{}
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CloseSessionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CloseSessionResponse) ProtoMessage() {}
+
+func (x *CloseSessionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_runtime_v1_runtime_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CloseSessionResponse.ProtoReflect.Descriptor instead.
+func (*CloseSessionResponse) Descriptor() ([]byte, []int) {
+	return file_api_runtime_v1_runtime_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *CloseSessionResponse) GetIdentity() *SessionIdentity {
+	if x != nil {
+		return x.Identity
+	}
+	return nil
+}
+
 var File_api_runtime_v1_runtime_proto protoreflect.FileDescriptor
 
 const file_api_runtime_v1_runtime_proto_rawDesc = "" +
@@ -1390,7 +2674,94 @@ const file_api_runtime_v1_runtime_proto_rawDesc = "" +
 	"\x10cancel_in_flight\x18\x02 \x01(\bR\x0ecancelInFlight\x120\n" +
 	"\x14drain_timeout_millis\x18\x03 \x01(\x03R\x12drainTimeoutMillis\"c\n" +
 	"\x1aUnregisterFunctionResponse\x12E\n" +
-	"\fregistration\x18\x01 \x01(\v2!.executor.v1.FunctionRegistrationR\fregistration*\xa6\x01\n" +
+	"\fregistration\x18\x01 \x01(\v2!.executor.v1.FunctionRegistrationR\fregistration\"T\n" +
+	"\x0fSessionIdentity\x12\x17\n" +
+	"\arun_uid\x18\x01 \x01(\tR\x06runUid\x12(\n" +
+	"\x10assigned_pod_uid\x18\x02 \x01(\tR\x0eassignedPodUid\"\x9d\x02\n" +
+	"\x16RegisterSessionRequest\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\x12\x1f\n" +
+	"\vworking_dir\x18\x02 \x01(\tR\n" +
+	"workingDir\x12>\n" +
+	"\x03env\x18\x03 \x03(\v2,.executor.v1.RegisterSessionRequest.EnvEntryR\x03env\x120\n" +
+	"\x14idle_timeout_seconds\x18\x04 \x01(\x03R\x12idleTimeoutSeconds\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"S\n" +
+	"\x17GetSessionStatusRequest\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\"\xd2\x01\n" +
+	"\rSessionStatus\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\x12/\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x19.executor.v1.SessionStateR\x05state\x125\n" +
+	"\x17last_activity_unix_nano\x18\x03 \x01(\x03R\x14lastActivityUnixNano\x12\x1f\n" +
+	"\vfatal_error\x18\x04 \x01(\tR\n" +
+	"fatalError\"\xb8\x03\n" +
+	"\x1eExecuteSessionOperationRequest\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\x127\n" +
+	"\acommand\x18\x02 \x01(\v2\x1b.executor.v1.SessionCommandH\x00R\acommand\x12>\n" +
+	"\n" +
+	"write_file\x18\x03 \x01(\v2\x1d.executor.v1.SessionFileWriteH\x00R\twriteFile\x12P\n" +
+	"\x10create_directory\x18\x04 \x01(\v2#.executor.v1.SessionDirectoryCreateH\x00R\x0fcreateDirectory\x12A\n" +
+	"\vdelete_file\x18\x05 \x01(\v2\x1e.executor.v1.SessionFileDeleteH\x00R\n" +
+	"deleteFile\x12A\n" +
+	"\vrename_file\x18\x06 \x01(\v2\x1e.executor.v1.SessionFileRenameH\x00R\n" +
+	"renameFileB\v\n" +
+	"\toperation\"\x94\x02\n" +
+	"\x0eSessionCommand\x12\x12\n" +
+	"\x04argv\x18\x01 \x03(\tR\x04argv\x12\x14\n" +
+	"\x05shell\x18\x02 \x01(\tR\x05shell\x12+\n" +
+	"\x11working_directory\x18\x03 \x01(\tR\x10workingDirectory\x126\n" +
+	"\x03env\x18\x04 \x03(\v2$.executor.v1.SessionCommand.EnvEntryR\x03env\x12\x14\n" +
+	"\x05stdin\x18\x05 \x01(\fR\x05stdin\x12%\n" +
+	"\x0etimeout_millis\x18\x06 \x01(\x03R\rtimeoutMillis\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"^\n" +
+	"\x1fExecuteSessionOperationResponse\x12;\n" +
+	"\acommand\x18\x01 \x01(\v2!.executor.v1.SessionCommandResultR\acommand\"\x80\x01\n" +
+	"\x14SessionCommandResult\x12\x1b\n" +
+	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12\x16\n" +
+	"\x06stdout\x18\x02 \x01(\fR\x06stdout\x12\x16\n" +
+	"\x06stderr\x18\x03 \x01(\fR\x06stderr\x12\x1b\n" +
+	"\ttimed_out\x18\x04 \x01(\bR\btimedOut\"\x83\x01\n" +
+	"\x16ReadSessionFileRequest\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1b\n" +
+	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\"S\n" +
+	"\x17ReadSessionFileResponse\x12\x1a\n" +
+	"\bcontents\x18\x01 \x01(\fR\bcontents\x12\x1c\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"\x9c\x01\n" +
+	"\x17ListSessionFilesRequest\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x04 \x01(\tR\tpageToken\"b\n" +
+	"\x0fSessionFileInfo\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
+	"\tdirectory\x18\x02 \x01(\bR\tdirectory\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\"z\n" +
+	"\x18ListSessionFilesResponse\x126\n" +
+	"\aentries\x18\x01 \x03(\v2\x1c.executor.v1.SessionFileInfoR\aentries\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"i\n" +
+	"\x10SessionFileWrite\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
+	"\bcontents\x18\x02 \x01(\fR\bcontents\x12%\n" +
+	"\x0ecreate_parents\x18\x03 \x01(\bR\rcreateParents\",\n" +
+	"\x16SessionDirectoryCreate\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"E\n" +
+	"\x11SessionFileDelete\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1c\n" +
+	"\trecursive\x18\x02 \x01(\bR\trecursive\"}\n" +
+	"\x11SessionFileRename\x12\x1f\n" +
+	"\vsource_path\x18\x01 \x01(\tR\n" +
+	"sourcePath\x12)\n" +
+	"\x10destination_path\x18\x02 \x01(\tR\x0fdestinationPath\x12\x1c\n" +
+	"\toverwrite\x18\x03 \x01(\bR\toverwrite\"O\n" +
+	"\x13CloseSessionRequest\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity\"P\n" +
+	"\x14CloseSessionResponse\x128\n" +
+	"\bidentity\x18\x01 \x01(\v2\x1c.executor.v1.SessionIdentityR\bidentity*\xa6\x01\n" +
 	"\x0eExecutionState\x12\x1f\n" +
 	"\x1bEXECUTION_STATE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17EXECUTION_STATE_PENDING\x10\x01\x12\x1b\n" +
@@ -1402,7 +2773,14 @@ const file_api_runtime_v1_runtime_proto_rawDesc = "" +
 	"'FUNCTION_REGISTRATION_STATE_REGISTERING\x10\x01\x12%\n" +
 	"!FUNCTION_REGISTRATION_STATE_READY\x10\x02\x12(\n" +
 	"$FUNCTION_REGISTRATION_STATE_DRAINING\x10\x03\x12&\n" +
-	"\"FUNCTION_REGISTRATION_STATE_FAILED\x10\x042\x98\x03\n" +
+	"\"FUNCTION_REGISTRATION_STATE_FAILED\x10\x04*\xb4\x01\n" +
+	"\fSessionState\x12\x1d\n" +
+	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x1d\n" +
+	"\x19SESSION_STATE_REGISTERING\x10\x01\x12\x17\n" +
+	"\x13SESSION_STATE_READY\x10\x02\x12\x19\n" +
+	"\x15SESSION_STATE_CLOSING\x10\x03\x12\x18\n" +
+	"\x14SESSION_STATE_CLOSED\x10\x04\x12\x18\n" +
+	"\x14SESSION_STATE_FAILED\x10\x052\x98\x03\n" +
 	"\aRuntime\x12D\n" +
 	"\aExecute\x12\x1b.executor.v1.ExecuteRequest\x1a\x1c.executor.v1.ExecuteResponse\x12A\n" +
 	"\x06Status\x12\x1a.executor.v1.StatusRequest\x1a\x1b.executor.v1.StatusResponse\x12;\n" +
@@ -1414,7 +2792,14 @@ const file_api_runtime_v1_runtime_proto_rawDesc = "" +
 	"\x10RegisterFunction\x12$.executor.v1.RegisterFunctionRequest\x1a%.executor.v1.RegisterFunctionResponse\x12Y\n" +
 	"\x0eFunctionStatus\x12\".executor.v1.FunctionStatusRequest\x1a#.executor.v1.FunctionStatusResponse\x12Y\n" +
 	"\x0eInvokeFunction\x12\".executor.v1.InvokeFunctionRequest\x1a#.executor.v1.InvokeFunctionResponse\x12e\n" +
-	"\x12UnregisterFunction\x12&.executor.v1.UnregisterFunctionRequest\x1a'.executor.v1.UnregisterFunctionResponseB9Z7github.com/kruntimes/kruntimes/api/runtime/v1;runtimev1b\x06proto3"
+	"\x12UnregisterFunction\x12&.executor.v1.UnregisterFunctionRequest\x1a'.executor.v1.UnregisterFunctionResponse2\xc4\x04\n" +
+	"\x0eSessionRuntime\x12R\n" +
+	"\x0fRegisterSession\x12#.executor.v1.RegisterSessionRequest\x1a\x1a.executor.v1.SessionStatus\x12T\n" +
+	"\x10GetSessionStatus\x12$.executor.v1.GetSessionStatusRequest\x1a\x1a.executor.v1.SessionStatus\x12t\n" +
+	"\x17ExecuteSessionOperation\x12+.executor.v1.ExecuteSessionOperationRequest\x1a,.executor.v1.ExecuteSessionOperationResponse\x12\\\n" +
+	"\x0fReadSessionFile\x12#.executor.v1.ReadSessionFileRequest\x1a$.executor.v1.ReadSessionFileResponse\x12_\n" +
+	"\x10ListSessionFiles\x12$.executor.v1.ListSessionFilesRequest\x1a%.executor.v1.ListSessionFilesResponse\x12S\n" +
+	"\fCloseSession\x12 .executor.v1.CloseSessionRequest\x1a!.executor.v1.CloseSessionResponseB9Z7github.com/kruntimes/kruntimes/api/runtime/v1;runtimev1b\x06proto3"
 
 var (
 	file_api_runtime_v1_runtime_proto_rawDescOnce sync.Once
@@ -1428,76 +2813,128 @@ func file_api_runtime_v1_runtime_proto_rawDescGZIP() []byte {
 	return file_api_runtime_v1_runtime_proto_rawDescData
 }
 
-var file_api_runtime_v1_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_runtime_v1_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_api_runtime_v1_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_api_runtime_v1_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_api_runtime_v1_runtime_proto_goTypes = []any{
-	(ExecutionState)(0),                // 0: executor.v1.ExecutionState
-	(FunctionRegistrationState)(0),     // 1: executor.v1.FunctionRegistrationState
-	(*ExecuteRequest)(nil),             // 2: executor.v1.ExecuteRequest
-	(*ExecuteResponse)(nil),            // 3: executor.v1.ExecuteResponse
-	(*StatusRequest)(nil),              // 4: executor.v1.StatusRequest
-	(*StatusResponse)(nil),             // 5: executor.v1.StatusResponse
-	(*ListRequest)(nil),                // 6: executor.v1.ListRequest
-	(*ListResponse)(nil),               // 7: executor.v1.ListResponse
-	(*CancelRequest)(nil),              // 8: executor.v1.CancelRequest
-	(*CancelResponse)(nil),             // 9: executor.v1.CancelResponse
-	(*ForgetRequest)(nil),              // 10: executor.v1.ForgetRequest
-	(*ForgetResponse)(nil),             // 11: executor.v1.ForgetResponse
-	(*HealthRequest)(nil),              // 12: executor.v1.HealthRequest
-	(*HealthResponse)(nil),             // 13: executor.v1.HealthResponse
-	(*FunctionRegistration)(nil),       // 14: executor.v1.FunctionRegistration
-	(*RegisterFunctionRequest)(nil),    // 15: executor.v1.RegisterFunctionRequest
-	(*RegisterFunctionResponse)(nil),   // 16: executor.v1.RegisterFunctionResponse
-	(*FunctionStatusRequest)(nil),      // 17: executor.v1.FunctionStatusRequest
-	(*FunctionStatusResponse)(nil),     // 18: executor.v1.FunctionStatusResponse
-	(*InvokeFunctionRequest)(nil),      // 19: executor.v1.InvokeFunctionRequest
-	(*InvokeFunctionResponse)(nil),     // 20: executor.v1.InvokeFunctionResponse
-	(*UnregisterFunctionRequest)(nil),  // 21: executor.v1.UnregisterFunctionRequest
-	(*UnregisterFunctionResponse)(nil), // 22: executor.v1.UnregisterFunctionResponse
-	nil,                                // 23: executor.v1.ExecuteRequest.EnvEntry
-	nil,                                // 24: executor.v1.RegisterFunctionRequest.EnvEntry
-	nil,                                // 25: executor.v1.InvokeFunctionResponse.OutputsEntry
+	(ExecutionState)(0),                     // 0: executor.v1.ExecutionState
+	(FunctionRegistrationState)(0),          // 1: executor.v1.FunctionRegistrationState
+	(SessionState)(0),                       // 2: executor.v1.SessionState
+	(*ExecuteRequest)(nil),                  // 3: executor.v1.ExecuteRequest
+	(*ExecuteResponse)(nil),                 // 4: executor.v1.ExecuteResponse
+	(*StatusRequest)(nil),                   // 5: executor.v1.StatusRequest
+	(*StatusResponse)(nil),                  // 6: executor.v1.StatusResponse
+	(*ListRequest)(nil),                     // 7: executor.v1.ListRequest
+	(*ListResponse)(nil),                    // 8: executor.v1.ListResponse
+	(*CancelRequest)(nil),                   // 9: executor.v1.CancelRequest
+	(*CancelResponse)(nil),                  // 10: executor.v1.CancelResponse
+	(*ForgetRequest)(nil),                   // 11: executor.v1.ForgetRequest
+	(*ForgetResponse)(nil),                  // 12: executor.v1.ForgetResponse
+	(*HealthRequest)(nil),                   // 13: executor.v1.HealthRequest
+	(*HealthResponse)(nil),                  // 14: executor.v1.HealthResponse
+	(*FunctionRegistration)(nil),            // 15: executor.v1.FunctionRegistration
+	(*RegisterFunctionRequest)(nil),         // 16: executor.v1.RegisterFunctionRequest
+	(*RegisterFunctionResponse)(nil),        // 17: executor.v1.RegisterFunctionResponse
+	(*FunctionStatusRequest)(nil),           // 18: executor.v1.FunctionStatusRequest
+	(*FunctionStatusResponse)(nil),          // 19: executor.v1.FunctionStatusResponse
+	(*InvokeFunctionRequest)(nil),           // 20: executor.v1.InvokeFunctionRequest
+	(*InvokeFunctionResponse)(nil),          // 21: executor.v1.InvokeFunctionResponse
+	(*UnregisterFunctionRequest)(nil),       // 22: executor.v1.UnregisterFunctionRequest
+	(*UnregisterFunctionResponse)(nil),      // 23: executor.v1.UnregisterFunctionResponse
+	(*SessionIdentity)(nil),                 // 24: executor.v1.SessionIdentity
+	(*RegisterSessionRequest)(nil),          // 25: executor.v1.RegisterSessionRequest
+	(*GetSessionStatusRequest)(nil),         // 26: executor.v1.GetSessionStatusRequest
+	(*SessionStatus)(nil),                   // 27: executor.v1.SessionStatus
+	(*ExecuteSessionOperationRequest)(nil),  // 28: executor.v1.ExecuteSessionOperationRequest
+	(*SessionCommand)(nil),                  // 29: executor.v1.SessionCommand
+	(*ExecuteSessionOperationResponse)(nil), // 30: executor.v1.ExecuteSessionOperationResponse
+	(*SessionCommandResult)(nil),            // 31: executor.v1.SessionCommandResult
+	(*ReadSessionFileRequest)(nil),          // 32: executor.v1.ReadSessionFileRequest
+	(*ReadSessionFileResponse)(nil),         // 33: executor.v1.ReadSessionFileResponse
+	(*ListSessionFilesRequest)(nil),         // 34: executor.v1.ListSessionFilesRequest
+	(*SessionFileInfo)(nil),                 // 35: executor.v1.SessionFileInfo
+	(*ListSessionFilesResponse)(nil),        // 36: executor.v1.ListSessionFilesResponse
+	(*SessionFileWrite)(nil),                // 37: executor.v1.SessionFileWrite
+	(*SessionDirectoryCreate)(nil),          // 38: executor.v1.SessionDirectoryCreate
+	(*SessionFileDelete)(nil),               // 39: executor.v1.SessionFileDelete
+	(*SessionFileRename)(nil),               // 40: executor.v1.SessionFileRename
+	(*CloseSessionRequest)(nil),             // 41: executor.v1.CloseSessionRequest
+	(*CloseSessionResponse)(nil),            // 42: executor.v1.CloseSessionResponse
+	nil,                                     // 43: executor.v1.ExecuteRequest.EnvEntry
+	nil,                                     // 44: executor.v1.RegisterFunctionRequest.EnvEntry
+	nil,                                     // 45: executor.v1.InvokeFunctionResponse.OutputsEntry
+	nil,                                     // 46: executor.v1.RegisterSessionRequest.EnvEntry
+	nil,                                     // 47: executor.v1.SessionCommand.EnvEntry
 }
 var file_api_runtime_v1_runtime_proto_depIdxs = []int32{
-	23, // 0: executor.v1.ExecuteRequest.env:type_name -> executor.v1.ExecuteRequest.EnvEntry
+	43, // 0: executor.v1.ExecuteRequest.env:type_name -> executor.v1.ExecuteRequest.EnvEntry
 	0,  // 1: executor.v1.StatusResponse.state:type_name -> executor.v1.ExecutionState
-	5,  // 2: executor.v1.ListResponse.entries:type_name -> executor.v1.StatusResponse
-	24, // 3: executor.v1.RegisterFunctionRequest.env:type_name -> executor.v1.RegisterFunctionRequest.EnvEntry
-	14, // 4: executor.v1.RegisterFunctionResponse.registration:type_name -> executor.v1.FunctionRegistration
+	6,  // 2: executor.v1.ListResponse.entries:type_name -> executor.v1.StatusResponse
+	44, // 3: executor.v1.RegisterFunctionRequest.env:type_name -> executor.v1.RegisterFunctionRequest.EnvEntry
+	15, // 4: executor.v1.RegisterFunctionResponse.registration:type_name -> executor.v1.FunctionRegistration
 	1,  // 5: executor.v1.RegisterFunctionResponse.state:type_name -> executor.v1.FunctionRegistrationState
-	14, // 6: executor.v1.FunctionStatusRequest.registration:type_name -> executor.v1.FunctionRegistration
-	14, // 7: executor.v1.FunctionStatusResponse.registration:type_name -> executor.v1.FunctionRegistration
+	15, // 6: executor.v1.FunctionStatusRequest.registration:type_name -> executor.v1.FunctionRegistration
+	15, // 7: executor.v1.FunctionStatusResponse.registration:type_name -> executor.v1.FunctionRegistration
 	1,  // 8: executor.v1.FunctionStatusResponse.state:type_name -> executor.v1.FunctionRegistrationState
-	14, // 9: executor.v1.InvokeFunctionRequest.registration:type_name -> executor.v1.FunctionRegistration
-	14, // 10: executor.v1.InvokeFunctionResponse.registration:type_name -> executor.v1.FunctionRegistration
-	25, // 11: executor.v1.InvokeFunctionResponse.outputs:type_name -> executor.v1.InvokeFunctionResponse.OutputsEntry
-	14, // 12: executor.v1.UnregisterFunctionRequest.registration:type_name -> executor.v1.FunctionRegistration
-	14, // 13: executor.v1.UnregisterFunctionResponse.registration:type_name -> executor.v1.FunctionRegistration
-	2,  // 14: executor.v1.Runtime.Execute:input_type -> executor.v1.ExecuteRequest
-	4,  // 15: executor.v1.Runtime.Status:input_type -> executor.v1.StatusRequest
-	6,  // 16: executor.v1.Runtime.List:input_type -> executor.v1.ListRequest
-	8,  // 17: executor.v1.Runtime.Cancel:input_type -> executor.v1.CancelRequest
-	10, // 18: executor.v1.Runtime.Forget:input_type -> executor.v1.ForgetRequest
-	12, // 19: executor.v1.Runtime.Health:input_type -> executor.v1.HealthRequest
-	15, // 20: executor.v1.FunctionRuntime.RegisterFunction:input_type -> executor.v1.RegisterFunctionRequest
-	17, // 21: executor.v1.FunctionRuntime.FunctionStatus:input_type -> executor.v1.FunctionStatusRequest
-	19, // 22: executor.v1.FunctionRuntime.InvokeFunction:input_type -> executor.v1.InvokeFunctionRequest
-	21, // 23: executor.v1.FunctionRuntime.UnregisterFunction:input_type -> executor.v1.UnregisterFunctionRequest
-	3,  // 24: executor.v1.Runtime.Execute:output_type -> executor.v1.ExecuteResponse
-	5,  // 25: executor.v1.Runtime.Status:output_type -> executor.v1.StatusResponse
-	7,  // 26: executor.v1.Runtime.List:output_type -> executor.v1.ListResponse
-	9,  // 27: executor.v1.Runtime.Cancel:output_type -> executor.v1.CancelResponse
-	11, // 28: executor.v1.Runtime.Forget:output_type -> executor.v1.ForgetResponse
-	13, // 29: executor.v1.Runtime.Health:output_type -> executor.v1.HealthResponse
-	16, // 30: executor.v1.FunctionRuntime.RegisterFunction:output_type -> executor.v1.RegisterFunctionResponse
-	18, // 31: executor.v1.FunctionRuntime.FunctionStatus:output_type -> executor.v1.FunctionStatusResponse
-	20, // 32: executor.v1.FunctionRuntime.InvokeFunction:output_type -> executor.v1.InvokeFunctionResponse
-	22, // 33: executor.v1.FunctionRuntime.UnregisterFunction:output_type -> executor.v1.UnregisterFunctionResponse
-	24, // [24:34] is the sub-list for method output_type
-	14, // [14:24] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	15, // 9: executor.v1.InvokeFunctionRequest.registration:type_name -> executor.v1.FunctionRegistration
+	15, // 10: executor.v1.InvokeFunctionResponse.registration:type_name -> executor.v1.FunctionRegistration
+	45, // 11: executor.v1.InvokeFunctionResponse.outputs:type_name -> executor.v1.InvokeFunctionResponse.OutputsEntry
+	15, // 12: executor.v1.UnregisterFunctionRequest.registration:type_name -> executor.v1.FunctionRegistration
+	15, // 13: executor.v1.UnregisterFunctionResponse.registration:type_name -> executor.v1.FunctionRegistration
+	24, // 14: executor.v1.RegisterSessionRequest.identity:type_name -> executor.v1.SessionIdentity
+	46, // 15: executor.v1.RegisterSessionRequest.env:type_name -> executor.v1.RegisterSessionRequest.EnvEntry
+	24, // 16: executor.v1.GetSessionStatusRequest.identity:type_name -> executor.v1.SessionIdentity
+	24, // 17: executor.v1.SessionStatus.identity:type_name -> executor.v1.SessionIdentity
+	2,  // 18: executor.v1.SessionStatus.state:type_name -> executor.v1.SessionState
+	24, // 19: executor.v1.ExecuteSessionOperationRequest.identity:type_name -> executor.v1.SessionIdentity
+	29, // 20: executor.v1.ExecuteSessionOperationRequest.command:type_name -> executor.v1.SessionCommand
+	37, // 21: executor.v1.ExecuteSessionOperationRequest.write_file:type_name -> executor.v1.SessionFileWrite
+	38, // 22: executor.v1.ExecuteSessionOperationRequest.create_directory:type_name -> executor.v1.SessionDirectoryCreate
+	39, // 23: executor.v1.ExecuteSessionOperationRequest.delete_file:type_name -> executor.v1.SessionFileDelete
+	40, // 24: executor.v1.ExecuteSessionOperationRequest.rename_file:type_name -> executor.v1.SessionFileRename
+	47, // 25: executor.v1.SessionCommand.env:type_name -> executor.v1.SessionCommand.EnvEntry
+	31, // 26: executor.v1.ExecuteSessionOperationResponse.command:type_name -> executor.v1.SessionCommandResult
+	24, // 27: executor.v1.ReadSessionFileRequest.identity:type_name -> executor.v1.SessionIdentity
+	24, // 28: executor.v1.ListSessionFilesRequest.identity:type_name -> executor.v1.SessionIdentity
+	35, // 29: executor.v1.ListSessionFilesResponse.entries:type_name -> executor.v1.SessionFileInfo
+	24, // 30: executor.v1.CloseSessionRequest.identity:type_name -> executor.v1.SessionIdentity
+	24, // 31: executor.v1.CloseSessionResponse.identity:type_name -> executor.v1.SessionIdentity
+	3,  // 32: executor.v1.Runtime.Execute:input_type -> executor.v1.ExecuteRequest
+	5,  // 33: executor.v1.Runtime.Status:input_type -> executor.v1.StatusRequest
+	7,  // 34: executor.v1.Runtime.List:input_type -> executor.v1.ListRequest
+	9,  // 35: executor.v1.Runtime.Cancel:input_type -> executor.v1.CancelRequest
+	11, // 36: executor.v1.Runtime.Forget:input_type -> executor.v1.ForgetRequest
+	13, // 37: executor.v1.Runtime.Health:input_type -> executor.v1.HealthRequest
+	16, // 38: executor.v1.FunctionRuntime.RegisterFunction:input_type -> executor.v1.RegisterFunctionRequest
+	18, // 39: executor.v1.FunctionRuntime.FunctionStatus:input_type -> executor.v1.FunctionStatusRequest
+	20, // 40: executor.v1.FunctionRuntime.InvokeFunction:input_type -> executor.v1.InvokeFunctionRequest
+	22, // 41: executor.v1.FunctionRuntime.UnregisterFunction:input_type -> executor.v1.UnregisterFunctionRequest
+	25, // 42: executor.v1.SessionRuntime.RegisterSession:input_type -> executor.v1.RegisterSessionRequest
+	26, // 43: executor.v1.SessionRuntime.GetSessionStatus:input_type -> executor.v1.GetSessionStatusRequest
+	28, // 44: executor.v1.SessionRuntime.ExecuteSessionOperation:input_type -> executor.v1.ExecuteSessionOperationRequest
+	32, // 45: executor.v1.SessionRuntime.ReadSessionFile:input_type -> executor.v1.ReadSessionFileRequest
+	34, // 46: executor.v1.SessionRuntime.ListSessionFiles:input_type -> executor.v1.ListSessionFilesRequest
+	41, // 47: executor.v1.SessionRuntime.CloseSession:input_type -> executor.v1.CloseSessionRequest
+	4,  // 48: executor.v1.Runtime.Execute:output_type -> executor.v1.ExecuteResponse
+	6,  // 49: executor.v1.Runtime.Status:output_type -> executor.v1.StatusResponse
+	8,  // 50: executor.v1.Runtime.List:output_type -> executor.v1.ListResponse
+	10, // 51: executor.v1.Runtime.Cancel:output_type -> executor.v1.CancelResponse
+	12, // 52: executor.v1.Runtime.Forget:output_type -> executor.v1.ForgetResponse
+	14, // 53: executor.v1.Runtime.Health:output_type -> executor.v1.HealthResponse
+	17, // 54: executor.v1.FunctionRuntime.RegisterFunction:output_type -> executor.v1.RegisterFunctionResponse
+	19, // 55: executor.v1.FunctionRuntime.FunctionStatus:output_type -> executor.v1.FunctionStatusResponse
+	21, // 56: executor.v1.FunctionRuntime.InvokeFunction:output_type -> executor.v1.InvokeFunctionResponse
+	23, // 57: executor.v1.FunctionRuntime.UnregisterFunction:output_type -> executor.v1.UnregisterFunctionResponse
+	27, // 58: executor.v1.SessionRuntime.RegisterSession:output_type -> executor.v1.SessionStatus
+	27, // 59: executor.v1.SessionRuntime.GetSessionStatus:output_type -> executor.v1.SessionStatus
+	30, // 60: executor.v1.SessionRuntime.ExecuteSessionOperation:output_type -> executor.v1.ExecuteSessionOperationResponse
+	33, // 61: executor.v1.SessionRuntime.ReadSessionFile:output_type -> executor.v1.ReadSessionFileResponse
+	36, // 62: executor.v1.SessionRuntime.ListSessionFiles:output_type -> executor.v1.ListSessionFilesResponse
+	42, // 63: executor.v1.SessionRuntime.CloseSession:output_type -> executor.v1.CloseSessionResponse
+	48, // [48:64] is the sub-list for method output_type
+	32, // [32:48] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_api_runtime_v1_runtime_proto_init() }
@@ -1505,15 +2942,22 @@ func file_api_runtime_v1_runtime_proto_init() {
 	if File_api_runtime_v1_runtime_proto != nil {
 		return
 	}
+	file_api_runtime_v1_runtime_proto_msgTypes[25].OneofWrappers = []any{
+		(*ExecuteSessionOperationRequest_Command)(nil),
+		(*ExecuteSessionOperationRequest_WriteFile)(nil),
+		(*ExecuteSessionOperationRequest_CreateDirectory)(nil),
+		(*ExecuteSessionOperationRequest_DeleteFile)(nil),
+		(*ExecuteSessionOperationRequest_RenameFile)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_runtime_v1_runtime_proto_rawDesc), len(file_api_runtime_v1_runtime_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   24,
+			NumEnums:      3,
+			NumMessages:   45,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_api_runtime_v1_runtime_proto_goTypes,
 		DependencyIndexes: file_api_runtime_v1_runtime_proto_depIdxs,

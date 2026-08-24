@@ -50,6 +50,7 @@ func main() {
 		statusAddr          string
 		workers             int
 		runtimeName         string
+		gatewayURL          string
 		artifactStoreDriver string
 		artifactStoreRoot   string
 		artifactVolumeClaim string
@@ -63,6 +64,9 @@ func main() {
 		artifactS3Workers   int
 		maxArtifactBytes    int64
 		maxArtifactsBytes   int64
+		sessionMaxQueueSize int
+		sessionMaxTimeout   time.Duration
+		sessionCloseTimeout time.Duration
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9090", "Metrics endpoint address.")
@@ -70,6 +74,7 @@ func main() {
 	flag.StringVar(&statusAddr, "status-addr", ":9093", "gRPC address for the status proxy (for krt logs).")
 	flag.StringVar(&runtimeEndpoint, "runtime-endpoint", "localhost:9091", "gRPC endpoint of the runtime server.")
 	flag.StringVar(&runtimeName, "runtime-name", "", "Runtime resource name served by this pod.")
+	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway HTTP base URL for Session Run endpoints.")
 	flag.IntVar(&workers, "workers", int(v1alpha1.RuntimeDefaultRunsCapacity), "Max concurrent run executions.")
 	flag.StringVar(&artifactStoreDriver, "artifact-store-driver", "", "Artifact store driver: filesystem or s3.")
 	flag.StringVar(&artifactStoreRoot, "artifact-store-root", "", "Filesystem artifact store root. Empty disables artifact collection.")
@@ -84,6 +89,9 @@ func main() {
 	flag.IntVar(&artifactS3Workers, "artifact-s3-upload-concurrency", 0, "S3 multipart upload concurrency.")
 	flag.Int64Var(&maxArtifactBytes, "max-artifact-bytes", artifact.DefaultMaxArtifactBytes, "Maximum bytes allowed for one artifact.")
 	flag.Int64Var(&maxArtifactsBytes, "max-artifacts-bytes", artifact.DefaultMaxArtifactsBytes, "Maximum total artifact bytes allowed per Run.")
+	flag.IntVar(&sessionMaxQueueSize, "session-max-queue-size", 0, "Maximum queued mutations per Session Run. Non-positive uses the default.")
+	flag.DurationVar(&sessionMaxTimeout, "session-max-operation-timeout", 0, "Maximum duration of one Session operation. Non-positive uses the default.")
+	flag.DurationVar(&sessionCloseTimeout, "session-close-timeout", 0, "Maximum time to wait for a Session Runtime to close. Non-positive uses the default.")
 	klog.InitFlags(nil)
 	flag.Parse()
 
@@ -109,6 +117,16 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.Run{}, "spec.runtime", func(object client.Object) []string {
+		run, ok := object.(*v1alpha1.Run)
+		if !ok || run.Spec.Runtime == "" {
+			return nil
+		}
+		return []string{run.Spec.Runtime}
+	}); err != nil {
+		setupLog.Error(err, "unable to index Runs by Runtime")
 		os.Exit(1)
 	}
 	runtimeHealthConn, err := grpc.NewClient(
@@ -194,36 +212,44 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start status proxy for krt logs.
+	sessionOperations := runtimed.NewSessionOperationQueue(sessionMaxQueueSize, sessionMaxTimeout)
+
+	// Start gRPC proxies for logs, artifacts, and SessionRuntime requests.
 	go func() {
-		if err := runtimed.StartRuntimeServices(
+		if err := runtimed.StartRuntimeProxyServer(
 			ctx,
 			runtimeEndpoint,
 			statusAddr,
 			mgr.GetAPIReader(),
+			mgr.GetCache(),
 			artifactStore,
+			sessionOperations,
 			runtimeNamespace,
 			runtimeName,
+			podName,
 		); err != nil {
 			klog.Errorf("Status proxy: %v", err)
 		}
 	}()
 
 	runtimedCtrl := &runtimed.Controller{
-		Client:            mgr.GetClient(),
-		PodReader:         mgr.GetAPIReader(),
-		RunReader:         mgr.GetAPIReader(),
-		Log:               ctrl.Log.WithName("controllers").WithName("Runtimed"),
-		PodName:           podName,
-		RuntimeName:       runtimeName,
-		RuntimeNamespace:  runtimeNamespace,
-		RuntimeEndpoint:   runtimeEndpoint,
-		Workers:           workers,
-		ArtifactStore:     artifactStore,
-		ArtifactStoreSpec: artifactStoreSpec,
-		MaxArtifactBytes:  maxArtifactBytes,
-		MaxArtifactsBytes: maxArtifactsBytes,
-		Recorder:          mgr.GetEventRecorderFor("runtimed"),
+		Client:              mgr.GetClient(),
+		PodReader:           mgr.GetAPIReader(),
+		RunReader:           mgr.GetAPIReader(),
+		Log:                 ctrl.Log.WithName("controllers").WithName("Runtimed"),
+		PodName:             podName,
+		RuntimeName:         runtimeName,
+		RuntimeNamespace:    runtimeNamespace,
+		RuntimeEndpoint:     runtimeEndpoint,
+		Workers:             workers,
+		ArtifactStore:       artifactStore,
+		ArtifactStoreSpec:   artifactStoreSpec,
+		MaxArtifactBytes:    maxArtifactBytes,
+		MaxArtifactsBytes:   maxArtifactsBytes,
+		SessionOperations:   sessionOperations,
+		SessionCloseTimeout: sessionCloseTimeout,
+		GatewayURL:          gatewayURL,
+		Recorder:            mgr.GetEventRecorderFor("runtimed"),
 	}
 
 	if err := runtimedCtrl.SetupWithManager(mgr); err != nil {

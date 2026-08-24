@@ -9,6 +9,9 @@ bash:
   image: ghcr.io/kruntimes/bash-runtime
   port: 9091
   replicas: 2
+  # Graceful SIGTERM period for Session commands before the built-in Runtime
+  # force-kills the process group.
+  sessionTerminationGraceSeconds: 2
   capacity:
     resources:
       runs: "2"
@@ -24,6 +27,9 @@ python:
   image: ghcr.io/kruntimes/python-runtime
   port: 9092
   replicas: 2
+  # Graceful SIGTERM period for Session commands before the built-in Runtime
+  # force-kills the process group.
+  sessionTerminationGraceSeconds: 2
   capacity:
     resources:
       runs: "2"
