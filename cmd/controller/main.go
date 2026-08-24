@@ -29,6 +29,8 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+const maxGatewayCABundleBytes = 64 << 10
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
@@ -51,6 +53,7 @@ func main() {
 		gatewayNamespace                         string
 		gatewaySelectorLabels                    string
 		gatewayURL                               string
+		gatewayCAFile                            string
 		sessionMaxQueueSize                      int
 		sessionMaxOperationTimeout               time.Duration
 		sessionCloseTimeout                      time.Duration
@@ -70,11 +73,25 @@ func main() {
 	flag.StringVar(&runtimeMaintainerPullSecrets, "runtime-maintainer-image-pull-secrets", "", "Comma-separated image pull Secret names for runtime maintainers.")
 	flag.StringVar(&gatewayNamespace, "gateway-namespace", "", "Namespace of the enabled Runtime gateway. Empty keeps Runtime Pod ingress denied.")
 	flag.StringVar(&gatewaySelectorLabels, "gateway-selector-labels", "", "Comma-separated key=value labels selecting Runtime gateway Pods.")
-	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway HTTP base URL written to ready Session Run endpoints.")
+	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway base URL written to ready Session Run endpoints.")
+	flag.StringVar(&gatewayCAFile, "gateway-ca-file", "", "PEM trust bundle file for HTTPS Session Run endpoints.")
 	flag.IntVar(&sessionMaxQueueSize, "session-max-queue-size", 0, "Maximum queued mutations per Session Run. A non-positive value uses runtimed defaults.")
 	flag.DurationVar(&sessionMaxOperationTimeout, "session-max-operation-timeout", 0, "Maximum duration of one Session operation. A non-positive value uses runtimed defaults.")
 	flag.DurationVar(&sessionCloseTimeout, "session-close-timeout", 0, "Maximum time runtimed waits for a Session Runtime to close. A non-positive value uses runtimed defaults.")
 	flag.Parse()
+	var gatewayCABundle []byte
+	if gatewayCAFile != "" {
+		var err error
+		gatewayCABundle, err = os.ReadFile(gatewayCAFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read gateway CA file: %v\n", err)
+			os.Exit(1)
+		}
+		if len(gatewayCABundle) > maxGatewayCABundleBytes {
+			fmt.Fprintf(os.Stderr, "gateway CA file exceeds %d bytes\n", maxGatewayCABundleBytes)
+			os.Exit(1)
+		}
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	if webhookControllerServiceAccountName == "" || webhookControllerServiceAccountNamespace == "" {
@@ -137,6 +154,7 @@ func main() {
 		GatewayNamespace:           gatewayNamespace,
 		GatewaySelectorLabels:      parseLabels(gatewaySelectorLabels),
 		GatewayURL:                 gatewayURL,
+		GatewayCABundle:            gatewayCABundle,
 		SessionMaxQueueSize:        sessionMaxQueueSize,
 		SessionMaxOperationTimeout: sessionMaxOperationTimeout,
 		SessionCloseTimeout:        sessionCloseTimeout,

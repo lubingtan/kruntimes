@@ -104,6 +104,14 @@ controller:
         matchLabels:
           app.kubernetes.io/component: controller
   priorityClassName: system-cluster-critical
+gateway:
+  enabled: true
+  protocols:
+    - http
+    - https
+  tls:
+    certificateKey: certificate.pem
+    privateKeyKey: private-key.pem
 """
 
 
@@ -143,6 +151,25 @@ def main() -> int:
         ),
         require_deployment(
             resources,
+            "kruntimes-gateway",
+            [
+                "--tls-certificate-file=/var/run/kruntimes/gateway-tls/certificate.pem",
+                "--tls-private-key-file=/var/run/kruntimes/gateway-tls/private-key.pem",
+                "name: https",
+                "mountPath: /var/run/kruntimes/gateway-tls",
+                "secretName: kruntimes-gateway-tls",
+            ],
+        ),
+        require_resource(
+            resources,
+            "Service",
+            "kruntimes-gateway",
+            ["name: http", "targetPort: http", "name: https", "targetPort: https"],
+        ),
+        require_resource(resources, "Secret", "kruntimes-gateway-tls", ["type: kubernetes.io/tls", "ca.crt:"]),
+        reject_invalid_gateway_protocol_configuration(),
+        require_deployment(
+            resources,
             "kruntimes-controller",
             [
                 "replicas: 2",
@@ -161,6 +188,10 @@ def main() -> int:
                 "topologySpreadConstraints:",
                 "priorityClassName: system-cluster-critical",
                 "port: probes",
+                "--gateway-url=https://kruntimes-gateway.kruntimes-system.svc",
+                "--gateway-ca-file=/var/run/kruntimes/gateway-ca/ca.crt",
+                "mountPath: /var/run/kruntimes/gateway-ca",
+                "secretName: kruntimes-gateway-tls",
             ],
         ),
     ]
@@ -187,16 +218,43 @@ def helm_template_with_overrides() -> str:
 
 
 def require_deployment(resources: list[Resource], name: str, expected: list[str]) -> bool:
-    deployment = find_resource(resources, "Deployment", name)
-    if deployment is None:
-        print(f"missing Deployment/{name}", file=sys.stderr)
+    return require_resource(resources, "Deployment", name, expected)
+
+
+def require_resource(resources: list[Resource], kind: str, name: str, expected: list[str]) -> bool:
+    resource = find_resource(resources, kind, name)
+    if resource is None:
+        print(f"missing {kind}/{name}", file=sys.stderr)
         return False
     ok = True
     for text in expected:
-        if text not in deployment.text:
-            print(f"Deployment/{name} missing {text!r}", file=sys.stderr)
+        if text not in resource.text:
+            print(f"{kind}/{name} missing {text!r}", file=sys.stderr)
             ok = False
     return ok
+
+
+def reject_invalid_gateway_protocol_configuration() -> bool:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            RELEASE,
+            str(CHART),
+            "--namespace",
+            NAMESPACE,
+            "--set",
+            "gateway.enabled=true",
+            "--set",
+            "gateway.protocols[0]=smtp",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 and "gateway.protocols values must be http or https" in result.stderr:
+        return True
+    print("invalid gateway protocol configuration was accepted", file=sys.stderr)
+    return False
 
 
 def parse_resources(rendered: str) -> list[Resource]:

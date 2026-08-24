@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -170,6 +171,33 @@ func TestGatewayLimitsConcurrentRequests(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first request did not complete")
+	}
+}
+
+func TestGatewayTLSConfigRejectsIncompleteFiles(t *testing.T) {
+	for _, server := range []*Server{
+		{TLSCertificateFile: "certificate.pem"},
+		{TLSPrivateKeyFile: "key.pem"},
+	} {
+		if _, err := server.tlsConfig(); err == nil || !strings.Contains(err.Error(), "both Runtime gateway TLS certificate and private key files are required") {
+			t.Fatalf("tlsConfig() error = %v, want incomplete TLS file error", err)
+		}
+	}
+}
+
+func TestGatewayTLSConfigRejectsInvalidCertificate(t *testing.T) {
+	directory := t.TempDir()
+	certificate := directory + "/tls.crt"
+	privateKey := directory + "/tls.key"
+	if err := os.WriteFile(certificate, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privateKey, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{TLSCertificateFile: certificate, TLSPrivateKeyFile: privateKey}
+	if _, err := server.tlsConfig(); err == nil || !strings.Contains(err.Error(), "load Runtime gateway TLS certificate") {
+		t.Fatalf("tlsConfig() error = %v, want certificate load error", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,9 +50,16 @@ type Server struct {
 	Authorizer   Authorizer
 	Dialer       SessionRuntimeDialer
 	RuntimePort  int
-	Address      string
+	HTTPAddress  string
+	HTTPSAddress string
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+
+	// TLSCertificateFile and TLSPrivateKeyFile enable TLS when both paths are
+	// configured. Supplying only one is a startup error; the gateway never
+	// silently falls back to plain HTTP.
+	TLSCertificateFile string
+	TLSPrivateKeyFile  string
 
 	// MaxConcurrentRequests bounds requests handled by one gateway Pod. Values
 	// less than one use the default. Health checks do not consume this limit.
@@ -61,30 +69,81 @@ type Server struct {
 
 // Start implements manager.Runnable and serves the HTTP gateway until ctx ends.
 func (s *Server) Start(ctx context.Context) error {
-	address := s.Address
-	if address == "" {
-		address = ":8084"
+	httpAddress := s.HTTPAddress
+	if httpAddress == "" && s.HTTPSAddress == "" {
+		httpAddress = ":8084"
 	}
-	listener, err := net.Listen("tcp", address)
+	tlsConfig, err := s.tlsConfig()
 	if err != nil {
-		return fmt.Errorf("listen for Runtime gateway: %w", err)
+		return err
 	}
-	server := &http.Server{
-		Handler:           s,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       s.ReadTimeout,
-		WriteTimeout:      s.WriteTimeout,
+	if s.HTTPSAddress != "" && tlsConfig == nil {
+		return errors.New("Runtime gateway HTTPS address requires TLS certificate and private key files")
 	}
-	go func() {
-		<-ctx.Done()
+	listeners := make([]net.Listener, 0, 2)
+	if httpAddress != "" {
+		listener, err := net.Listen("tcp", httpAddress)
+		if err != nil {
+			return fmt.Errorf("listen for Runtime gateway HTTP: %w", err)
+		}
+		listeners = append(listeners, listener)
+	}
+	if s.HTTPSAddress != "" {
+		listener, err := net.Listen("tcp", s.HTTPSAddress)
+		if err != nil {
+			for _, open := range listeners {
+				_ = open.Close()
+			}
+			return fmt.Errorf("listen for Runtime gateway HTTPS: %w", err)
+		}
+		listeners = append(listeners, tls.NewListener(listener, tlsConfig))
+	}
+	servers := make([]*http.Server, 0, len(listeners))
+	results := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		server := &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: s.ReadTimeout, WriteTimeout: s.WriteTimeout}
+		servers = append(servers, server)
+		go func(server *http.Server, listener net.Listener) {
+			err := server.Serve(listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			results <- err
+		}(server, listener)
+	}
+	select {
+	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve Runtime gateway: %w", err)
+		for _, server := range servers {
+			_ = server.Shutdown(shutdownCtx)
+		}
+		for range servers {
+			<-results
+		}
+		return nil
+	case err := <-results:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, server := range servers {
+			_ = server.Shutdown(shutdownCtx)
+		}
+		return err
 	}
-	return nil
+}
+
+func (s *Server) tlsConfig() (*tls.Config, error) {
+	if s.TLSCertificateFile == "" && s.TLSPrivateKeyFile == "" {
+		return nil, nil
+	}
+	if s.TLSCertificateFile == "" || s.TLSPrivateKeyFile == "" {
+		return nil, errors.New("both Runtime gateway TLS certificate and private key files are required")
+	}
+	certificate, err := tls.LoadX509KeyPair(s.TLSCertificateFile, s.TLSPrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load Runtime gateway TLS certificate: %w", err)
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

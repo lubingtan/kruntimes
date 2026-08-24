@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -623,8 +625,8 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
 	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
-	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTP {
-		t.Fatalf("Session Run endpoint = %#v, want HTTP gateway endpoint", run.Status.Endpoint)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || len(run.Status.Endpoint.CABundle) == 0 {
+		t.Fatalf("Session Run endpoint = %#v, want HTTPS gateway endpoint with a CA bundle", run.Status.Endpoint)
 	}
 
 	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
@@ -706,6 +708,40 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
 	assertCancelledRun(t, run)
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestSessionGatewayServesTLS(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-gateway-tls-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-tls-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create TLS Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || len(run.Status.Endpoint.CABundle) == 0 {
+		t.Fatalf("Session Run endpoint = %#v, want HTTPS gateway endpoint with a CA bundle", run.Status.Endpoint)
+	}
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayTLSEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	response := waitForGatewayResponseWithClient(t, gatewayTLSHTTPClient(t, gatewayPod.Namespace, run.Status.Endpoint.CABundle), http.MethodGet, baseURL, sessionGatewayToken(t, run), nil, http.StatusOK)
+	var sessionStatus struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(response, &sessionStatus); err != nil {
+		t.Fatalf("decode TLS Session status: %v", err)
+	}
+	if sessionStatus.State != "SESSION_STATE_READY" {
+		t.Fatalf("TLS Session state = %q, want SESSION_STATE_READY", sessionStatus.State)
+	}
 }
 
 func TestSessionGatewaySerializesMutations(t *testing.T) {
@@ -1263,6 +1299,33 @@ func gatewayEndpointURL(t *testing.T, pod *corev1.Pod, endpoint string) string {
 	return fmt.Sprintf("http://127.0.0.1:%d%s", localPort, parsed.EscapedPath())
 }
 
+func gatewayTLSEndpointURL(t *testing.T, pod *corev1.Pod, endpoint string) string {
+	t.Helper()
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Path == "" {
+		t.Fatalf("parse HTTPS gateway endpoint %q: %v", endpoint, err)
+	}
+	localPort := availableLocalPort(t)
+	closer, err := forwardPodPort(t.Context(), pod.Namespace, pod.Name, localPort, 8444)
+	if err != nil {
+		t.Fatalf("port-forward HTTPS Runtime gateway: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	return fmt.Sprintf("https://127.0.0.1:%d%s", localPort, parsed.EscapedPath())
+}
+
+func gatewayTLSHTTPClient(t *testing.T, namespace string, caBundle []byte) *http.Client {
+	t.Helper()
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBundle) {
+		t.Fatal("Runtime gateway endpoint has no parseable CA bundle")
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs:    pool,
+		ServerName: fmt.Sprintf("kruntimes-gateway.%s.svc", namespace),
+	}}}
+}
+
 func availableLocalPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1274,6 +1337,11 @@ func availableLocalPort(t *testing.T) int {
 }
 
 func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body []byte, expectedStatus int) []byte {
+	t.Helper()
+	return waitForGatewayResponseWithClient(t, http.DefaultClient, method, requestURL, token, body, expectedStatus)
+}
+
+func waitForGatewayResponseWithClient(t *testing.T, httpClient *http.Client, method, requestURL, token string, body []byte, expectedStatus int) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -1291,7 +1359,7 @@ func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body
 		if token != "" {
 			request.Header.Set("Authorization", "Bearer "+token)
 		}
-		response, err := http.DefaultClient.Do(request)
+		response, err := httpClient.Do(request)
 		if err == nil {
 			contents, readErr := io.ReadAll(response.Body)
 			_ = response.Body.Close()

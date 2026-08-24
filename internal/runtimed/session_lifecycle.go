@@ -3,6 +3,7 @@ package runtimed
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -173,8 +174,12 @@ func (c *Controller) sessionEndpoint(run *v1alpha1.Run) *v1alpha1.RunEndpoint {
 	if run == nil || c.GatewayURL == "" {
 		return nil
 	}
-	return &v1alpha1.RunEndpoint{
-		Protocol: v1alpha1.RunEndpointProtocolHTTP,
+	protocol := v1alpha1.RunEndpointProtocolHTTP
+	if strings.HasPrefix(strings.ToLower(c.GatewayURL), "https://") {
+		protocol = v1alpha1.RunEndpointProtocolHTTPS
+	}
+	endpoint := &v1alpha1.RunEndpoint{
+		Protocol: protocol,
 		URL: fmt.Sprintf(
 			"%s/v1/namespaces/%s/runtimes/%s/sessions/%s",
 			strings.TrimRight(c.GatewayURL, "/"),
@@ -183,6 +188,10 @@ func (c *Controller) sessionEndpoint(run *v1alpha1.Run) *v1alpha1.RunEndpoint {
 			run.UID,
 		),
 	}
+	if protocol == v1alpha1.RunEndpointProtocolHTTPS {
+		endpoint.CABundle = slices.Clone(c.GatewayCABundle)
+	}
+	return endpoint
 }
 
 func (c *Controller) reconcileSessionRecovery(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {

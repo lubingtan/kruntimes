@@ -18,8 +18,10 @@ does not make the gateway an Internet-facing ingress or certificate authority.
 
 - Keep the gateway Service cluster-local and retain Kubernetes bearer-token
   authentication and per-Run authorization.
-- Permit operators to terminate TLS in gateway Pods using a pre-existing
-  Kubernetes Secret, with an optional cert-manager `Certificate` producer.
+- Make the listener protocols an explicit set. Operators choose `http`,
+  `https`, or both protocols.
+- Generate and retain the default gateway TLS Secret in the chart, while
+  allowing an operator-provided Secret and a later cert-manager producer.
 - Make request and response bounds explicit with conservative defaults.
 - Preserve the current plain-HTTP deployment as the default v0.x-compatible
   configuration.
@@ -33,9 +35,18 @@ HTTPS or expose Runtime Server gRPC.
 
 ```yaml
 gateway:
+
+  # At least one distinct value is required. HTTPS requires a certificate.
+  # When both are present, status publishes the HTTPS endpoint.
+  protocols: [http] # http, https
+  httpBindAddress: ":8084"
+  httpsBindAddress: ":8444"
+  httpServicePort: 80
+  httpsServicePort: 443
   tls:
-    enabled: false
-    # Required when enabled and certManager.enabled is false.
+    # Empty selects the chart-managed <gateway-name>-tls Secret. A non-empty
+    # name selects an existing operator-managed Secret unless certManager is
+    # enabled.
     secretName: ""
     # tls.crt and tls.key are mandatory. ca.crt is optional.
     certificateKey: tls.crt
@@ -49,12 +60,20 @@ gateway:
         group: cert-manager.io
 ```
 
-`gateway.tls.enabled=false` keeps the existing `http` Service port and
-`http://` endpoint. When enabled, `secretName` is mandatory unless
-`certManager.enabled=true`; the chart mounts that Secret read-only and starts
-the gateway with its certificate and private-key paths. The Service port is
-named `https`, targets the HTTPS listener, and the controller receives an
-`https://` gateway URL.
+`protocols: [http]` starts only the HTTP listener and publishes an `http://`
+endpoint. `protocols: [https]` starts only the TLS listener and publishes
+`https://`. `protocols: [http, https]` starts both listeners and exposes named
+`http` and `https` Service ports. To avoid downgrading new clients, it
+publishes only the HTTPS URL in
+`Run.status.endpoint`; the equivalent HTTP route remains intentionally
+available during the operator-controlled migration period.
+
+When `https` is selected, an empty `secretName` selects a chart-managed
+`<gateway-name>-tls` Secret. Helm uses `lookup` to retain an existing Secret
+across upgrades and otherwise generates a CA plus a Service-DNS certificate.
+A non-empty `secretName` uses an existing operator-managed Secret. In either
+case, the key is mounted read-only and the gateway requires both certificate
+and private-key files before serving TLS.
 
 With cert-manager enabled, the chart creates one namespaced
 `cert-manager.io/v1 Certificate` whose `secretName` is `gateway.tls.secretName`.
@@ -63,20 +82,22 @@ cluster-local names. Rendering fails unless the secret name and issuer reference
 are complete. This remains opt-in, so installations without cert-manager do not
 require its CRDs.
 
-The chart owns the Deployment, Service, and optional Certificate; the Runtime
-controller does not own, create, or rotate certificate resources. Changing TLS
-mode rolls gateway Pods and updates the controller flag; ready Runs retain their
-old endpoint until owner runtimed reconciles them. Operators should not switch
-mode while depending on issued endpoint URLs.
+The chart owns the default Secret, Deployment, Service, and optional
+Certificate; the Runtime controller does not own, create, or rotate certificate
+resources. Changing protocols rolls gateway Pods and updates the controller
+flag; ready Runs retain their old endpoint until owner runtimed reconciles them.
+Operators should not remove `http` until HTTP clients have migrated.
 
 ## Endpoint Trust Publication
 
-The controller receives only the public gateway URL. It must not read TLS
-Secrets, because that would grant it access to private-key-bearing resources.
-Consequently, v0.x does not automatically copy `ca.crt` into
-`Run.status.endpoint.caBundle`. Clients use their normal in-cluster or
-explicitly configured trust store. `caBundle` remains reserved for a future
-non-secret, controller-managed trust-distribution mechanism.
+The controller receives the selected public gateway URL and a CA bundle bounded
+to 64 KiB, never a private key. Helm mounts the chart-managed CA or the required `ca.crt`
+key from an existing Secret read-only into the controller and passes its file
+path. The controller writes this public trust bundle to a Runtime Pod-template
+annotation; runtimed projects that annotation with the Downward API and copies
+it to the HTTPS `Run.status.endpoint.caBundle`. Clients may instead use their
+own trust store. The controller receives no Secret-read RBAC; runtimed never
+mounts the TLS Secret.
 
 ## Transfer Bounds
 
@@ -93,7 +114,9 @@ Larger durable results belong in ArtifactStore.
 
 ## Security, Failure, and Delivery
 
-TLS protects only client-to-gateway traffic. Internal gRPC remains cluster-local
+TLS protects only client-to-gateway traffic. When both protocols are enabled,
+HTTP remains a deliberate
+compatibility listener and is not a confidentiality boundary. Internal gRPC remains cluster-local
 and protected by NetworkPolicy plus the authenticated gateway boundary. A
 missing, unreadable, malformed, or mismatched TLS Secret must prevent readiness;
 the gateway never falls back to HTTP. The key is mounted read-only only into
@@ -101,8 +124,9 @@ gateway Pods and is never copied to logs, ConfigMaps, status, or flags.
 
 Delivery is split into independent reviewable slices:
 
-1. Existing-Secret chart values and validation, TLS listener, HTTPS endpoint,
-   Helm/unit coverage.
-2. Opt-in cert-manager `Certificate` rendering and chart tests.
-3. Configurable HTTP body/header bounds, gateway unit tests, and focused HTTPS
-   and rejection E2E coverage.
+1. Add protocol-set listener and Service configuration, chart-managed or existing
+   Secret selection, endpoint CA publication, Helm/unit coverage, and an E2E
+   run that verifies both protocols simultaneously.
+2. Add opt-in cert-manager `Certificate` rendering and chart tests.
+3. Add configurable HTTP body/header bounds, gateway unit tests, and focused
+   rejection E2E coverage.

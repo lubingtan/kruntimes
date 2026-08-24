@@ -158,6 +158,7 @@ e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind 
 		--set runtimed.image=$(E2E_IMG_RUNTIMED) \
 		--set gateway.enabled=true \
 		--set gateway.image=$(E2E_IMG_GATEWAY) \
+		--set gateway.protocols[0]=http --set gateway.protocols[1]=https \
 		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s
 
 .PHONY: e2e-test
