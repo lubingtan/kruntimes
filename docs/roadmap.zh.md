@@ -165,6 +165,7 @@ controller wiring 累积不必要的冲突。
   其 Runtime 的 Kubernetes Service。Kubernetes 选择 ready Runtime Pod；runtimed 只在该 Runtime
   内解析 owner。
   初始实现 TODO：
+  - [x] 在变更 chart 或 endpoint transport 前，定义 [gateway TLS 和传输边界约定](design/runtime-gateway-transport.zh.md)；
   - [x] 为共享 gateway Deployment、ClusterIP Service、专用 runtimed gRPC port 和
     HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 以及 unit/render coverage；
   - [ ] 定义 chart-managed TLS configuration，支持 existing Secret 和 optional cert-manager

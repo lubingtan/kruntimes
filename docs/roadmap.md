@@ -191,6 +191,8 @@ wiring from accumulating avoidable conflicts.
   Kubernetes Service for its Runtime. Kubernetes selects a ready Runtime Pod;
   runtimed resolves ownership only within that Runtime.
   Initial implementation TODO:
+  - [x] define the [gateway TLS and transfer-bound contract](design/runtime-gateway-transport.md)
+    before changing the chart or endpoint transport;
   - [x] add Helm templates, `gateway.enabled`, values, RBAC, a dedicated
     runtimed gRPC port, HTTP-to-gRPC adapter, and unit/render coverage for the
     shared gateway Deployment and ClusterIP Service;
