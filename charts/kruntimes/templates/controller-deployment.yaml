@@ -78,7 +78,9 @@ spec:
             - --gateway-selector-labels=app.kubernetes.io/name={{ include "kruntimes.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=runtime-gateway
             - --gateway-url={{ ternary "https" "http" (has "https" .Values.gateway.protocols) }}://{{ include "kruntimes.gateway.name" . }}.{{ .Release.Namespace }}.svc
             {{- if has "https" .Values.gateway.protocols }}
+            {{- if not .Values.gateway.tls.certManager.enabled }}
             {{- include "kruntimes.gateway.ensureTLSCertificates" . }}
+            {{- end }}
             - --gateway-ca-file=/var/run/kruntimes/gateway-ca/ca.crt
             {{- end }}
             {{- end }}

@@ -48,7 +48,7 @@ gateway:
     # name selects an existing operator-managed Secret unless certManager is
     # enabled.
     secretName: ""
-    # tls.crt and tls.key are mandatory. ca.crt is optional.
+    # tls.crt, tls.key, and ca.crt are mandatory for HTTPS endpoint trust.
     certificateKey: tls.crt
     privateKeyKey: tls.key
     caBundleKey: ca.crt
@@ -73,14 +73,17 @@ When `https` is selected, an empty `secretName` selects a chart-managed
 across upgrades and otherwise generates a CA plus a Service-DNS certificate.
 A non-empty `secretName` uses an existing operator-managed Secret. In either
 case, the key is mounted read-only and the gateway requires both certificate
-and private-key files before serving TLS.
+and private-key files before serving TLS; the controller also requires the
+configured CA-bundle key to publish a verifiable HTTPS endpoint.
 
 With cert-manager enabled, the chart creates one namespaced
 `cert-manager.io/v1 Certificate` whose `secretName` is `gateway.tls.secretName`.
 Its DNS names are the gateway Service's short, namespace-qualified, and
 cluster-local names. Rendering fails unless the secret name and issuer reference
-are complete. This remains opt-in, so installations without cert-manager do not
-require its CRDs.
+are complete. The selected issuer must also write the configured CA-bundle key
+to the Secret so HTTPS clients can validate `Run.status.endpoint.caBundle`.
+This remains opt-in, so installations without cert-manager do not require its
+CRDs.
 
 The chart owns the default Secret, Deployment, Service, and optional
 Certificate; the Runtime controller does not own, create, or rotate certificate

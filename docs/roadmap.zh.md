@@ -168,7 +168,7 @@ controller wiring 累积不必要的冲突。
   - [x] 在变更 chart 或 endpoint transport 前，定义 [gateway TLS 和传输边界约定](design/runtime-gateway-transport.zh.md)；
   - [x] 为共享 gateway Deployment、ClusterIP Service、专用 runtimed gRPC port 和
     HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 以及 unit/render coverage；
-  - [ ] 实现明确的 `http`/`https` gateway protocol set；默认使用 chart-managed TLS Secret，
+  - [x] 实现明确的 `http`/`https` gateway protocol set；默认使用 chart-managed TLS Secret，
     允许 existing Secret，并在两种 protocol 同时启用时发布 HTTPS 及其 CA bundle；
   - [ ] 为配置的 TLS Secret 增加可选的 cert-manager `Certificate` rendering；
   - [x] 实现 Runtime-scoped Run lookup，以及有界 local 或 single-hop peer routing；
@@ -178,7 +178,7 @@ controller wiring 累积不必要的冲突。
   - [x] 增加 bounded authorization decision cache；
   - [x] 执行每个 gateway 的有界 HTTP request concurrency limit；
   - [ ] 在需要时使显式 request 和 response limits 可配置；
-  - [ ] 增加同时启用 HTTP 和 HTTPS 的 E2E coverage，包括对 chart-managed certificate 的严格验证；
+  - [x] 增加同时启用 HTTP 和 HTTPS 的 E2E coverage，包括对 chart-managed certificate 的严格验证；
   - [x] 实现经过 review 的有界、支持分页的 `ListSessionFiles` contract：
     - [x] 在 Session Mode design 中定义 HTTP、gRPC、SDK、排序、cursor、mutation-consistency 和
       response-bound semantics；

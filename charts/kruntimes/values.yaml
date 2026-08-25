@@ -89,11 +89,18 @@ gateway:
   authorizationCacheCapacity: 1024
   maxConcurrentRequests: 128
   tls:
-    # Empty selects the chart-managed <gateway-name>-tls Secret.
+    # Empty selects the chart-managed <gateway-name>-tls Secret. certManager
+    # requires an explicit name and an issuer that writes this CA bundle key.
     secretName: ""
     certificateKey: tls.crt
     privateKeyKey: tls.key
     caBundleKey: ca.crt
+    certManager:
+      enabled: false
+      issuerRef:
+        name: ""
+        kind: Issuer
+        group: cert-manager.io
   podAnnotations: {}
   podSecurityContext:
     seccompProfile:

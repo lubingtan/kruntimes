@@ -101,6 +101,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if not .Values.gateway.tls.privateKeyKey -}}
 {{- fail "gateway.tls.privateKeyKey is required when gateway.protocols includes https" -}}
 {{- end -}}
+{{- if .Values.gateway.tls.certManager.enabled -}}
+{{- if not .Values.gateway.tls.secretName -}}
+{{- fail "gateway.tls.secretName is required when gateway.tls.certManager.enabled is true" -}}
+{{- end -}}
+{{- if not .Values.gateway.tls.certManager.issuerRef.name -}}
+{{- fail "gateway.tls.certManager.issuerRef.name is required when gateway.tls.certManager.enabled is true" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

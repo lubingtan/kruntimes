@@ -196,7 +196,7 @@ wiring from accumulating avoidable conflicts.
   - [x] add Helm templates, `gateway.enabled`, values, RBAC, a dedicated
     runtimed gRPC port, HTTP-to-gRPC adapter, and unit/render coverage for the
     shared gateway Deployment and ClusterIP Service;
-  - [ ] implement an explicit `http`/`https` gateway protocol set;
+  - [x] implement an explicit `http`/`https` gateway protocol set;
     use a chart-managed TLS Secret by default, permit an existing Secret, and
     publish HTTPS plus its CA bundle when both protocols are enabled;
   - [ ] add optional cert-manager `Certificate` rendering for the configured
@@ -210,7 +210,7 @@ wiring from accumulating avoidable conflicts.
   - [x] add a bounded authorization decision cache;
   - [x] enforce a bounded per-gateway HTTP request concurrency limit;
   - [ ] make explicit request and response limits configurable where needed;
-  - [ ] add E2E coverage with HTTP and HTTPS enabled simultaneously, including
+  - [x] add E2E coverage with HTTP and HTTPS enabled simultaneously, including
     strict verification of the chart-managed certificate;
   - [x] implement the reviewed bounded, paginated `ListSessionFiles` contract:
     - [x] define HTTP, gRPC, SDK, ordering, cursor, mutation-consistency, and

@@ -168,6 +168,8 @@ def main() -> int:
         ),
         require_resource(resources, "Secret", "kruntimes-gateway-tls", ["type: kubernetes.io/tls", "ca.crt:"]),
         reject_invalid_gateway_protocol_configuration(),
+        verify_cert_manager_certificate(),
+        reject_incomplete_cert_manager_configuration(),
         require_deployment(
             resources,
             "kruntimes-controller",
@@ -217,6 +219,13 @@ def helm_template_with_overrides() -> str:
         )
 
 
+def helm_template(*args: str) -> str:
+    return subprocess.check_output(
+        ["helm", "template", RELEASE, str(CHART), "--namespace", NAMESPACE, *args],
+        text=True,
+    )
+
+
 def require_deployment(resources: list[Resource], name: str, expected: list[str]) -> bool:
     return require_resource(resources, "Deployment", name, expected)
 
@@ -254,6 +263,51 @@ def reject_invalid_gateway_protocol_configuration() -> bool:
     if result.returncode != 0 and "gateway.protocols values must be http or https" in result.stderr:
         return True
     print("invalid gateway protocol configuration was accepted", file=sys.stderr)
+    return False
+
+
+def verify_cert_manager_certificate() -> bool:
+    rendered = helm_template(
+        "--set", "gateway.enabled=true",
+        "--set", "gateway.protocols[0]=https",
+        "--set", "gateway.tls.secretName=managed-gateway-tls",
+        "--set", "gateway.tls.certManager.enabled=true",
+        "--set", "gateway.tls.certManager.issuerRef.name=platform-ca",
+        "--set", "gateway.tls.certManager.issuerRef.kind=ClusterIssuer",
+    )
+    certificate = find_resource(parse_resources(rendered), "Certificate", "kruntimes-gateway")
+    if certificate is None:
+        print("missing cert-manager Certificate/kruntimes-gateway", file=sys.stderr)
+        return False
+    return require_resource(
+        [certificate],
+        "Certificate",
+        "kruntimes-gateway",
+        [
+            "secretName: managed-gateway-tls",
+            "- kruntimes-gateway.kruntimes-system.svc",
+            "- kruntimes-gateway.kruntimes-system.svc.cluster.local",
+            "name: platform-ca",
+            "kind: ClusterIssuer",
+            "group: cert-manager.io",
+        ],
+    )
+
+
+def reject_incomplete_cert_manager_configuration() -> bool:
+    result = subprocess.run(
+        [
+            "helm", "template", RELEASE, str(CHART), "--namespace", NAMESPACE,
+            "--set", "gateway.enabled=true",
+            "--set", "gateway.protocols[0]=https",
+            "--set", "gateway.tls.certManager.enabled=true",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 and "gateway.tls.secretName is required" in result.stderr:
+        return True
+    print("incomplete cert-manager gateway configuration was accepted", file=sys.stderr)
     return False
 
 

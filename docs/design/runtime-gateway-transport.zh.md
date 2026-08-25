@@ -38,6 +38,7 @@ gateway:
     # 空值选择 chart-managed <gateway-name>-tls Secret；非空值选择 existing
     # operator-managed Secret，除非启用 certManager。
     secretName: ""
+    # HTTPS endpoint trust 需要 certificate、private key 和 CA bundle key。
     certificateKey: tls.crt
     privateKeyKey: tls.key
     caBundleKey: ca.crt
@@ -58,12 +59,14 @@ operator 控制的迁移期内仍可用。
 选择 `https` 时，空 `secretName` 选择 chart-managed `<gateway-name>-tls` Secret。
 Helm 通过 `lookup` 在 upgrade 时保留已有 Secret，只有不存在时才生成 CA 与 Service-DNS
 certificate。非空 `secretName` 使用 existing operator-managed Secret。两种方式都只读挂载 key，
-gateway 在 certificate/private-key 任一缺失时拒绝提供 TLS。
+gateway 在 certificate/private-key 任一缺失时拒绝提供 TLS；controller 还需要配置的 CA bundle key
+以发布可验证的 HTTPS endpoint。
 
 启用 cert-manager 时，chart 创建一个 namespaced `cert-manager.io/v1 Certificate`，其
 `secretName` 为 `gateway.tls.secretName`，DNS names 包含 gateway Service 的 short、
 namespace-qualified 和 cluster-local 名称。缺少 secret name 或 issuer reference 必须令 Helm
-rendering 失败。此资源完全 opt-in，没有 cert-manager CRD 的安装不需要它。
+rendering 失败。所选 issuer 还必须向 Secret 写入配置的 CA bundle key，以便 HTTPS client
+验证 `Run.status.endpoint.caBundle`。此资源完全 opt-in，没有 cert-manager CRD 的安装不需要它。
 
 chart 负责默认 Secret、Deployment、Service 与可选 Certificate；Runtime controller 不负责证书。
 修改 protocols 会滚动 gateway Pod 并更新 controller flag；已经 Ready 的 Run 在 owner
