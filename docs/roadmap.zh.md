@@ -170,7 +170,7 @@ controller wiring 累积不必要的冲突。
     HTTP-to-gRPC adapter 增加 Helm templates、`gateway.enabled`、values、RBAC 以及 unit/render coverage；
   - [x] 实现明确的 `http`/`https` gateway protocol set；默认使用 chart-managed TLS Secret，
     允许 existing Secret，并在两种 protocol 同时启用时发布 HTTPS 及其 CA bundle；
-  - [ ] 为配置的 TLS Secret 增加可选的 cert-manager `Certificate` rendering；
+  - [x] 为配置的 TLS Secret 增加可选的 cert-manager `Certificate` rendering；
   - [x] 实现 Runtime-scoped Run lookup，以及有界 local 或 single-hop peer routing；
   - [x] 使用 immutable Run UID 和 assigned Pod UID fence routing，在转发前拒绝 stale assignment；
   - [x] 通过 Kubernetes TokenReview authenticate caller token，并通过 SubjectAccessReview

@@ -71,6 +71,13 @@ Or run both:
 make e2e
 ```
 
+To validate the optional cert-manager certificate flow, install it only for
+that E2E run and name the focused test explicitly:
+
+```bash
+make e2e-cert-manager-run E2E_TEST=TestSessionGatewayServesCertManagerTLS
+```
+
 Clean up:
 
 ```bash

@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -29,8 +30,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -51,6 +54,12 @@ import (
 )
 
 const testNamespace = "default"
+
+const (
+	certManagerE2EEnabledEnv      = "KRUNTIMES_E2E_CERT_MANAGER"
+	certManagerGatewayCertificate = "kruntimes-gateway"
+	certManagerGatewayTLSSecret   = "kruntimes-gateway-cert-manager-tls"
+)
 
 var k8sClient client.Client
 var restConfig *rest.Config
@@ -742,6 +751,81 @@ func TestSessionGatewayServesTLS(t *testing.T) {
 	if sessionStatus.State != "SESSION_STATE_READY" {
 		t.Fatalf("TLS Session state = %q, want SESSION_STATE_READY", sessionStatus.State)
 	}
+}
+
+func TestSessionGatewayServesCertManagerTLS(t *testing.T) {
+	if os.Getenv(certManagerE2EEnabledEnv) != "true" {
+		t.Skipf("set %s=true to run the cert-manager E2E", certManagerE2EEnabledEnv)
+	}
+
+	certificate := &unstructured.Unstructured{}
+	certificate.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	if err := k8sClient.Get(t.Context(), client.ObjectKey{Namespace: testNamespace, Name: certManagerGatewayCertificate}, certificate); err != nil {
+		t.Fatalf("get cert-manager gateway Certificate: %v", err)
+	}
+	if !certificateReady(certificate) {
+		t.Fatalf("cert-manager gateway Certificate status = %#v, want Ready=True", certificate.Object["status"])
+	}
+
+	secret := &corev1.Secret{}
+	if err := k8sClient.Get(t.Context(), client.ObjectKey{Namespace: testNamespace, Name: certManagerGatewayTLSSecret}, secret); err != nil {
+		t.Fatalf("get cert-manager gateway TLS Secret: %v", err)
+	}
+	if len(secret.Data["ca.crt"]) == 0 || len(secret.Data["tls.crt"]) == 0 || len(secret.Data["tls.key"]) == 0 {
+		t.Fatalf("cert-manager gateway TLS Secret keys = %v, want ca.crt, tls.crt, and tls.key", secret.Data)
+	}
+	certificatePEM, _ := pem.Decode(secret.Data["tls.crt"])
+	if certificatePEM == nil {
+		t.Fatal("decode cert-manager gateway TLS certificate PEM")
+	}
+	leaf, err := x509.ParseCertificate(certificatePEM.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert-manager gateway TLS certificate: %v", err)
+	}
+	if !slices.Contains(leaf.DNSNames, "kruntimes-gateway.default.svc") {
+		t.Fatalf("cert-manager gateway TLS certificate DNS names = %v, want kruntimes-gateway.default.svc", leaf.DNSNames)
+	}
+
+	runtimeName := fmt.Sprintf("session-gateway-cert-manager-tls-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-cert-manager-tls-", Namespace: testNamespace},
+		Spec:       v1alpha1.RunSpec{Runtime: runtimeName, Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create cert-manager TLS Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS {
+		t.Fatalf("Session Run endpoint = %#v, want HTTPS gateway endpoint", run.Status.Endpoint)
+	}
+	if !bytes.Equal(run.Status.Endpoint.CABundle, secret.Data["ca.crt"]) {
+		t.Fatal("Session Run endpoint CA bundle does not match the cert-manager gateway TLS Secret")
+	}
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayTLSEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse cert-manager gateway endpoint %q: %v", baseURL, err)
+	}
+	healthURL := fmt.Sprintf("%s://%s/healthz", parsedURL.Scheme, parsedURL.Host)
+	_ = waitForGatewayResponseWithClient(t, gatewayTLSHTTPClient(t, gatewayPod.Namespace, run.Status.Endpoint.CABundle), http.MethodGet, healthURL, "", nil, http.StatusOK)
+}
+
+func certificateReady(certificate *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(certificate.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	for _, condition := range conditions {
+		condition, ok := condition.(map[string]any)
+		if ok && condition["type"] == "Ready" && condition["status"] == "True" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSessionGatewaySerializesMutations(t *testing.T) {

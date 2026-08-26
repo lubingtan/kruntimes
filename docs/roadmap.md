@@ -199,7 +199,7 @@ wiring from accumulating avoidable conflicts.
   - [x] implement an explicit `http`/`https` gateway protocol set;
     use a chart-managed TLS Secret by default, permit an existing Secret, and
     publish HTTPS plus its CA bundle when both protocols are enabled;
-  - [ ] add optional cert-manager `Certificate` rendering for the configured
+  - [x] add optional cert-manager `Certificate` rendering for the configured
     TLS Secret;
   - [x] implement Runtime-scoped Run lookup and bounded local or single-hop
     peer routing;

@@ -72,6 +72,12 @@ make e2e-test
 make e2e
 ```
 
+如需验证可选的 cert-manager 证书流程，仅在该 E2E run 中安装它，并显式指定聚焦测试：
+
+```bash
+make e2e-cert-manager-run E2E_TEST=TestSessionGatewayServesCertManagerTLS
+```
+
 清理：
 
 ```bash
