@@ -1,5 +1,6 @@
 {{- if .Values.gateway.enabled }}
 {{- include "kruntimes.gateway.validateProtocols" . }}
+{{- include "kruntimes.gateway.validateTransferBounds" . }}
 {{- include "kruntimes.gateway.validateTLS" . }}
 apiVersion: apps/v1
 kind: Deployment
@@ -72,6 +73,9 @@ spec:
             - --authorization-cache-ttl={{ .Values.gateway.authorizationCacheTTL }}
             - --authorization-cache-capacity={{ .Values.gateway.authorizationCacheCapacity }}
             - --max-concurrent-requests={{ .Values.gateway.maxConcurrentRequests }}
+            - --max-request-body-bytes={{ int64 .Values.gateway.maxRequestBodyBytes }}
+            - --max-response-body-bytes={{ int64 .Values.gateway.maxResponseBodyBytes }}
+            - --max-header-bytes={{ int64 .Values.gateway.maxHeaderBytes }}
             {{- if has "https" .Values.gateway.protocols }}
             - --tls-certificate-file=/var/run/kruntimes/gateway-tls/{{ .Values.gateway.tls.certificateKey }}
             - --tls-private-key-file=/var/run/kruntimes/gateway-tls/{{ .Values.gateway.tls.privateKeyKey }}

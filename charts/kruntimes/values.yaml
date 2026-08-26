@@ -88,6 +88,9 @@ gateway:
   authorizationCacheTTL: 30s
   authorizationCacheCapacity: 1024
   maxConcurrentRequests: 128
+  maxRequestBodyBytes: 1048576
+  maxResponseBodyBytes: 1048576
+  maxHeaderBytes: 1048576
   tls:
     # Empty selects the chart-managed <gateway-name>-tls Secret. certManager
     # requires an explicit name and an issuer that writes this CA bundle key.

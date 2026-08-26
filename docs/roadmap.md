@@ -209,7 +209,7 @@ wiring from accumulating avoidable conflicts.
     the target Run through SubjectAccessReview;
   - [x] add a bounded authorization decision cache;
   - [x] enforce a bounded per-gateway HTTP request concurrency limit;
-  - [ ] make explicit request and response limits configurable where needed;
+  - [x] make explicit request and response limits configurable where needed;
   - [x] add E2E coverage with HTTP and HTTPS enabled simultaneously, including
     strict verification of the chart-managed certificate;
   - [x] implement the reviewed bounded, paginated `ListSessionFiles` contract:

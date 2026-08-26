@@ -86,6 +86,46 @@ func TestGatewayExecutesExactlyOneOperation(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsRequestBodyOverConfiguredLimitBeforeDialingRuntime(t *testing.T) {
+	dialer := &fakeDialer{client: &fakeSessionRuntimeClient{}}
+	server := testServer(t, readySessionRun(), allowAuthorizer{}, dialer)
+	server.MaxRequestBodyBytes = 64
+	payload := `{"command":{"argv":["echo","` + strings.Repeat("x", 80) + `"]}}`
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/runtimes/bash/sessions/session-uid/operations:execute", strings.NewReader(payload))
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if dialer.address != "" {
+		t.Fatalf("dialed Runtime Service %q for oversized request", dialer.address)
+	}
+}
+
+func TestGatewayRejectsResponseOverConfiguredLimitWithoutPartialJSON(t *testing.T) {
+	client := &fakeSessionRuntimeClient{execute: func(_ context.Context, _ *pb.ExecuteSessionOperationRequest, _ ...grpc.CallOption) (*pb.ExecuteSessionOperationResponse, error) {
+		return &pb.ExecuteSessionOperationResponse{Command: &pb.SessionCommandResult{ExitCode: 0, Stdout: []byte(strings.Repeat("x", 128))}}, nil
+	}}
+	server := testServer(t, readySessionRun(), allowAuthorizer{}, &fakeDialer{client: client})
+	server.MaxResponseBodyBytes = 64
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/runtimes/bash/sessions/session-uid/operations:execute", strings.NewReader(`{"command":{"argv":["true"]}}`))
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got, want := response.Body.String(), "{\"error\":\"gateway response exceeds configured limit\"}\n"; got != want {
+		t.Fatalf("response = %q, want %q", got, want)
+	}
+	if strings.Contains(response.Body.String(), "stdout") {
+		t.Fatalf("response contains partial successful JSON: %s", response.Body.String())
+	}
+}
+
 func TestGatewayListsSessionFilesInPages(t *testing.T) {
 	run := readySessionRun()
 	client := &fakeSessionRuntimeClient{list: func(_ context.Context, request *pb.ListSessionFilesRequest, _ ...grpc.CallOption) (*pb.ListSessionFilesResponse, error) {
@@ -171,6 +211,16 @@ func TestGatewayLimitsConcurrentRequests(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first request did not complete")
+	}
+}
+
+func TestGatewayUsesConfiguredHeaderLimit(t *testing.T) {
+	server := &Server{MaxHeaderBytes: 4096}
+	if got := server.httpServer().MaxHeaderBytes; got != 4096 {
+		t.Fatalf("MaxHeaderBytes = %d, want 4096", got)
+	}
+	if got := (&Server{}).httpServer().MaxHeaderBytes; got != DefaultMaxHeaderBytes {
+		t.Fatalf("default MaxHeaderBytes = %d, want %d", got, DefaultMaxHeaderBytes)
 	}
 }
 

@@ -109,6 +109,9 @@ gateway:
   protocols:
     - http
     - https
+  maxRequestBodyBytes: "2097152"
+  maxResponseBodyBytes: "3145728"
+  maxHeaderBytes: "4194304"
   tls:
     certificateKey: certificate.pem
     privateKeyKey: private-key.pem
@@ -155,6 +158,9 @@ def main() -> int:
             [
                 "--tls-certificate-file=/var/run/kruntimes/gateway-tls/certificate.pem",
                 "--tls-private-key-file=/var/run/kruntimes/gateway-tls/private-key.pem",
+                "--max-request-body-bytes=2097152",
+                "--max-response-body-bytes=3145728",
+                "--max-header-bytes=4194304",
                 "name: https",
                 "mountPath: /var/run/kruntimes/gateway-tls",
                 "secretName: kruntimes-gateway-tls",
@@ -168,6 +174,7 @@ def main() -> int:
         ),
         require_resource(resources, "Secret", "kruntimes-gateway-tls", ["type: kubernetes.io/tls", "ca.crt:"]),
         reject_invalid_gateway_protocol_configuration(),
+        reject_invalid_gateway_transfer_bounds(),
         verify_cert_manager_certificate(),
         reject_incomplete_cert_manager_configuration(),
         require_deployment(
@@ -263,6 +270,29 @@ def reject_invalid_gateway_protocol_configuration() -> bool:
     if result.returncode != 0 and "gateway.protocols values must be http or https" in result.stderr:
         return True
     print("invalid gateway protocol configuration was accepted", file=sys.stderr)
+    return False
+
+
+def reject_invalid_gateway_transfer_bounds() -> bool:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            RELEASE,
+            str(CHART),
+            "--namespace",
+            NAMESPACE,
+            "--set",
+            "gateway.enabled=true",
+            "--set",
+            "gateway.maxResponseBodyBytes=0",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 and "gateway.maxResponseBodyBytes must be positive" in result.stderr:
+        return True
+    print("invalid gateway transfer bounds were accepted", file=sys.stderr)
     return False
 
 

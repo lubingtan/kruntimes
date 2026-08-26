@@ -59,6 +59,7 @@ const (
 	certManagerE2EEnabledEnv      = "KRUNTIMES_E2E_CERT_MANAGER"
 	certManagerGatewayCertificate = "kruntimes-gateway"
 	certManagerGatewayTLSSecret   = "kruntimes-gateway-cert-manager-tls"
+	gatewayBoundsE2EEnabledEnv    = "KRUNTIMES_E2E_GATEWAY_BOUNDS"
 )
 
 var k8sClient client.Client
@@ -753,6 +754,57 @@ func TestSessionGatewayServesTLS(t *testing.T) {
 	}
 }
 
+func TestSessionGatewayEnforcesTransferBounds(t *testing.T) {
+	if os.Getenv(gatewayBoundsE2EEnabledEnv) != "true" {
+		t.Skipf("set %s=true to run the gateway transfer-bounds E2E", gatewayBoundsE2EEnabledEnv)
+	}
+	runtimeName := fmt.Sprintf("session-gateway-bounds-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-bounds-", Namespace: testNamespace},
+		Spec:       v1alpha1.RunSpec{Runtime: runtimeName, Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create transfer-bounds Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	portForwardClient := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	// Establish the port-forward with a response that remains below the focused
+	// response limit before exercising rejection paths.
+	_ = waitForGatewayResponseWithClient(t, portForwardClient, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	oversizedRequest := []byte(`{"command":{"argv":["true"],"stdin":"` + strings.Repeat("eA==", 160) + `"}}`)
+	requestResponse := waitForGatewayResponseWithClient(t, portForwardClient, http.MethodPost, baseURL+"/operations:execute", token, oversizedRequest, http.StatusRequestEntityTooLarge)
+	if !strings.Contains(string(requestResponse), "gateway request body exceeds configured limit") {
+		t.Fatalf("oversized request response = %s", requestResponse)
+	}
+
+	responseResponse := waitForGatewayResponseWithClient(t, portForwardClient, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["sh","-c","head -c 1024 /dev/zero"]}}`), http.StatusRequestEntityTooLarge)
+	if got, want := string(responseResponse), "{\"error\":\"gateway response exceeds configured limit\"}\n"; got != want {
+		t.Fatalf("oversized response body = %q, want %q", got, want)
+	}
+
+	headerRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL, nil)
+	if err != nil {
+		t.Fatalf("create oversized-header request: %v", err)
+	}
+	headerRequest.Header.Set("X-Kruntimes-E2E-Bounds", strings.Repeat("x", 512<<10))
+	headerResponse, err := portForwardClient.Do(headerRequest)
+	if err != nil {
+		t.Fatalf("send oversized-header request: %v", err)
+	}
+	defer headerResponse.Body.Close()
+	if headerResponse.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		contents, _ := io.ReadAll(headerResponse.Body)
+		t.Fatalf("oversized header status = %d, want %d: %s", headerResponse.StatusCode, http.StatusRequestHeaderFieldsTooLarge, contents)
+	}
+}
+
 func TestSessionGatewayServesCertManagerTLS(t *testing.T) {
 	if os.Getenv(certManagerE2EEnabledEnv) != "true" {
 		t.Skipf("set %s=true to run the cert-manager E2E", certManagerE2EEnabledEnv)
@@ -1431,7 +1483,11 @@ func waitForGatewayResponseWithClient(t *testing.T, httpClient *http.Client, met
 	defer cancel()
 	lastResult := "no response"
 	for {
-		requestCtx, requestCancel := context.WithTimeout(ctx, 2*time.Second)
+		// Gateway authorization performs both a TokenReview and a
+		// SubjectAccessReview, each of which may consume its own API-server
+		// round trip. Keep the individual request deadline above that work while
+		// retaining the bounded overall retry budget.
+		requestCtx, requestCancel := context.WithTimeout(ctx, 5*time.Second)
 		request, err := http.NewRequestWithContext(requestCtx, method, requestURL, bytes.NewReader(body))
 		if err != nil {
 			requestCancel()

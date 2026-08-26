@@ -70,6 +70,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $_ := set $seen $protocol true -}}
 {{- end -}}
 {{- end }}
+{{- define "kruntimes.gateway.validateTransferBounds" -}}
+{{- if le (int64 .Values.gateway.maxRequestBodyBytes) 0 -}}{{- fail "gateway.maxRequestBodyBytes must be positive" -}}{{- end -}}
+{{- if le (int64 .Values.gateway.maxResponseBodyBytes) 0 -}}{{- fail "gateway.maxResponseBodyBytes must be positive" -}}{{- end -}}
+{{- if le (int64 .Values.gateway.maxHeaderBytes) 0 -}}{{- fail "gateway.maxHeaderBytes must be positive" -}}{{- end -}}
+{{- end }}
 {{- define "kruntimes.gateway.tlsSecretName" -}}
 {{- default (printf "%s-tls" (include "kruntimes.gateway.name" .)) .Values.gateway.tls.secretName -}}
 {{- end }}

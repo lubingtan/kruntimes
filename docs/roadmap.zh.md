@@ -177,7 +177,7 @@ controller wiring 累积不必要的冲突。
     authorize target Run；
   - [x] 增加 bounded authorization decision cache；
   - [x] 执行每个 gateway 的有界 HTTP request concurrency limit；
-  - [ ] 在需要时使显式 request 和 response limits 可配置；
+  - [x] 在需要时使显式 request 和 response limits 可配置；
   - [x] 增加同时启用 HTTP 和 HTTPS 的 E2E coverage，包括对 chart-managed certificate 的严格验证；
   - [x] 实现经过 review 的有界、支持分页的 `ListSessionFiles` contract：
     - [x] 在 Session Mode design 中定义 HTTP、gRPC、SDK、排序、cursor、mutation-consistency 和

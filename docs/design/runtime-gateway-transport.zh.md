@@ -34,6 +34,9 @@ gateway:
   httpsBindAddress: ":8444"
   httpServicePort: 80
   httpsServicePort: 443
+  maxRequestBodyBytes: 1048576
+  maxResponseBodyBytes: 1048576
+  maxHeaderBytes: 1048576
   tls:
     # 空值选择 chart-managed <gateway-name>-tls Secret；非空值选择 existing
     # operator-managed Secret，除非启用 certManager。

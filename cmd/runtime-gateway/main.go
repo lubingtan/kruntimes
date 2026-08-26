@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -40,6 +41,9 @@ func main() {
 		authorizationCacheTTL      time.Duration
 		authorizationCacheCapacity int
 		maxConcurrentRequests      int
+		maxRequestBodyBytes        int64
+		maxResponseBodyBytes       int64
+		maxHeaderBytes             int
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8085", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8086", "The address the health probe endpoint binds to.")
@@ -51,7 +55,14 @@ func main() {
 	flag.DurationVar(&authorizationCacheTTL, "authorization-cache-ttl", defaultAuthorizationCache.TTL, "How long successful bearer-token authorization decisions remain cached; zero disables caching.")
 	flag.IntVar(&authorizationCacheCapacity, "authorization-cache-capacity", defaultAuthorizationCache.Capacity, "Maximum successful bearer-token authorization decisions retained; zero disables caching.")
 	flag.IntVar(&maxConcurrentRequests, "max-concurrent-requests", gateway.DefaultMaxConcurrentRequests, "Maximum concurrent HTTP requests handled by one gateway Pod.")
+	flag.Int64Var(&maxRequestBodyBytes, "max-request-body-bytes", gateway.DefaultMaxRequestBodyBytes, "Maximum gateway JSON request body size in bytes.")
+	flag.Int64Var(&maxResponseBodyBytes, "max-response-body-bytes", gateway.DefaultMaxResponseBodyBytes, "Maximum gateway-generated JSON response size in bytes.")
+	flag.IntVar(&maxHeaderBytes, "max-header-bytes", gateway.DefaultMaxHeaderBytes, "Maximum HTTP request header size in bytes.")
 	flag.Parse()
+	if maxRequestBodyBytes <= 0 || maxResponseBodyBytes <= 0 || maxHeaderBytes <= 0 {
+		fmt.Fprintln(os.Stderr, "gateway request body, response body, and header limits must be positive")
+		os.Exit(2)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	config := ctrl.GetConfigOrDie()
@@ -94,6 +105,9 @@ func main() {
 		TLSCertificateFile:    tlsCertificateFile,
 		TLSPrivateKeyFile:     tlsPrivateKeyFile,
 		MaxConcurrentRequests: maxConcurrentRequests,
+		MaxRequestBodyBytes:   maxRequestBodyBytes,
+		MaxResponseBodyBytes:  maxResponseBodyBytes,
+		MaxHeaderBytes:        maxHeaderBytes,
 	}); err != nil {
 		ctrl.Log.WithName("setup").Error(err, "unable to add Runtime gateway server")
 		os.Exit(1)

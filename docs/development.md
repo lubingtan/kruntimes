@@ -78,6 +78,13 @@ that E2E run and name the focused test explicitly:
 make e2e-cert-manager-run E2E_TEST=TestSessionGatewayServesCertManagerTLS
 ```
 
+To validate the opt-in gateway request, response, and header bounds with their
+small E2E-specific values:
+
+```bash
+make e2e-gateway-bounds-run E2E_TEST=TestSessionGatewayEnforcesTransferBounds
+```
+
 Clean up:
 
 ```bash

@@ -43,6 +43,9 @@ gateway:
   httpsBindAddress: ":8444"
   httpServicePort: 80
   httpsServicePort: 443
+  maxRequestBodyBytes: 1048576
+  maxResponseBodyBytes: 1048576
+  maxHeaderBytes: 1048576
   tls:
     # Empty selects the chart-managed <gateway-name>-tls Secret. A non-empty
     # name selects an existing operator-managed Secret unless certManager is
