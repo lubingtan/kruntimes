@@ -191,11 +191,16 @@ wiring from accumulating avoidable conflicts.
   Kubernetes Service for its Runtime. Kubernetes selects a ready Runtime Pod;
   runtimed resolves ownership only within that Runtime.
   Initial implementation TODO:
+  - [x] define the [gateway TLS and transfer-bound contract](design/runtime-gateway-transport.md)
+    before changing the chart or endpoint transport;
   - [x] add Helm templates, `gateway.enabled`, values, RBAC, a dedicated
     runtimed gRPC port, HTTP-to-gRPC adapter, and unit/render coverage for the
     shared gateway Deployment and ClusterIP Service;
-  - [ ] define chart-managed TLS configuration for an existing Secret and
-    optional cert-manager integration;
+  - [x] implement an explicit `http`/`https` gateway protocol set;
+    use a chart-managed TLS Secret by default, permit an existing Secret, and
+    publish HTTPS plus its CA bundle when both protocols are enabled;
+  - [x] add optional cert-manager `Certificate` rendering for the configured
+    TLS Secret;
   - [x] implement Runtime-scoped Run lookup and bounded local or single-hop
     peer routing;
   - [x] fence routing with immutable Run UID and assigned Pod UID, rejecting
@@ -204,8 +209,9 @@ wiring from accumulating avoidable conflicts.
     the target Run through SubjectAccessReview;
   - [x] add a bounded authorization decision cache;
   - [x] enforce a bounded per-gateway HTTP request concurrency limit;
-  - [ ] enforce chart-managed TLS and make explicit request and response limits
-    configurable where needed;
+  - [x] make explicit request and response limits configurable where needed;
+  - [x] add E2E coverage with HTTP and HTTPS enabled simultaneously, including
+    strict verification of the chart-managed certificate;
   - [x] implement the reviewed bounded, paginated `ListSessionFiles` contract:
     - [x] define HTTP, gRPC, SDK, ordering, cursor, mutation-consistency, and
       response-bound semantics in the Session Mode design;

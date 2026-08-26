@@ -104,6 +104,17 @@ controller:
         matchLabels:
           app.kubernetes.io/component: controller
   priorityClassName: system-cluster-critical
+gateway:
+  enabled: true
+  protocols:
+    - http
+    - https
+  maxRequestBodyBytes: "2097152"
+  maxResponseBodyBytes: "3145728"
+  maxHeaderBytes: "4194304"
+  tls:
+    certificateKey: certificate.pem
+    privateKeyKey: private-key.pem
 """
 
 
@@ -143,6 +154,31 @@ def main() -> int:
         ),
         require_deployment(
             resources,
+            "kruntimes-gateway",
+            [
+                "--tls-certificate-file=/var/run/kruntimes/gateway-tls/certificate.pem",
+                "--tls-private-key-file=/var/run/kruntimes/gateway-tls/private-key.pem",
+                "--max-request-body-bytes=2097152",
+                "--max-response-body-bytes=3145728",
+                "--max-header-bytes=4194304",
+                "name: https",
+                "mountPath: /var/run/kruntimes/gateway-tls",
+                "secretName: kruntimes-gateway-tls",
+            ],
+        ),
+        require_resource(
+            resources,
+            "Service",
+            "kruntimes-gateway",
+            ["name: http", "targetPort: http", "name: https", "targetPort: https"],
+        ),
+        require_resource(resources, "Secret", "kruntimes-gateway-tls", ["type: kubernetes.io/tls", "ca.crt:"]),
+        reject_invalid_gateway_protocol_configuration(),
+        reject_invalid_gateway_transfer_bounds(),
+        verify_cert_manager_certificate(),
+        reject_incomplete_cert_manager_configuration(),
+        require_deployment(
+            resources,
             "kruntimes-controller",
             [
                 "replicas: 2",
@@ -161,6 +197,10 @@ def main() -> int:
                 "topologySpreadConstraints:",
                 "priorityClassName: system-cluster-critical",
                 "port: probes",
+                "--gateway-url=https://kruntimes-gateway.kruntimes-system.svc",
+                "--gateway-ca-file=/var/run/kruntimes/gateway-ca/ca.crt",
+                "mountPath: /var/run/kruntimes/gateway-ca",
+                "secretName: kruntimes-gateway-tls",
             ],
         ),
     ]
@@ -186,17 +226,119 @@ def helm_template_with_overrides() -> str:
         )
 
 
+def helm_template(*args: str) -> str:
+    return subprocess.check_output(
+        ["helm", "template", RELEASE, str(CHART), "--namespace", NAMESPACE, *args],
+        text=True,
+    )
+
+
 def require_deployment(resources: list[Resource], name: str, expected: list[str]) -> bool:
-    deployment = find_resource(resources, "Deployment", name)
-    if deployment is None:
-        print(f"missing Deployment/{name}", file=sys.stderr)
+    return require_resource(resources, "Deployment", name, expected)
+
+
+def require_resource(resources: list[Resource], kind: str, name: str, expected: list[str]) -> bool:
+    resource = find_resource(resources, kind, name)
+    if resource is None:
+        print(f"missing {kind}/{name}", file=sys.stderr)
         return False
     ok = True
     for text in expected:
-        if text not in deployment.text:
-            print(f"Deployment/{name} missing {text!r}", file=sys.stderr)
+        if text not in resource.text:
+            print(f"{kind}/{name} missing {text!r}", file=sys.stderr)
             ok = False
     return ok
+
+
+def reject_invalid_gateway_protocol_configuration() -> bool:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            RELEASE,
+            str(CHART),
+            "--namespace",
+            NAMESPACE,
+            "--set",
+            "gateway.enabled=true",
+            "--set",
+            "gateway.protocols[0]=smtp",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 and "gateway.protocols values must be http or https" in result.stderr:
+        return True
+    print("invalid gateway protocol configuration was accepted", file=sys.stderr)
+    return False
+
+
+def reject_invalid_gateway_transfer_bounds() -> bool:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            RELEASE,
+            str(CHART),
+            "--namespace",
+            NAMESPACE,
+            "--set",
+            "gateway.enabled=true",
+            "--set",
+            "gateway.maxResponseBodyBytes=0",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 and "gateway.maxResponseBodyBytes must be positive" in result.stderr:
+        return True
+    print("invalid gateway transfer bounds were accepted", file=sys.stderr)
+    return False
+
+
+def verify_cert_manager_certificate() -> bool:
+    rendered = helm_template(
+        "--set", "gateway.enabled=true",
+        "--set", "gateway.protocols[0]=https",
+        "--set", "gateway.tls.secretName=managed-gateway-tls",
+        "--set", "gateway.tls.certManager.enabled=true",
+        "--set", "gateway.tls.certManager.issuerRef.name=platform-ca",
+        "--set", "gateway.tls.certManager.issuerRef.kind=ClusterIssuer",
+    )
+    certificate = find_resource(parse_resources(rendered), "Certificate", "kruntimes-gateway")
+    if certificate is None:
+        print("missing cert-manager Certificate/kruntimes-gateway", file=sys.stderr)
+        return False
+    return require_resource(
+        [certificate],
+        "Certificate",
+        "kruntimes-gateway",
+        [
+            "secretName: managed-gateway-tls",
+            "- kruntimes-gateway.kruntimes-system.svc",
+            "- kruntimes-gateway.kruntimes-system.svc.cluster.local",
+            "name: platform-ca",
+            "kind: ClusterIssuer",
+            "group: cert-manager.io",
+        ],
+    )
+
+
+def reject_incomplete_cert_manager_configuration() -> bool:
+    result = subprocess.run(
+        [
+            "helm", "template", RELEASE, str(CHART), "--namespace", NAMESPACE,
+            "--set", "gateway.enabled=true",
+            "--set", "gateway.protocols[0]=https",
+            "--set", "gateway.tls.certManager.enabled=true",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0 and "gateway.tls.secretName is required" in result.stderr:
+        return True
+    print("incomplete cert-manager gateway configuration was accepted", file=sys.stderr)
+    return False
 
 
 def parse_resources(rendered: str) -> list[Resource]:

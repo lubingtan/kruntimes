@@ -51,6 +51,7 @@ func main() {
 		workers             int
 		runtimeName         string
 		gatewayURL          string
+		gatewayCAFile       string
 		artifactStoreDriver string
 		artifactStoreRoot   string
 		artifactVolumeClaim string
@@ -74,7 +75,8 @@ func main() {
 	flag.StringVar(&statusAddr, "status-addr", ":9093", "gRPC address for the status proxy (for krt logs).")
 	flag.StringVar(&runtimeEndpoint, "runtime-endpoint", "localhost:9091", "gRPC endpoint of the runtime server.")
 	flag.StringVar(&runtimeName, "runtime-name", "", "Runtime resource name served by this pod.")
-	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway HTTP base URL for Session Run endpoints.")
+	flag.StringVar(&gatewayURL, "gateway-url", "", "Cluster-local Runtime gateway base URL for Session Run endpoints.")
+	flag.StringVar(&gatewayCAFile, "gateway-ca-file", "", "PEM trust bundle file for HTTPS Session Run endpoints.")
 	flag.IntVar(&workers, "workers", int(v1alpha1.RuntimeDefaultRunsCapacity), "Max concurrent run executions.")
 	flag.StringVar(&artifactStoreDriver, "artifact-store-driver", "", "Artifact store driver: filesystem or s3.")
 	flag.StringVar(&artifactStoreRoot, "artifact-store-root", "", "Filesystem artifact store root. Empty disables artifact collection.")
@@ -94,6 +96,15 @@ func main() {
 	flag.DurationVar(&sessionCloseTimeout, "session-close-timeout", 0, "Maximum time to wait for a Session Runtime to close. Non-positive uses the default.")
 	klog.InitFlags(nil)
 	flag.Parse()
+	var gatewayCABundle []byte
+	if gatewayCAFile != "" {
+		var err error
+		gatewayCABundle, err = os.ReadFile(gatewayCAFile)
+		if err != nil {
+			setupLog.Error(err, "read gateway CA file", "path", gatewayCAFile)
+			os.Exit(1)
+		}
+	}
 
 	podName := os.Getenv("POD_NAME")
 	if podName == "" {
@@ -249,6 +260,7 @@ func main() {
 		SessionOperations:   sessionOperations,
 		SessionCloseTimeout: sessionCloseTimeout,
 		GatewayURL:          gatewayURL,
+		GatewayCABundle:     gatewayCABundle,
 		Recorder:            mgr.GetEventRecorderFor("runtimed"),
 	}
 

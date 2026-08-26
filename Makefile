@@ -133,6 +133,11 @@ E2E_IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:$(E2E_IMAGE_TAG)
 E2E_TEST ?=
+E2E_CERT_MANAGER ?= false
+E2E_GATEWAY_BOUNDS ?= false
+E2E_GATEWAY_HELM_ARGS ?=
+CERT_MANAGER_VERSION ?= v1.21.1
+E2E_CERT_MANAGER_GATEWAY_TLS_SECRET ?= kruntimes-gateway-cert-manager-tls
 .PHONY: e2e-setup
 e2e-setup: IMG_SCHEDULER = $(E2E_IMG_SCHEDULER)
 e2e-setup: IMG_CONTROLLER = $(E2E_IMG_CONTROLLER)
@@ -158,7 +163,8 @@ e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind 
 		--set runtimed.image=$(E2E_IMG_RUNTIMED) \
 		--set gateway.enabled=true \
 		--set gateway.image=$(E2E_IMG_GATEWAY) \
-		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s
+		--set gateway.protocols[0]=http --set gateway.protocols[1]=https \
+		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s $(E2E_GATEWAY_HELM_ARGS)
 
 .PHONY: e2e-test
 e2e-test: generate ## Run E2E tests against the kind cluster.
@@ -166,6 +172,8 @@ e2e-test: generate ## Run E2E tests against the kind cluster.
 	KRUNTIMES_PYTHON_RUNTIME_IMAGE=$(E2E_IMG_PYTHON_RUNTIME) \
 	KRUNTIMES_DIAGNOSIS_RUNTIME_IMAGE=$(E2E_IMG_DIAGNOSIS_RUNTIME) \
 	KRUNTIMES_RUNTIMED_IMAGE=$(E2E_IMG_RUNTIMED) \
+	KRUNTIMES_E2E_CERT_MANAGER=$(E2E_CERT_MANAGER) \
+	KRUNTIMES_E2E_GATEWAY_BOUNDS=$(E2E_GATEWAY_BOUNDS) \
 	go test ./test/e2e/... -v -count=1 -failfast $(if $(E2E_TEST),-run '$(E2E_TEST)')
 
 .PHONY: e2e
@@ -179,8 +187,40 @@ e2e-test-required:
 e2e-run: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
 e2e-run: e2e-test-required e2e-setup e2e-test ## Set up E2E and run the tests matching E2E_TEST.
 
+.PHONY: e2e-cert-manager-setup e2e-cert-manager-run
+e2e-cert-manager-setup: e2e-setup ## Install cert-manager, deploy an issuer, and upgrade the gateway to use its Certificate.
+	kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
+	kubectl wait --namespace cert-manager --for=condition=Available deployment --all --timeout=120s
+	kubectl wait --namespace cert-manager --for=condition=Ready pod -l app.kubernetes.io/component=webhook --timeout=120s
+	kubectl rollout status --namespace cert-manager deployment/cert-manager-webhook --timeout=120s
+	kubectl apply --namespace $(NAMESPACE) -f test/e2e/manifests/cert-manager-ca.yaml
+	kubectl wait --namespace $(NAMESPACE) --for=condition=Ready certificate/kruntimes-e2e-ca --timeout=120s
+	kubectl wait --namespace $(NAMESPACE) --for=condition=Ready issuer/kruntimes-e2e-ca --timeout=120s
+	$(HELM) upgrade --install kruntimes ./charts/kruntimes \
+		--set scheduler.image=$(E2E_IMG_SCHEDULER) \
+		--set controller.image=$(E2E_IMG_CONTROLLER) \
+		--set runtimed.image=$(E2E_IMG_RUNTIMED) \
+		--set gateway.enabled=true \
+		--set gateway.image=$(E2E_IMG_GATEWAY) \
+		--set gateway.protocols[0]=http --set gateway.protocols[1]=https \
+		--set gateway.tls.secretName=$(E2E_CERT_MANAGER_GATEWAY_TLS_SECRET) \
+		--set gateway.tls.certManager.enabled=true \
+		--set gateway.tls.certManager.issuerRef.name=kruntimes-e2e-ca \
+		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s
+	kubectl wait --namespace $(NAMESPACE) --for=condition=Ready certificate/kruntimes-gateway --timeout=120s
+
+e2e-cert-manager-run: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
+e2e-cert-manager-run: E2E_CERT_MANAGER := true
+e2e-cert-manager-run: e2e-test-required e2e-cert-manager-setup e2e-test ## Opt in to cert-manager E2E. Requires E2E_TEST.
+
+.PHONY: e2e-gateway-bounds-run
+e2e-gateway-bounds-run: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)
+e2e-gateway-bounds-run: E2E_GATEWAY_BOUNDS := true
+e2e-gateway-bounds-run: E2E_GATEWAY_HELM_ARGS := --set gateway.maxRequestBodyBytes=512 --set gateway.maxResponseBodyBytes=512 --set gateway.maxHeaderBytes=262144
+e2e-gateway-bounds-run: e2e-test-required e2e-setup e2e-test ## Opt in to gateway transfer-bounds E2E. Requires E2E_TEST.
+
 # Preserve setup-before-test ordering even when make is invoked with -j.
-.NOTPARALLEL: e2e-setup e2e e2e-run
+.NOTPARALLEL: e2e-setup e2e e2e-run e2e-cert-manager-setup e2e-cert-manager-run e2e-gateway-bounds-run
 
 .PHONY: e2e-cleanup
 e2e-cleanup: ## Delete the kind cluster.

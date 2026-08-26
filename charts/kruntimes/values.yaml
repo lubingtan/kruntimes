@@ -73,16 +73,37 @@ gateway:
   image: ghcr.io/kruntimes/gateway
   imagePullPolicy: IfNotPresent
   replicas: 2
+  protocols:
+    - http
   httpBindAddress: ":8084"
+  httpsBindAddress: ":8444"
   metricsBindAddress: ":8085"
   probeBindAddress: ":8086"
-  servicePort: 80
+  httpServicePort: 80
+  httpsServicePort: 443
   httpPort: 8084
+  httpsPort: 8444
   metricsPort: 8085
   probePort: 8086
   authorizationCacheTTL: 30s
   authorizationCacheCapacity: 1024
   maxConcurrentRequests: 128
+  maxRequestBodyBytes: 1048576
+  maxResponseBodyBytes: 1048576
+  maxHeaderBytes: 1048576
+  tls:
+    # Empty selects the chart-managed <gateway-name>-tls Secret. certManager
+    # requires an explicit name and an issuer that writes this CA bundle key.
+    secretName: ""
+    certificateKey: tls.crt
+    privateKeyKey: tls.key
+    caBundleKey: ca.crt
+    certManager:
+      enabled: false
+      issuerRef:
+        name: ""
+        kind: Issuer
+        group: cert-manager.io
   podAnnotations: {}
   podSecurityContext:
     seccompProfile:

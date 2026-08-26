@@ -8,6 +8,7 @@
 - [Function Mode](function-mode/)
 - [Task 执行生命周期](task-execution-lifecycle/)
 - [Agent Sandbox 的 Session Mode](session-mode/)
+- [Runtime Gateway 传输安全与传输边界](runtime-gateway-transport/)
 - [Function Inline Source 物化](function-inline-source/)
 - [Function Mode 生命周期与 Invoke Dataplane](function-mode-lifecycle/)
 - [Function Runtime Server 协议](function-runtime-contract/)

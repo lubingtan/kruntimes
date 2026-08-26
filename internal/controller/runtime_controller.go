@@ -41,6 +41,10 @@ const (
 	workspacePath        = "/workspace"
 	artifactStoreVolume  = "artifact-store"
 	artifactStorePath    = "/var/lib/kruntimes/artifacts"
+	gatewayCAVolume      = "gateway-ca"
+	gatewayCAPath        = "/var/run/kruntimes/gateway-ca"
+	gatewayCAFile        = "ca.crt"
+	gatewayCAAnnotation  = "kruntimes.io/gateway-ca-bundle"
 )
 
 // RuntimeReconciler watches Runtime CRs and creates Deployments with runtimed sidecar.
@@ -54,6 +58,7 @@ type RuntimeReconciler struct {
 	GatewayNamespace           string
 	GatewaySelectorLabels      map[string]string
 	GatewayURL                 string
+	GatewayCABundle            []byte
 	SessionMaxQueueSize        int
 	SessionMaxOperationTimeout time.Duration
 	SessionCloseTimeout        time.Duration
@@ -314,6 +319,11 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 	if r.GatewayURL != "" {
 		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--gateway-url=%s", r.GatewayURL))
 	}
+	if len(r.GatewayCABundle) > 0 {
+		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--gateway-ca-file=%s/%s", gatewayCAPath, gatewayCAFile))
+		daemonContainer.VolumeMounts = append(daemonContainer.VolumeMounts, corev1.VolumeMount{Name: gatewayCAVolume, MountPath: gatewayCAPath, ReadOnly: true})
+		annotations[gatewayCAAnnotation] = string(r.GatewayCABundle)
+	}
 	if r.SessionMaxQueueSize > 0 {
 		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--session-max-queue-size=%d", r.SessionMaxQueueSize))
 	}
@@ -329,7 +339,7 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 
 	volumes := make([]corev1.Volume, 0, len(template.Spec.Volumes)+2)
 	for _, volume := range template.Spec.Volumes {
-		if volume.Name != workspaceVolume && volume.Name != artifactStoreVolume {
+		if volume.Name != workspaceVolume && volume.Name != artifactStoreVolume && volume.Name != gatewayCAVolume {
 			volumes = append(volumes, volume)
 		}
 	}
@@ -339,6 +349,17 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 			VolumeSource: workspaceVolumeSource(rt.Spec.Workspace),
 		},
 	)
+	if len(r.GatewayCABundle) > 0 {
+		volumes = append(volumes, corev1.Volume{
+			Name: gatewayCAVolume,
+			VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{{
+					Path:     gatewayCAFile,
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.annotations['" + gatewayCAAnnotation + "']"},
+				}},
+			}},
+		})
+	}
 	artifactSecurityContext := configureArtifactStore(rt.Spec.ArtifactStore, &daemonContainer, &volumes)
 	podSecurityContext := template.Spec.SecurityContext
 	if podSecurityContext == nil {

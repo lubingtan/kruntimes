@@ -104,6 +104,7 @@ type Controller struct {
 	RuntimeNamespace  string
 	RuntimeEndpoint   string
 	GatewayURL        string
+	GatewayCABundle   []byte
 	Workers           int
 	ArtifactStore     artifact.Store
 	ArtifactStoreSpec *v1alpha1.RuntimeArtifactStoreSpec

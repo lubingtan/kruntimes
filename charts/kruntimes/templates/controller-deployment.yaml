@@ -76,7 +76,13 @@ spec:
             {{- if .Values.gateway.enabled }}
             - --gateway-namespace={{ .Release.Namespace }}
             - --gateway-selector-labels=app.kubernetes.io/name={{ include "kruntimes.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=runtime-gateway
-            - --gateway-url=http://{{ include "kruntimes.gateway.name" . }}.{{ .Release.Namespace }}.svc
+            - --gateway-url={{ ternary "https" "http" (has "https" .Values.gateway.protocols) }}://{{ include "kruntimes.gateway.name" . }}.{{ .Release.Namespace }}.svc
+            {{- if has "https" .Values.gateway.protocols }}
+            {{- if not .Values.gateway.tls.certManager.enabled }}
+            {{- include "kruntimes.gateway.ensureTLSCertificates" . }}
+            {{- end }}
+            - --gateway-ca-file=/var/run/kruntimes/gateway-ca/ca.crt
+            {{- end }}
             {{- end }}
             {{- if $runtimeMaintainerPullSecrets }}
             - --runtime-maintainer-image-pull-secrets={{ join "," $runtimeMaintainerPullSecrets }}
@@ -109,6 +115,11 @@ spec:
             - name: webhook-tls
               mountPath: {{ .Values.controller.webhookCertDir }}
               readOnly: true
+            {{- if and .Values.gateway.enabled (has "https" .Values.gateway.protocols) }}
+            - name: gateway-ca
+              mountPath: /var/run/kruntimes/gateway-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: webhook-tls
           secret:
@@ -118,3 +129,11 @@ spec:
                 path: tls.crt
               - key: tls.key
                 path: tls.key
+        {{- if and .Values.gateway.enabled (has "https" .Values.gateway.protocols) }}
+        - name: gateway-ca
+          secret:
+            secretName: {{ include "kruntimes.gateway.tlsSecretName" . }}
+            items:
+              - key: {{ .Values.gateway.tls.caBundleKey }}
+                path: ca.crt
+        {{- end }}

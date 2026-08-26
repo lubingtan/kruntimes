@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -27,8 +30,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -49,6 +54,13 @@ import (
 )
 
 const testNamespace = "default"
+
+const (
+	certManagerE2EEnabledEnv      = "KRUNTIMES_E2E_CERT_MANAGER"
+	certManagerGatewayCertificate = "kruntimes-gateway"
+	certManagerGatewayTLSSecret   = "kruntimes-gateway-cert-manager-tls"
+	gatewayBoundsE2EEnabledEnv    = "KRUNTIMES_E2E_GATEWAY_BOUNDS"
+)
 
 var k8sClient client.Client
 var restConfig *rest.Config
@@ -623,8 +635,8 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
 	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
-	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTP {
-		t.Fatalf("Session Run endpoint = %#v, want HTTP gateway endpoint", run.Status.Endpoint)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || len(run.Status.Endpoint.CABundle) == 0 {
+		t.Fatalf("Session Run endpoint = %#v, want HTTPS gateway endpoint with a CA bundle", run.Status.Endpoint)
 	}
 
 	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
@@ -706,6 +718,166 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
 	assertCancelledRun(t, run)
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestSessionGatewayServesTLS(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-gateway-tls-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-tls-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create TLS Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || len(run.Status.Endpoint.CABundle) == 0 {
+		t.Fatalf("Session Run endpoint = %#v, want HTTPS gateway endpoint with a CA bundle", run.Status.Endpoint)
+	}
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayTLSEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	response := waitForGatewayResponseWithClient(t, gatewayTLSHTTPClient(t, gatewayPod.Namespace, run.Status.Endpoint.CABundle), http.MethodGet, baseURL, sessionGatewayToken(t, run), nil, http.StatusOK)
+	var sessionStatus struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(response, &sessionStatus); err != nil {
+		t.Fatalf("decode TLS Session status: %v", err)
+	}
+	if sessionStatus.State != "SESSION_STATE_READY" {
+		t.Fatalf("TLS Session state = %q, want SESSION_STATE_READY", sessionStatus.State)
+	}
+}
+
+func TestSessionGatewayEnforcesTransferBounds(t *testing.T) {
+	if os.Getenv(gatewayBoundsE2EEnabledEnv) != "true" {
+		t.Skipf("set %s=true to run the gateway transfer-bounds E2E", gatewayBoundsE2EEnabledEnv)
+	}
+	runtimeName := fmt.Sprintf("session-gateway-bounds-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-bounds-", Namespace: testNamespace},
+		Spec:       v1alpha1.RunSpec{Runtime: runtimeName, Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create transfer-bounds Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	portForwardClient := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	// Establish the port-forward with a response that remains below the focused
+	// response limit before exercising rejection paths.
+	_ = waitForGatewayResponseWithClient(t, portForwardClient, http.MethodGet, baseURL, token, nil, http.StatusOK)
+	oversizedRequest := []byte(`{"command":{"argv":["true"],"stdin":"` + strings.Repeat("eA==", 160) + `"}}`)
+	requestResponse := waitForGatewayResponseWithClient(t, portForwardClient, http.MethodPost, baseURL+"/operations:execute", token, oversizedRequest, http.StatusRequestEntityTooLarge)
+	if !strings.Contains(string(requestResponse), "gateway request body exceeds configured limit") {
+		t.Fatalf("oversized request response = %s", requestResponse)
+	}
+
+	responseResponse := waitForGatewayResponseWithClient(t, portForwardClient, http.MethodPost, baseURL+"/operations:execute", token,
+		[]byte(`{"command":{"argv":["sh","-c","head -c 1024 /dev/zero"]}}`), http.StatusRequestEntityTooLarge)
+	if got, want := string(responseResponse), "{\"error\":\"gateway response exceeds configured limit\"}\n"; got != want {
+		t.Fatalf("oversized response body = %q, want %q", got, want)
+	}
+
+	headerRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL, nil)
+	if err != nil {
+		t.Fatalf("create oversized-header request: %v", err)
+	}
+	headerRequest.Header.Set("X-Kruntimes-E2E-Bounds", strings.Repeat("x", 512<<10))
+	headerResponse, err := portForwardClient.Do(headerRequest)
+	if err != nil {
+		t.Fatalf("send oversized-header request: %v", err)
+	}
+	defer headerResponse.Body.Close()
+	if headerResponse.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		contents, _ := io.ReadAll(headerResponse.Body)
+		t.Fatalf("oversized header status = %d, want %d: %s", headerResponse.StatusCode, http.StatusRequestHeaderFieldsTooLarge, contents)
+	}
+}
+
+func TestSessionGatewayServesCertManagerTLS(t *testing.T) {
+	if os.Getenv(certManagerE2EEnabledEnv) != "true" {
+		t.Skipf("set %s=true to run the cert-manager E2E", certManagerE2EEnabledEnv)
+	}
+
+	certificate := &unstructured.Unstructured{}
+	certificate.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	if err := k8sClient.Get(t.Context(), client.ObjectKey{Namespace: testNamespace, Name: certManagerGatewayCertificate}, certificate); err != nil {
+		t.Fatalf("get cert-manager gateway Certificate: %v", err)
+	}
+	if !certificateReady(certificate) {
+		t.Fatalf("cert-manager gateway Certificate status = %#v, want Ready=True", certificate.Object["status"])
+	}
+
+	secret := &corev1.Secret{}
+	if err := k8sClient.Get(t.Context(), client.ObjectKey{Namespace: testNamespace, Name: certManagerGatewayTLSSecret}, secret); err != nil {
+		t.Fatalf("get cert-manager gateway TLS Secret: %v", err)
+	}
+	if len(secret.Data["ca.crt"]) == 0 || len(secret.Data["tls.crt"]) == 0 || len(secret.Data["tls.key"]) == 0 {
+		t.Fatalf("cert-manager gateway TLS Secret keys = %v, want ca.crt, tls.crt, and tls.key", secret.Data)
+	}
+	certificatePEM, _ := pem.Decode(secret.Data["tls.crt"])
+	if certificatePEM == nil {
+		t.Fatal("decode cert-manager gateway TLS certificate PEM")
+	}
+	leaf, err := x509.ParseCertificate(certificatePEM.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert-manager gateway TLS certificate: %v", err)
+	}
+	if !slices.Contains(leaf.DNSNames, "kruntimes-gateway.default.svc") {
+		t.Fatalf("cert-manager gateway TLS certificate DNS names = %v, want kruntimes-gateway.default.svc", leaf.DNSNames)
+	}
+
+	runtimeName := fmt.Sprintf("session-gateway-cert-manager-tls-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-gateway-cert-manager-tls-", Namespace: testNamespace},
+		Spec:       v1alpha1.RunSpec{Runtime: runtimeName, Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create cert-manager TLS Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS {
+		t.Fatalf("Session Run endpoint = %#v, want HTTPS gateway endpoint", run.Status.Endpoint)
+	}
+	if !bytes.Equal(run.Status.Endpoint.CABundle, secret.Data["ca.crt"]) {
+		t.Fatal("Session Run endpoint CA bundle does not match the cert-manager gateway TLS Secret")
+	}
+
+	gatewayPod := waitForGatewayPod(t)
+	baseURL := gatewayTLSEndpointURL(t, gatewayPod, run.Status.Endpoint.URL)
+	parsedURL, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse cert-manager gateway endpoint %q: %v", baseURL, err)
+	}
+	healthURL := fmt.Sprintf("%s://%s/healthz", parsedURL.Scheme, parsedURL.Host)
+	_ = waitForGatewayResponseWithClient(t, gatewayTLSHTTPClient(t, gatewayPod.Namespace, run.Status.Endpoint.CABundle), http.MethodGet, healthURL, "", nil, http.StatusOK)
+}
+
+func certificateReady(certificate *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(certificate.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	for _, condition := range conditions {
+		condition, ok := condition.(map[string]any)
+		if ok && condition["type"] == "Ready" && condition["status"] == "True" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSessionGatewaySerializesMutations(t *testing.T) {
@@ -1263,6 +1435,33 @@ func gatewayEndpointURL(t *testing.T, pod *corev1.Pod, endpoint string) string {
 	return fmt.Sprintf("http://127.0.0.1:%d%s", localPort, parsed.EscapedPath())
 }
 
+func gatewayTLSEndpointURL(t *testing.T, pod *corev1.Pod, endpoint string) string {
+	t.Helper()
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Path == "" {
+		t.Fatalf("parse HTTPS gateway endpoint %q: %v", endpoint, err)
+	}
+	localPort := availableLocalPort(t)
+	closer, err := forwardPodPort(t.Context(), pod.Namespace, pod.Name, localPort, 8444)
+	if err != nil {
+		t.Fatalf("port-forward HTTPS Runtime gateway: %v", err)
+	}
+	t.Cleanup(func() { _ = closer.Close() })
+	return fmt.Sprintf("https://127.0.0.1:%d%s", localPort, parsed.EscapedPath())
+}
+
+func gatewayTLSHTTPClient(t *testing.T, namespace string, caBundle []byte) *http.Client {
+	t.Helper()
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBundle) {
+		t.Fatal("Runtime gateway endpoint has no parseable CA bundle")
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs:    pool,
+		ServerName: fmt.Sprintf("kruntimes-gateway.%s.svc", namespace),
+	}}}
+}
+
 func availableLocalPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1275,11 +1474,20 @@ func availableLocalPort(t *testing.T) int {
 
 func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body []byte, expectedStatus int) []byte {
 	t.Helper()
+	return waitForGatewayResponseWithClient(t, http.DefaultClient, method, requestURL, token, body, expectedStatus)
+}
+
+func waitForGatewayResponseWithClient(t *testing.T, httpClient *http.Client, method, requestURL, token string, body []byte, expectedStatus int) []byte {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	lastResult := "no response"
 	for {
-		requestCtx, requestCancel := context.WithTimeout(ctx, 2*time.Second)
+		// Gateway authorization performs both a TokenReview and a
+		// SubjectAccessReview, each of which may consume its own API-server
+		// round trip. Keep the individual request deadline above that work while
+		// retaining the bounded overall retry budget.
+		requestCtx, requestCancel := context.WithTimeout(ctx, 5*time.Second)
 		request, err := http.NewRequestWithContext(requestCtx, method, requestURL, bytes.NewReader(body))
 		if err != nil {
 			requestCancel()
@@ -1291,7 +1499,7 @@ func waitForGatewayResponse(t *testing.T, method, requestURL, token string, body
 		if token != "" {
 			request.Header.Set("Authorization", "Bearer "+token)
 		}
-		response, err := http.DefaultClient.Do(request)
+		response, err := httpClient.Do(request)
 		if err == nil {
 			contents, readErr := io.ReadAll(response.Body)
 			_ = response.Body.Close()

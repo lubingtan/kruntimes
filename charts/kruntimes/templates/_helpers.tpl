@@ -61,6 +61,62 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s-gateway" ((include "kruntimes.fullname" .) | trunc 56 | trimSuffix "-") }}
 {{- end }}
 
+{{- define "kruntimes.gateway.validateProtocols" -}}
+{{- if eq (len .Values.gateway.protocols) 0 -}}{{- fail "gateway.protocols must include http or https" -}}{{- end -}}
+{{- $seen := dict -}}
+{{- range $protocol := .Values.gateway.protocols -}}
+{{- if not (or (eq $protocol "http") (eq $protocol "https")) -}}{{- fail "gateway.protocols values must be http or https" -}}{{- end -}}
+{{- if hasKey $seen $protocol -}}{{- fail "gateway.protocols values must be distinct" -}}{{- end -}}
+{{- $_ := set $seen $protocol true -}}
+{{- end -}}
+{{- end }}
+{{- define "kruntimes.gateway.validateTransferBounds" -}}
+{{- if le (int64 .Values.gateway.maxRequestBodyBytes) 0 -}}{{- fail "gateway.maxRequestBodyBytes must be positive" -}}{{- end -}}
+{{- if le (int64 .Values.gateway.maxResponseBodyBytes) 0 -}}{{- fail "gateway.maxResponseBodyBytes must be positive" -}}{{- end -}}
+{{- if le (int64 .Values.gateway.maxHeaderBytes) 0 -}}{{- fail "gateway.maxHeaderBytes must be positive" -}}{{- end -}}
+{{- end }}
+{{- define "kruntimes.gateway.tlsSecretName" -}}
+{{- default (printf "%s-tls" (include "kruntimes.gateway.name" .)) .Values.gateway.tls.secretName -}}
+{{- end }}
+{{- define "kruntimes.gateway.ensureTLSCertificates" -}}
+{{- if not (hasKey .Values "_gatewayCertificates") -}}
+{{- $secretName := include "kruntimes.gateway.tlsSecretName" . -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- if $existing -}}
+{{- if not (hasKey $existing.data .Values.gateway.tls.caBundleKey) -}}{{- fail (printf "gateway TLS Secret %q must contain CA bundle key %q" $secretName .Values.gateway.tls.caBundleKey) -}}{{- end -}}
+{{- if not (hasKey $existing.data .Values.gateway.tls.certificateKey) -}}{{- fail (printf "gateway TLS Secret %q must contain certificate key %q" $secretName .Values.gateway.tls.certificateKey) -}}{{- end -}}
+{{- if not (hasKey $existing.data .Values.gateway.tls.privateKeyKey) -}}{{- fail (printf "gateway TLS Secret %q must contain private key key %q" $secretName .Values.gateway.tls.privateKeyKey) -}}{{- end -}}
+{{- $_ := set .Values "_gatewayCertificates" (dict "caCert" (index $existing.data .Values.gateway.tls.caBundleKey | b64dec) "tlsCert" (index $existing.data .Values.gateway.tls.certificateKey | b64dec) "tlsKey" (index $existing.data .Values.gateway.tls.privateKeyKey | b64dec)) -}}
+{{- else if not .Values.gateway.tls.secretName -}}
+{{- $ca := genCA (printf "%s-ca" (include "kruntimes.gateway.name" .)) 3650 -}}
+{{- $name := include "kruntimes.gateway.name" . -}}
+{{- $dns := list $name (printf "%s.%s" $name .Release.Namespace) (printf "%s.%s.svc" $name .Release.Namespace) (printf "%s.%s.svc.cluster.local" $name .Release.Namespace) -}}
+{{- $certificate := genSignedCert $name nil $dns 365 $ca -}}
+{{- $_ := set .Values "_gatewayCertificates" (dict "caCert" $ca.Cert "tlsCert" $certificate.Cert "tlsKey" $certificate.Key) -}}
+{{- else -}}
+{{- fail (printf "gateway TLS Secret %q was not found" $secretName) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+{{- define "kruntimes.gateway.validateTLS" -}}
+{{- if has "https" .Values.gateway.protocols -}}
+{{- if not .Values.gateway.tls.certificateKey -}}
+{{- fail "gateway.tls.certificateKey is required when gateway.protocols includes https" -}}
+{{- end -}}
+{{- if not .Values.gateway.tls.privateKeyKey -}}
+{{- fail "gateway.tls.privateKeyKey is required when gateway.protocols includes https" -}}
+{{- end -}}
+{{- if .Values.gateway.tls.certManager.enabled -}}
+{{- if not .Values.gateway.tls.secretName -}}
+{{- fail "gateway.tls.secretName is required when gateway.tls.certManager.enabled is true" -}}
+{{- end -}}
+{{- if not .Values.gateway.tls.certManager.issuerRef.name -}}
+{{- fail "gateway.tls.certManager.issuerRef.name is required when gateway.tls.certManager.enabled is true" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "kruntimes.controller.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "kruntimes.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

@@ -2,7 +2,9 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,12 +27,19 @@ import (
 
 const (
 	defaultRuntimeServicePort = 9093
-	maxRequestBodyBytes       = 1 << 20
 	runtimeIndexField         = "spec.runtime"
 
+	// DefaultMaxRequestBodyBytes is the maximum size of a gateway JSON request.
+	DefaultMaxRequestBodyBytes int64 = 1 << 20
+	// DefaultMaxResponseBodyBytes is the maximum size of a gateway JSON response.
+	DefaultMaxResponseBodyBytes int64 = 1 << 20
+	// DefaultMaxHeaderBytes is the maximum size of a gateway HTTP request header.
+	DefaultMaxHeaderBytes = 1 << 20
 	// DefaultMaxConcurrentRequests is the per-gateway-Pod HTTP request limit.
 	DefaultMaxConcurrentRequests = 128
 )
+
+var errRequestBodyTooLarge = errors.New("gateway request body exceeds configured limit")
 
 // Authorizer verifies that a request principal may access a Session Run.
 type Authorizer interface {
@@ -49,75 +58,152 @@ type Server struct {
 	Authorizer   Authorizer
 	Dialer       SessionRuntimeDialer
 	RuntimePort  int
-	Address      string
+	HTTPAddress  string
+	HTTPSAddress string
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+
+	// TLSCertificateFile and TLSPrivateKeyFile enable TLS when both paths are
+	// configured. Supplying only one is a startup error; the gateway never
+	// silently falls back to plain HTTP.
+	TLSCertificateFile string
+	TLSPrivateKeyFile  string
 
 	// MaxConcurrentRequests bounds requests handled by one gateway Pod. Values
 	// less than one use the default. Health checks do not consume this limit.
 	MaxConcurrentRequests int
-	requestLimiter        gatewayRequestLimiter
+	// MaxRequestBodyBytes bounds gateway JSON request bodies. Values less than
+	// one use the default.
+	MaxRequestBodyBytes int64
+	// MaxResponseBodyBytes bounds gateway-generated JSON responses. Values less
+	// than one use the default.
+	MaxResponseBodyBytes int64
+	// MaxHeaderBytes bounds HTTP request headers before routing. Values less than
+	// one use the default.
+	MaxHeaderBytes int
+	requestLimiter gatewayRequestLimiter
 }
 
 // Start implements manager.Runnable and serves the HTTP gateway until ctx ends.
 func (s *Server) Start(ctx context.Context) error {
-	address := s.Address
-	if address == "" {
-		address = ":8084"
+	httpAddress := s.HTTPAddress
+	if httpAddress == "" && s.HTTPSAddress == "" {
+		httpAddress = ":8084"
 	}
-	listener, err := net.Listen("tcp", address)
+	tlsConfig, err := s.tlsConfig()
 	if err != nil {
-		return fmt.Errorf("listen for Runtime gateway: %w", err)
+		return err
 	}
-	server := &http.Server{
+	if s.HTTPSAddress != "" && tlsConfig == nil {
+		return errors.New("Runtime gateway HTTPS address requires TLS certificate and private key files")
+	}
+	listeners := make([]net.Listener, 0, 2)
+	if httpAddress != "" {
+		listener, err := net.Listen("tcp", httpAddress)
+		if err != nil {
+			return fmt.Errorf("listen for Runtime gateway HTTP: %w", err)
+		}
+		listeners = append(listeners, listener)
+	}
+	if s.HTTPSAddress != "" {
+		listener, err := net.Listen("tcp", s.HTTPSAddress)
+		if err != nil {
+			for _, open := range listeners {
+				_ = open.Close()
+			}
+			return fmt.Errorf("listen for Runtime gateway HTTPS: %w", err)
+		}
+		listeners = append(listeners, tls.NewListener(listener, tlsConfig))
+	}
+	servers := make([]*http.Server, 0, len(listeners))
+	results := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		server := s.httpServer()
+		servers = append(servers, server)
+		go func(server *http.Server, listener net.Listener) {
+			err := server.Serve(listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			results <- err
+		}(server, listener)
+	}
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, server := range servers {
+			_ = server.Shutdown(shutdownCtx)
+		}
+		for range servers {
+			<-results
+		}
+		return nil
+	case err := <-results:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, server := range servers {
+			_ = server.Shutdown(shutdownCtx)
+		}
+		return err
+	}
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
 		Handler:           s,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       s.ReadTimeout,
 		WriteTimeout:      s.WriteTimeout,
+		MaxHeaderBytes:    s.maxHeaderBytes(),
 	}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve Runtime gateway: %w", err)
+}
+
+func (s *Server) tlsConfig() (*tls.Config, error) {
+	if s.TLSCertificateFile == "" && s.TLSPrivateKeyFile == "" {
+		return nil, nil
 	}
-	return nil
+	if s.TLSCertificateFile == "" || s.TLSPrivateKeyFile == "" {
+		return nil, errors.New("both Runtime gateway TLS certificate and private key files are required")
+	}
+	certificate, err := tls.LoadX509KeyPair(s.TLSCertificateFile, s.TLSPrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load Runtime gateway TLS certificate: %w", err)
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		if r.Method != http.MethodGet {
-			methodNotAllowed(w)
+			s.methodNotAllowed(w)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if !s.requestLimiter.tryAcquire(s.maxConcurrentRequests()) {
-		writeError(w, http.StatusTooManyRequests, "gateway request concurrency limit reached")
+		s.writeError(w, http.StatusTooManyRequests, "gateway request concurrency limit reached")
 		return
 	}
 	defer s.requestLimiter.release()
 
 	namespace, runtimeName, runUID, suffix, ok := sessionRoute(r.URL.Path)
 	if !ok {
-		writeError(w, http.StatusNotFound, "endpoint not found")
+		s.writeError(w, http.StatusNotFound, "endpoint not found")
 		return
 	}
 	run, err := s.sessionRun(r.Context(), namespace, runtimeName, runUID)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 	if s.Authorizer == nil {
-		writeError(w, http.StatusServiceUnavailable, "gateway authorization is not configured")
+		s.writeError(w, http.StatusServiceUnavailable, "gateway authorization is not configured")
 		return
 	}
 	if err := s.Authorizer.Authorize(r.Context(), r, run); err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 
@@ -131,7 +217,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(suffix) > 1 && suffix[0] == "files" && r.Method == http.MethodGet:
 		s.readFile(w, r, run, strings.Join(suffix[1:], "/"))
 	default:
-		methodNotAllowed(w)
+		s.methodNotAllowed(w)
 	}
 }
 
@@ -140,6 +226,27 @@ func (s *Server) maxConcurrentRequests() int {
 		return s.MaxConcurrentRequests
 	}
 	return DefaultMaxConcurrentRequests
+}
+
+func (s *Server) maxRequestBodyBytes() int64 {
+	if s.MaxRequestBodyBytes > 0 {
+		return s.MaxRequestBodyBytes
+	}
+	return DefaultMaxRequestBodyBytes
+}
+
+func (s *Server) maxResponseBodyBytes() int64 {
+	if s.MaxResponseBodyBytes > 0 {
+		return s.MaxResponseBodyBytes
+	}
+	return DefaultMaxResponseBodyBytes
+}
+
+func (s *Server) maxHeaderBytes() int {
+	if s.MaxHeaderBytes > 0 {
+		return s.MaxHeaderBytes
+	}
+	return DefaultMaxHeaderBytes
 }
 
 type gatewayRequestLimiter struct {
@@ -166,67 +273,71 @@ func (l *gatewayRequestLimiter) release() {
 func (s *Server) getSessionStatus(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run) {
 	client, closer, err := s.runtimeClient(r.Context(), run)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 	defer closer.Close()
 	response, err := client.GetSessionStatus(r.Context(), &pb.GetSessionStatusRequest{Identity: sessionIdentity(run)})
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newSessionStatusResponse(response))
+	s.writeJSON(w, http.StatusOK, newSessionStatusResponse(response))
 }
 
 func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run) {
 	var request executeOperationRequest
-	if err := decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := s.decodeJSON(r, &request); err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	operation, err := request.protobuf()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	client, closer, err := s.runtimeClient(r.Context(), run)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 	defer closer.Close()
 	operation.Identity = sessionIdentity(run)
 	response, err := client.ExecuteSessionOperation(r.Context(), operation)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newExecuteOperationResponse(response))
+	s.writeJSON(w, http.StatusOK, newExecuteOperationResponse(response))
 }
 
 func (s *Server) listFiles(w http.ResponseWriter, r *http.Request, run *v1alpha1.Run) {
 	request, err := sessionFileListRequest(r.URL.Query())
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	client, closer, err := s.runtimeClient(r.Context(), run)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 	defer closer.Close()
 	request.Identity = sessionIdentity(run)
 	response, err := client.ListSessionFiles(r.Context(), request)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 	entries := make([]sessionFileInfoResponse, 0, len(response.GetEntries()))
 	for _, entry := range response.GetEntries() {
 		entries = append(entries, sessionFileInfoResponse{Path: entry.GetPath(), Directory: entry.GetDirectory(), SizeBytes: entry.GetSizeBytes()})
 	}
-	writeJSON(w, http.StatusOK, struct {
+	s.writeJSON(w, http.StatusOK, struct {
 		Entries       []sessionFileInfoResponse `json:"entries"`
 		NextPageToken string                    `json:"nextPageToken"`
 	}{Entries: entries, NextPageToken: response.GetNextPageToken()})
@@ -249,23 +360,23 @@ func (s *Server) readFile(w http.ResponseWriter, r *http.Request, run *v1alpha1.
 	if value := r.URL.Query().Get("maxBytes"); value != "" {
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || parsed <= 0 {
-			writeError(w, http.StatusBadRequest, "maxBytes must be a positive integer")
+			s.writeError(w, http.StatusBadRequest, "maxBytes must be a positive integer")
 			return
 		}
 		maxBytes = parsed
 	}
 	client, closer, err := s.runtimeClient(r.Context(), run)
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
 	defer closer.Close()
 	response, err := client.ReadSessionFile(r.Context(), &pb.ReadSessionFileRequest{Identity: sessionIdentity(run), Path: path, MaxBytes: maxBytes})
 	if err != nil {
-		writeGatewayError(w, err)
+		s.writeGatewayError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	s.writeJSON(w, http.StatusOK, struct {
 		Contents  []byte `json:"contents"`
 		Truncated bool   `json:"truncated"`
 	}{Contents: response.GetContents(), Truncated: response.GetTruncated()})
@@ -332,24 +443,37 @@ func sessionIdentity(run *v1alpha1.Run) *pb.SessionIdentity {
 	return &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: run.Status.AssignedPodUID}
 }
 
-func decodeJSON(r *http.Request, target any) error {
+func (s *Server) decodeJSON(r *http.Request, target any) error {
 	defer r.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes+1))
+	body := &io.LimitedReader{R: r.Body, N: s.maxRequestBodyBytes() + 1}
+	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		if body.N == 0 {
+			return errRequestBodyTooLarge
+		}
 		return fmt.Errorf("decode request: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if body.N == 0 {
+			return errRequestBodyTooLarge
+		}
 		return errors.New("request must contain one JSON value")
+	}
+	if _, err := io.Copy(io.Discard, body); err != nil {
+		return fmt.Errorf("read request: %w", err)
+	}
+	if body.N == 0 {
+		return errRequestBodyTooLarge
 	}
 	return nil
 }
 
-func methodNotAllowed(w http.ResponseWriter) {
-	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+func (s *Server) methodNotAllowed(w http.ResponseWriter) {
+	s.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
-func writeGatewayError(w http.ResponseWriter, err error) {
+func (s *Server) writeGatewayError(w http.ResponseWriter, err error) {
 	code := status.Code(err)
 	httpStatus := http.StatusInternalServerError
 	switch code {
@@ -370,19 +494,34 @@ func writeGatewayError(w http.ResponseWriter, err error) {
 	case codes.Unavailable:
 		httpStatus = http.StatusServiceUnavailable
 	}
-	writeError(w, httpStatus, status.Convert(err).Message())
+	s.writeError(w, httpStatus, status.Convert(err).Message())
 }
 
-func writeError(w http.ResponseWriter, httpStatus int, message string) {
-	writeJSON(w, httpStatus, struct {
+func (s *Server) writeError(w http.ResponseWriter, httpStatus int, message string) {
+	s.writeJSON(w, httpStatus, struct {
 		Error string `json:"error"`
 	}{Error: message})
 }
 
-func writeJSON(w http.ResponseWriter, httpStatus int, value any) {
+func (s *Server) writeJSON(w http.ResponseWriter, httpStatus int, value any) {
+	var response bytes.Buffer
+	if err := json.NewEncoder(&response).Encode(value); err != nil {
+		s.writeUnboundedError(w, http.StatusInternalServerError, "encode gateway response")
+		return
+	}
+	if int64(response.Len()) > s.maxResponseBodyBytes() {
+		s.writeUnboundedError(w, http.StatusRequestEntityTooLarge, "gateway response exceeds configured limit")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	_ = json.NewEncoder(w).Encode(value)
+	_, _ = w.Write(response.Bytes())
+}
+
+func (s *Server) writeUnboundedError(w http.ResponseWriter, httpStatus int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpStatus)
+	_, _ = w.Write([]byte(fmt.Sprintf("{\"error\":%q}\n", message)))
 }
 
 type executeOperationRequest struct {

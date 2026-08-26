@@ -1,4 +1,7 @@
 {{- if .Values.gateway.enabled }}
+{{- include "kruntimes.gateway.validateProtocols" . }}
+{{- include "kruntimes.gateway.validateTransferBounds" . }}
+{{- include "kruntimes.gateway.validateTLS" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,16 +60,37 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           args:
+            {{- if has "http" .Values.gateway.protocols }}
             - --http-bind-address={{ .Values.gateway.httpBindAddress }}
+            {{- else }}
+            - --http-bind-address=
+            {{- end }}
+            {{- if has "https" .Values.gateway.protocols }}
+            - --https-bind-address={{ .Values.gateway.httpsBindAddress }}
+            {{- end }}
             - --metrics-bind-address={{ .Values.gateway.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.gateway.probeBindAddress }}
             - --authorization-cache-ttl={{ .Values.gateway.authorizationCacheTTL }}
             - --authorization-cache-capacity={{ .Values.gateway.authorizationCacheCapacity }}
             - --max-concurrent-requests={{ .Values.gateway.maxConcurrentRequests }}
+            - --max-request-body-bytes={{ int64 .Values.gateway.maxRequestBodyBytes }}
+            - --max-response-body-bytes={{ int64 .Values.gateway.maxResponseBodyBytes }}
+            - --max-header-bytes={{ int64 .Values.gateway.maxHeaderBytes }}
+            {{- if has "https" .Values.gateway.protocols }}
+            - --tls-certificate-file=/var/run/kruntimes/gateway-tls/{{ .Values.gateway.tls.certificateKey }}
+            - --tls-private-key-file=/var/run/kruntimes/gateway-tls/{{ .Values.gateway.tls.privateKeyKey }}
+            {{- end }}
           ports:
+            {{- if has "http" .Values.gateway.protocols }}
             - containerPort: {{ .Values.gateway.httpPort }}
               name: http
               protocol: TCP
+            {{- end }}
+            {{- if has "https" .Values.gateway.protocols }}
+            - containerPort: {{ .Values.gateway.httpsPort }}
+              name: https
+              protocol: TCP
+            {{- end }}
             - containerPort: {{ .Values.gateway.metricsPort }}
               name: metrics
               protocol: TCP
@@ -87,4 +111,14 @@ spec:
             periodSeconds: 5
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- if has "https" .Values.gateway.protocols }}
+          volumeMounts:
+            - name: gateway-tls
+              mountPath: /var/run/kruntimes/gateway-tls
+              readOnly: true
+      volumes:
+        - name: gateway-tls
+          secret:
+            secretName: {{ include "kruntimes.gateway.tlsSecretName" . }}
+          {{- end }}
 {{- end }}
