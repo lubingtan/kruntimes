@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,6 +34,7 @@ import (
 	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	workspaceadmission "github.com/kruntimes/kruntimes/internal/admission"
+	runtimecontroller "github.com/kruntimes/kruntimes/internal/controller"
 	"github.com/kruntimes/kruntimes/internal/runtimed"
 	"github.com/kruntimes/kruntimes/internal/runtimepod"
 	"github.com/kruntimes/kruntimes/internal/scheduler"
@@ -95,6 +97,14 @@ func TestMain(m *testing.M) {
 		Log:    ctrl.Log.WithName("scheduler"),
 	}).SetupWithManager(testMgr); err != nil {
 		panic("failed to setup scheduler: " + err.Error())
+	}
+	if err := (&runtimecontroller.RuntimeReconciler{
+		Client:             testMgr.GetClient(),
+		Log:                ctrl.Log.WithName("runtime-controller"),
+		Scheme:             scheme,
+		DefaultDaemonImage: "runtimed:integration",
+	}).SetupWithManager(testMgr); err != nil {
+		panic("failed to setup Runtime controller: " + err.Error())
 	}
 
 	if err := (&runtimed.Controller{
@@ -172,6 +182,68 @@ func TestRunWorkspaceAdmissionWebhook(t *testing.T) {
 			t.Fatalf("missing workspace Run was not rejected by validating webhook: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestRuntimeReadyReplicasTracksDeploymentStatus(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	namespace := testNamespace(t, "runtime-readiness-")
+	runtimeResource := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "ready", Namespace: namespace.Name},
+		Spec: v1alpha1.RuntimeSpec{
+			Replicas: 2,
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "runtime", Image: "runtime:integration"}},
+			}},
+		},
+	}
+	if err := k8sClient.Create(ctx, runtimeResource); err != nil {
+		t.Fatalf("create Runtime: %v", err)
+	}
+
+	deploymentKey := client.ObjectKey{Namespace: namespace.Name, Name: "runtime-ready"}
+	deployment := &appsv1.Deployment{}
+	for {
+		if err := k8sClient.Get(ctx, deploymentKey, deployment); err == nil {
+			break
+		} else if ctx.Err() != nil {
+			t.Fatalf("wait for Runtime Deployment: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	updateDeploymentReadyReplicas(t, ctx, deploymentKey, 2)
+	waitForRuntimeReadyReplicas(t, ctx, client.ObjectKeyFromObject(runtimeResource), 2)
+
+	updateDeploymentReadyReplicas(t, ctx, deploymentKey, 0)
+	waitForRuntimeReadyReplicas(t, ctx, client.ObjectKeyFromObject(runtimeResource), 0)
+}
+
+func updateDeploymentReadyReplicas(t *testing.T, ctx context.Context, key client.ObjectKey, readyReplicas int32) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		deployment := &appsv1.Deployment{}
+		if err := k8sClient.Get(ctx, key, deployment); err != nil {
+			return err
+		}
+		deployment.Status.ReadyReplicas = readyReplicas
+		return k8sClient.Status().Update(ctx, deployment)
+	}); err != nil {
+		t.Fatalf("update Deployment readyReplicas to %d: %v", readyReplicas, err)
+	}
+}
+
+func waitForRuntimeReadyReplicas(t *testing.T, ctx context.Context, key client.ObjectKey, want int32) {
+	t.Helper()
+	for {
+		runtimeResource := &v1alpha1.Runtime{}
+		if err := k8sClient.Get(ctx, key, runtimeResource); err == nil && runtimeResource.Status.ReadyReplicas == want {
+			return
+		} else if ctx.Err() != nil {
+			t.Fatalf("wait for Runtime readyReplicas=%d: %v", want, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

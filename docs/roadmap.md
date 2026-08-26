@@ -85,7 +85,7 @@ wiring from accumulating avoidable conflicts.
   or unavailable.
   Implementation TODO:
   - [x] define the [Runtime readiness visibility contract](design/runtime-readiness-visibility.md), including its eventual-consistency and scheduler boundaries;
-  - [ ] add controller integration coverage for ready-replica increases and decreases;
+  - [x] add controller integration coverage for ready-replica increases and decreases;
   - [ ] add `krt runtime list/get` output coverage for desired and observed replica counts;
   - [ ] add focused E2E coverage for ready and unavailable Runtime Pods, then mark this item complete.
 - [x] Scheduler framework: replace independent per-Run placement with a
