@@ -115,6 +115,11 @@ Common spec fields:
 The controller owns reserved Runtime Pod fields needed by kruntimes, including
 the injected `runtimed` container and control-plane labels/annotations.
 
+`status.readyReplicas` is the last observed `readyReplicas` count of the
+controller-owned Deployment. `krt runtime list` and `krt runtime get` show it
+beside the desired replica count. It is eventually consistent and is not a
+scheduling or per-Pod health guarantee; see [Runtime Readiness Visibility](design/runtime-readiness-visibility.md).
+
 Workspace examples:
 
 ```yaml

@@ -111,6 +111,11 @@ contract 工作。
 controller 拥有 kruntimes 所需的保留 Runtime Pod 字段，包括注入的 `runtimed` container
 以及 control-plane labels/annotations。
 
+`status.readyReplicas` 是 controller 所拥有 Deployment 的最后一次观察到的 `readyReplicas`
+count。`krt runtime list` 和 `krt runtime get` 会将它与 desired replica count 并列展示。
+它最终一致，不是 scheduling 或 per-Pod health guarantee；参见
+[Runtime 就绪状态可见性](design/runtime-readiness-visibility.md)。
+
 Workspace 示例：
 
 ```yaml
