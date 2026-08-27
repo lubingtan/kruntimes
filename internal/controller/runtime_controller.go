@@ -100,50 +100,52 @@ func (r *RuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled runtimed ServiceAccount", "serviceAccount", serviceAccount.Name)
-		return ctrl.Result{}, nil
 	}
 	if changed, err := r.reconcileRole(ctx, role); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled runtimed Role", "role", role.Name)
-		return ctrl.Result{}, nil
 	}
 	if changed, err := r.reconcileRoleBinding(ctx, roleBinding); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled runtimed RoleBinding", "roleBinding", roleBinding.Name)
-		return ctrl.Result{}, nil
 	}
 	if changed, err := r.reconcileService(ctx, &rt, service); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled Runtime Service", "service", service.Name)
-		return ctrl.Result{}, nil
 	}
 	if changed, err := r.reconcileDeployment(ctx, &rt, deploy); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled Deployment", "deployment", deploy.Name)
-		return ctrl.Result{}, nil
 	}
 	if changed, err := r.reconcileNetworkPolicy(ctx, &rt, networkPolicy); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
 		log.Info("Reconciled NetworkPolicy", "networkPolicy", networkPolicy.Name)
+	}
+
+	return r.reconcileRuntimeStatus(ctx, &rt, client.ObjectKeyFromObject(deploy))
+}
+
+// reconcileRuntimeStatus observes the Deployment after its desired spec has
+// been reconciled. Child-resource writes must not prevent Runtime status from
+// reflecting the most recently observed Deployment state.
+func (r *RuntimeReconciler) reconcileRuntimeStatus(ctx context.Context, rt *v1alpha1.Runtime, deploymentKey client.ObjectKey) (ctrl.Result, error) {
+	var existing appsv1.Deployment
+	if err := r.Get(ctx, deploymentKey, &existing); err != nil {
+		return ctrl.Result{}, fmt.Errorf("get deployment for status: %w", err)
+	}
+	if rt.Status.ReadyReplicas == existing.Status.ReadyReplicas {
 		return ctrl.Result{}, nil
 	}
 
-	// Propagate Deployment status back to Runtime.
-	var existing appsv1.Deployment
-	err := r.Get(ctx, types.NamespacedName{Name: deploy.Name, Namespace: deploy.Namespace}, &existing)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("get deployment for status: %w", err)
-	}
-	if rt.Status.ReadyReplicas != existing.Status.ReadyReplicas {
-		rt.Status.ReadyReplicas = existing.Status.ReadyReplicas
-		if err := r.Status().Update(ctx, &rt); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update runtime status: %w", err)
-		}
+	base := rt.DeepCopy()
+	rt.Status.ReadyReplicas = existing.Status.ReadyReplicas
+	if err := r.Status().Patch(ctx, rt, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("patch runtime status: %w", err)
 	}
 
 	return ctrl.Result{}, nil
@@ -204,10 +206,10 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 	}
 	maps.Copy(labels, selectorLabels)
 	annotations := maps.Clone(template.Annotations)
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
 	for key, value := range runtimepod.CapacityAnnotations(rt) {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
 		annotations[key] = value
 	}
 	runsCapacity := runtimepod.RunsCapacityFromRuntime(rt, 0)
@@ -322,6 +324,9 @@ func (r *RuntimeReconciler) buildDeployment(rt *v1alpha1.Runtime) *appsv1.Deploy
 	if len(r.GatewayCABundle) > 0 {
 		daemonContainer.Args = append(daemonContainer.Args, fmt.Sprintf("--gateway-ca-file=%s/%s", gatewayCAPath, gatewayCAFile))
 		daemonContainer.VolumeMounts = append(daemonContainer.VolumeMounts, corev1.VolumeMount{Name: gatewayCAVolume, MountPath: gatewayCAPath, ReadOnly: true})
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
 		annotations[gatewayCAAnnotation] = string(r.GatewayCABundle)
 	}
 	if r.SessionMaxQueueSize > 0 {
@@ -823,6 +828,8 @@ func (r *RuntimeReconciler) reconcileDeployment(
 	rt *v1alpha1.Runtime,
 	desired *appsv1.Deployment,
 ) (bool, error) {
+	defaultDeploymentForComparison(desired)
+
 	var existing appsv1.Deployment
 	if err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, &existing); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -849,6 +856,112 @@ func (r *RuntimeReconciler) reconcileDeployment(
 		return false, fmt.Errorf("update deployment: %w", err)
 	}
 	return true, nil
+}
+
+// defaultDeploymentForComparison applies the API-server defaults which are
+// omitted by the typed client scheme. Without them, the controller would write
+// the Deployment on every reconciliation and never reach Runtime status.
+func defaultDeploymentForComparison(deployment *appsv1.Deployment) {
+	if deployment.Spec.Strategy.Type == "" {
+		deployment.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
+	}
+	if deployment.Spec.Strategy.Type == appsv1.RollingUpdateDeploymentStrategyType && deployment.Spec.Strategy.RollingUpdate == nil {
+		maxUnavailable := intstr.FromString("25%")
+		maxSurge := intstr.FromString("25%")
+		deployment.Spec.Strategy.RollingUpdate = &appsv1.RollingUpdateDeployment{
+			MaxUnavailable: &maxUnavailable,
+			MaxSurge:       &maxSurge,
+		}
+	}
+	if deployment.Spec.RevisionHistoryLimit == nil {
+		value := int32(10)
+		deployment.Spec.RevisionHistoryLimit = &value
+	}
+	if deployment.Spec.ProgressDeadlineSeconds == nil {
+		value := int32(600)
+		deployment.Spec.ProgressDeadlineSeconds = &value
+	}
+
+	podSpec := &deployment.Spec.Template.Spec
+	if podSpec.RestartPolicy == "" {
+		podSpec.RestartPolicy = corev1.RestartPolicyAlways
+	}
+	if podSpec.TerminationGracePeriodSeconds == nil {
+		value := int64(30)
+		podSpec.TerminationGracePeriodSeconds = &value
+	}
+	if podSpec.DNSPolicy == "" {
+		podSpec.DNSPolicy = corev1.DNSClusterFirst
+	}
+	if podSpec.SchedulerName == "" {
+		podSpec.SchedulerName = corev1.DefaultSchedulerName
+	}
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	if podSpec.DeprecatedServiceAccount == "" {
+		podSpec.DeprecatedServiceAccount = podSpec.ServiceAccountName
+	}
+	for i := range podSpec.Volumes {
+		if downwardAPI := podSpec.Volumes[i].DownwardAPI; downwardAPI != nil && downwardAPI.DefaultMode == nil {
+			value := int32(420)
+			downwardAPI.DefaultMode = &value
+		}
+		if downwardAPI := podSpec.Volumes[i].DownwardAPI; downwardAPI != nil {
+			for j := range downwardAPI.Items {
+				if fieldRef := downwardAPI.Items[j].FieldRef; fieldRef != nil && fieldRef.APIVersion == "" {
+					fieldRef.APIVersion = "v1"
+				}
+			}
+		}
+	}
+	for i := range podSpec.Containers {
+		defaultContainerForComparison(&podSpec.Containers[i])
+	}
+	for i := range podSpec.InitContainers {
+		defaultContainerForComparison(&podSpec.InitContainers[i])
+	}
+}
+
+func defaultContainerForComparison(container *corev1.Container) {
+	if container.TerminationMessagePath == "" {
+		container.TerminationMessagePath = "/dev/termination-log"
+	}
+	if container.TerminationMessagePolicy == "" {
+		container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	}
+	if container.ImagePullPolicy == "" {
+		if strings.HasSuffix(container.Image, ":latest") || !strings.Contains(container.Image, ":") {
+			container.ImagePullPolicy = corev1.PullAlways
+		} else {
+			container.ImagePullPolicy = corev1.PullIfNotPresent
+		}
+	}
+	for _, probe := range []*corev1.Probe{container.LivenessProbe, container.ReadinessProbe, container.StartupProbe} {
+		if probe == nil {
+			continue
+		}
+		if probe.TimeoutSeconds == 0 {
+			probe.TimeoutSeconds = 1
+		}
+		if probe.PeriodSeconds == 0 {
+			probe.PeriodSeconds = 10
+		}
+		if probe.SuccessThreshold == 0 {
+			probe.SuccessThreshold = 1
+		}
+		if probe.FailureThreshold == 0 {
+			probe.FailureThreshold = 3
+		}
+		if probe.HTTPGet != nil && probe.HTTPGet.Scheme == "" {
+			probe.HTTPGet.Scheme = corev1.URISchemeHTTP
+		}
+	}
+	for i := range container.Env {
+		if fieldRef := container.Env[i].ValueFrom; fieldRef != nil && fieldRef.FieldRef != nil && fieldRef.FieldRef.APIVersion == "" {
+			fieldRef.FieldRef.APIVersion = "v1"
+		}
+	}
 }
 
 func (r *RuntimeReconciler) reconcileServiceAccount(
