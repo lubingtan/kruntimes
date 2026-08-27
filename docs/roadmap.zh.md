@@ -72,14 +72,14 @@ controller wiring 累积不必要的冲突。
 - [x] Benchmark correctness：诊断为什么 `latency.complete` 明显高于手动创建单个
   Run 的体感耗时，并明确 benchmark 测的是端到端 latency、调度 latency、
   watch/update latency，还是 runtime execution time。
-- [ ] Runtime readiness visibility：可靠地将 Deployment readiness reconcile 到
+- [x] Runtime readiness visibility：可靠地将 Deployment readiness reconcile 到
   `Runtime.status.readyReplicas`，通过 `krt runtime list/get` 展示，并为 Pod 变为 ready 或 unavailable 时的
   status update 增加 integration 和 E2E coverage。
   实现 TODO：
   - [x] 定义 [Runtime 就绪状态可见性 contract](design/runtime-readiness-visibility.md)，包括 eventual-consistency 和 scheduler boundary；
   - [x] 为 ready-replica 增加和减少加入 controller integration coverage；
-  - [ ] 为 `krt runtime list/get` 中 desired 与 observed replica count 加入 output coverage；
-  - [ ] 为 ready 和 unavailable Runtime Pod 加入 focused E2E coverage，然后将此项标记完成。
+  - [x] 为 `krt runtime list/get` 中 desired 与 observed replica count 加入 output coverage；
+  - [x] 为 ready 和 unavailable Runtime Pod 加入 focused E2E coverage。
 - [x] Scheduler framework：将独立的 per-Run placement 替换为 scheduler queue 和 Kubernetes-style 的
   单 Run scheduling cycles。在改变 scheduler behavior 前，review
   [Scheduler Framework](design/scheduler-framework.md) architecture。

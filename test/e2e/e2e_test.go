@@ -164,6 +164,53 @@ func ensureRuntimeWithRunsCapacity(t *testing.T, name, image string, port int32,
 	waitForRuntimePod(t, name, image, runtimedImage(), runsCapacity, "runtime pods")
 }
 
+func TestRuntimeReadyReplicasTracksRuntimedAvailability(t *testing.T) {
+	runtimeName := "bash-readiness"
+	ensureRuntime(t, runtimeName, bashRuntimeImage(), 9091)
+	// A fresh E2E installation may wait for controller leader election before
+	// creating the Deployment, so include that startup time in the initial wait.
+	waitForRuntimeReadyReplicas(t, runtimeName, 1, 90*time.Second)
+
+	podName := runtimePodName(t, runtimeName)
+	previousRestartCount := runtimedRestartCount(t, podName)
+	killRuntimed(t, podName)
+	waitForRuntimeReadyReplicas(t, runtimeName, 0, 45*time.Second)
+
+	waitForRuntimedRestart(t, podName, previousRestartCount)
+	waitForRuntimeReadyReplicas(t, runtimeName, 1, 60*time.Second)
+}
+
+func runtimePodName(t *testing.T, runtimeName string) string {
+	t.Helper()
+	var pods corev1.PodList
+	if err := k8sClient.List(context.Background(), &pods,
+		client.InNamespace(testNamespace),
+		client.MatchingLabels{"runtime": runtimeName, "app": "kruntimes-" + runtimeName},
+	); err != nil {
+		t.Fatalf("list Runtime Pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("Runtime %s Pods = %d, want 1", runtimeName, len(pods.Items))
+	}
+	return pods.Items[0].Name
+}
+
+func waitForRuntimeReadyReplicas(t *testing.T, runtimeName string, want int32, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	key := client.ObjectKey{Namespace: testNamespace, Name: runtimeName}
+	for {
+		runtimeResource := &v1alpha1.Runtime{}
+		if err := k8sClient.Get(ctx, key, runtimeResource); err == nil && runtimeResource.Status.ReadyReplicas == want {
+			return
+		} else if ctx.Err() != nil {
+			t.Fatalf("wait for Runtime %s readyReplicas=%d: %v", runtimeName, want, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
 func ensureFilesystemRuntime(t *testing.T, name, claimName string) {
 	t.Helper()
 	claim := &corev1.PersistentVolumeClaim{
