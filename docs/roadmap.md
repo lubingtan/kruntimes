@@ -79,10 +79,15 @@ wiring from accumulating avoidable conflicts.
   than a manually observed single Run, and clarify whether benchmarks measure
   end-to-end latency, scheduling latency, watch/update latency, or runtime
   execution time.
-- [ ] Runtime readiness visibility: reliably reconcile Deployment readiness
+- [x] Runtime readiness visibility: reliably reconcile Deployment readiness
   into `Runtime.status.readyReplicas`, show it through `krt runtime list/get`,
   and add integration and E2E coverage for status updates as Pods become ready
   or unavailable.
+  Implementation TODO:
+  - [x] define the [Runtime readiness visibility contract](design/runtime-readiness-visibility.md), including its eventual-consistency and scheduler boundaries;
+  - [x] add controller integration coverage for ready-replica increases and decreases;
+  - [x] add `krt runtime list/get` output coverage for desired and observed replica counts;
+  - [x] add focused E2E coverage for ready and unavailable Runtime Pods.
 - [x] Scheduler framework: replace independent per-Run placement with a
   scheduler queue and Kubernetes-style single-Run scheduling cycles. Review the
   [Scheduler Framework](design/scheduler-framework.md) architecture before

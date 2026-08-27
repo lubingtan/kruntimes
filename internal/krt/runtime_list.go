@@ -2,6 +2,7 @@ package krt
 
 import (
 	"fmt"
+	"io"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -39,28 +40,32 @@ func newRuntimeListCmd(getter genericclioptions.RESTClientGetter, scheme *runtim
 				return writeStructuredOutput(cmd.OutOrStdout(), output, &list)
 			}
 
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "NAME\tNAMESPACE\tIMAGE\tREPLICAS\tREADY\tPORT\tAGE")
-			for _, rt := range list.Items {
-				image := "<missing>"
-				if len(rt.Spec.Template.Spec.Containers) > 0 {
-					image = rt.Spec.Template.Spec.Containers[0].Image
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
-					rt.Name,
-					rt.Namespace,
-					image,
-					rt.Spec.Replicas,
-					rt.Status.ReadyReplicas,
-					rt.Spec.Port,
-					rt.CreationTimestamp.Format("2006-01-02 15:04:05"),
-				)
-			}
-			return w.Flush()
+			return writeRuntimeListTable(cmd.OutOrStdout(), &list)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false, "List across all namespaces")
 	addOutputFlag(cmd, &output)
 	return cmd
+}
+
+func writeRuntimeListTable(out io.Writer, list *v1alpha1.RuntimeList) error {
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "NAME\tNAMESPACE\tIMAGE\tREPLICAS\tREADY\tPORT\tAGE")
+	for _, rt := range list.Items {
+		image := "<missing>"
+		if len(rt.Spec.Template.Spec.Containers) > 0 {
+			image = rt.Spec.Template.Spec.Containers[0].Image
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
+			rt.Name,
+			rt.Namespace,
+			image,
+			rt.Spec.Replicas,
+			rt.Status.ReadyReplicas,
+			rt.Spec.Port,
+			rt.CreationTimestamp.Format("2006-01-02 15:04:05"),
+		)
+	}
+	return w.Flush()
 }

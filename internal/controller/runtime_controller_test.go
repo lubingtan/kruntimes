@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -193,6 +195,54 @@ func TestReconcileServicePreservesClusterIP(t *testing.T) {
 	}
 	if existing.Spec.ClusterIP != "10.0.0.42" || existing.Spec.Ports[0].Port != 9443 {
 		t.Fatalf("service = %#v, want preserved ClusterIP and updated port", existing.Spec)
+	}
+}
+
+func TestReconcileUpdatesRuntimeStatusWhenDeploymentSpecChanges(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, addToScheme := range []func(*runtime.Scheme) error{
+		v1alpha1.AddToScheme,
+		appsv1.AddToScheme,
+		corev1.AddToScheme,
+		rbacv1.AddToScheme,
+		networkingv1.AddToScheme,
+	} {
+		if err := addToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtimeResource := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "default", UID: "runtime-uid"},
+		Spec:       v1alpha1.RuntimeSpec{Template: runtimePodTemplate("bash-runtime:latest")},
+	}
+	reconciler := &RuntimeReconciler{Scheme: scheme}
+	deployment := reconciler.buildDeployment(runtimeResource)
+	defaultDeploymentForComparison(deployment)
+	replicas := int32(2)
+	deployment.Spec.Replicas = &replicas // Deliberately differs from the Runtime desired spec.
+	deployment.Status.ReadyReplicas = 1
+
+	reconciler.Client = fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(runtimeResource).
+		WithObjects(runtimeResource, deployment).
+		Build()
+	if _, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(runtimeResource)}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var updatedRuntime v1alpha1.Runtime
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(runtimeResource), &updatedRuntime); err != nil {
+		t.Fatal(err)
+	}
+	if updatedRuntime.Status.ReadyReplicas != 1 {
+		t.Fatalf("runtime ready replicas = %d, want 1", updatedRuntime.Status.ReadyReplicas)
+	}
+	var updatedDeployment appsv1.Deployment
+	if err := reconciler.Get(t.Context(), client.ObjectKeyFromObject(deployment), &updatedDeployment); err != nil {
+		t.Fatal(err)
+	}
+	if got := *updatedDeployment.Spec.Replicas; got != 1 {
+		t.Fatalf("deployment replicas = %d, want reconciled desired value 1", got)
 	}
 }
 
@@ -782,6 +832,32 @@ func TestBuildDeploymentOmitsUnsetS3ArtifactStoreOptions(t *testing.T) {
 	}
 	if len(daemon.EnvFrom) != 0 {
 		t.Fatalf("daemon envFrom = %v, want none", daemon.EnvFrom)
+	}
+}
+
+func TestBuildDeploymentAddsGatewayCABundleWithoutTemplateAnnotations(t *testing.T) {
+	rt := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "bash", Namespace: "default"},
+		Spec: v1alpha1.RuntimeSpec{
+			Template: runtimePodTemplate("bash-runtime:latest"),
+		},
+	}
+
+	deploy := (&RuntimeReconciler{GatewayCABundle: []byte("test-ca")}).buildDeployment(rt)
+	if got := deploy.Spec.Template.Annotations[gatewayCAAnnotation]; got != "test-ca" {
+		t.Fatalf("gateway CA annotation = %q, want test-ca", got)
+	}
+	if !slices.ContainsFunc(deploy.Spec.Template.Spec.Volumes, func(volume corev1.Volume) bool {
+		return volume.Name == gatewayCAVolume && volume.DownwardAPI != nil
+	}) {
+		t.Fatalf("volumes = %#v, want gateway CA downward API volume", deploy.Spec.Template.Spec.Volumes)
+	}
+	defaultDeploymentForComparison(deploy)
+	if got := deploy.Spec.Template.Spec.Volumes[1].DownwardAPI.DefaultMode; got == nil || *got != 420 {
+		t.Fatalf("gateway CA default mode = %v, want 420", got)
+	}
+	if got := deploy.Spec.Template.Spec.Volumes[1].DownwardAPI.Items[0].FieldRef.APIVersion; got != "v1" {
+		t.Fatalf("gateway CA fieldRef apiVersion = %q, want v1", got)
 	}
 }
 
