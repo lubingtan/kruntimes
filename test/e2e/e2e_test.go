@@ -805,9 +805,82 @@ func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
 	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\"}\n" {
 		t.Fatalf("Function invocation = %#v, want successful JSON response", invocation)
 	}
+	secondResponse := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"again"}`), http.StatusOK)
+	if err := json.Unmarshal(secondResponse, &invocation); err != nil {
+		t.Fatalf("decode repeated Function invocation response: %v", err)
+	}
+	if invocation.InvocationID == "" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"again\"}\n" {
+		t.Fatalf("repeated Function invocation = %#v, want successful JSON response", invocation)
+	}
 
 	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, "", []byte(`{"value":"unauthenticated"}`), http.StatusUnauthorized)
 	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, sessionGatewayTokenWithoutRunAccess(t), []byte(`{"value":"unauthorized"}`), http.StatusForbidden)
+}
+
+func TestFunctionRunExpiresWhenIdle(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-idle-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	idleTimeout := int32(1)
+	inline := `def handler(event):
+    return event
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-idle-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler", IdleTimeoutSeconds: &idleTimeout}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create idle Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	waitForRunPhase(t, run, 15*time.Second, v1alpha1.RunTimeout)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || condition.Reason != runretry.ReasonTimeout {
+		t.Fatalf("Completed condition = %#v, want Timeout", condition)
+	}
+}
+
+func TestFunctionRunRecoversInvocationAfterRuntimedRestart(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-recovery-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	inline := `def handler(event):
+    return {"value": event["value"]}
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-recovery-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create recovering Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"before"}`), http.StatusOK)
+	previousRestartCount := runtimedRestartCount(t, run.Status.AssignedPod)
+	killRuntimed(t, run.Status.AssignedPod)
+	waitForRuntimedRestart(t, run.Status.AssignedPod, previousRestartCount)
+
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"after"}`), http.StatusOK)
+	var invocation struct {
+		Output []byte `json:"output"`
+	}
+	if err := json.Unmarshal(response, &invocation); err != nil {
+		t.Fatalf("decode recovered Function invocation response: %v", err)
+	}
+	if string(invocation.Output) != "{\"value\": \"after\"}\n" {
+		t.Fatalf("recovered Function invocation = %#v, want post-restart output", invocation)
+	}
 }
 
 func TestSessionGatewayServesTLS(t *testing.T) {
