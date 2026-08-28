@@ -202,10 +202,11 @@ gateway 初期接收 JSON，并设置 `content_type=application/json`。本地�
   attempt 返回 `FailedPrecondition`。
 - 永久初始化失败通过 `FunctionStatus` 的 `FAILED` 和有界 `fatal_error` 暴露。
 
-`FunctionStatus` 只读取 Runtime Server 本地状态。`last_activity_unix_nano` 在尚无已完成或
-in-flight 工作时为零。`fatal_error` 是有界诊断文本而不是日志。`NotFound` 表示没有该 Run UID
-的 registration；`FailedPrecondition` 表示 registration ID 已过期、正在 drain 或未就绪。
-runtimed 以有界频率轮询它用于健康检查和 idle timeout，绝不把每次 activity 更新写回 Kubernetes。
+`FunctionStatus` 只读取 Runtime Server 本地状态。`last_activity_unix_nano` 在 registration
+变为 ready 时初始化，并在 invocation 开始或完成时更新。这样从未 invoke 的 registration 也会受其
+idle timeout 约束。`fatal_error` 是有界诊断文本而不是日志。`NotFound` 表示没有该 Run UID 的
+registration；`FailedPrecondition` 表示 registration ID 已过期、正在 drain 或未就绪。runtimed
+以有界频率轮询它用于健康检查和 idle timeout，绝不把每次 activity 更新写回 Kubernetes。
 
 如果被分配的 Runtime Pod 没有注册 `FunctionRuntime`，runtimed 会收到 `Unimplemented`。这是永久
 配置失败：Run 不能回退到一次性执行，而是依照不兼容 Runtime 的正常 terminal 或 retry policy 处理。

@@ -137,6 +137,13 @@ func TestFunctionRuntimeRegisterInvokeAndUnregister(t *testing.T) {
 	defer cleanup()
 	functionDir := writeFunctionHandler(t, workDir, "one", "handle() { printf '%s' \"$1\"; }\n")
 	registration := registerFunction(t, client, functionDir, "run-uid-1", 1, "sha256:first")
+	initialStatus, err := client.FunctionStatus(context.Background(), &pb.FunctionStatusRequest{Registration: registration})
+	if err != nil {
+		t.Fatalf("FunctionStatus after registration: %v", err)
+	}
+	if initialStatus.LastActivityUnixNano <= 0 {
+		t.Fatalf("initial last activity = %d, want registration timestamp", initialStatus.LastActivityUnixNano)
+	}
 
 	resp, err := client.InvokeFunction(context.Background(), &pb.InvokeFunctionRequest{
 		Registration: registration,

@@ -41,7 +41,9 @@ class FunctionEntry:
         self.env = dict(env)
         self._state = runtime_pb2.FUNCTION_REGISTRATION_STATE_READY
         self._invocation = None
-        self._last_activity_unix_nano = 0
+        # Registration begins the idle interval. A Function Run that is never
+        # invoked must still expire rather than remaining reserved forever.
+        self._last_activity_unix_nano = time.time_ns()
 
     def registration_action(self, attempt, digest):
         with self._lock:

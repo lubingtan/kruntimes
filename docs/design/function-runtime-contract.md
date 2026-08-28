@@ -218,11 +218,13 @@ timeout, digest, and one-based `registration_attempt` before accepting work.
   `fatal_error` through `FunctionStatus`.
 
 `FunctionStatus` only reads local Runtime Server state. `last_activity_unix_nano`
-is zero until there is completed or in-flight work to report. `fatal_error` is
-bounded diagnostic text, not logs. `NotFound` means no registration has this
-Run UID; `FailedPrecondition` means its registration ID is stale, draining, or
-unready. runtimed polls it at a bounded cadence for health and idle timeout,
-never writing each activity update to Kubernetes.
+is initialized when the registration becomes ready, then updated when an
+invocation starts or completes. This makes a registration with no invocations
+subject to its idle timeout. `fatal_error` is bounded diagnostic text, not logs.
+`NotFound` means no registration has this Run UID; `FailedPrecondition` means
+its registration ID is stale, draining, or unready. runtimed polls it at a
+bounded cadence for health and idle timeout, never writing each activity update
+to Kubernetes.
 
 If the assigned Runtime Pod does not register `FunctionRuntime`, runtimed
 receives `Unimplemented`. This is a permanent configuration failure: the Run
