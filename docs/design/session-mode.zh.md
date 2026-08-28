@@ -81,6 +81,19 @@ activity 后过期。Session 继续使用普通 Run 的 cancellation、deletion�
 `RunTimeout`。重新打开或再次提交同一个 Run 不能恢复它；需要新 sandbox 的 client 必须创建新的
 Session Run。显式 suspend/resume 是独立的 v1 design item，不能从 timeout recovery 隐式推导。
 
+## 删除清理
+
+在注册 Session 或 Function 前，runtimed 会增加共享的
+`kruntimes.io/registration-cleanup` finalizer。删除不同于正常 terminal phase：Kubernetes
+可以在 Run 处于 `Running`、`Ready` 或 `Finalizing` 时删除它，status update 不是 deletion
+protocol。finalizer 会保留 object，直到其 owning runtimed 已停止新的 data-plane work、幂等调用
+`CloseSession` 或 `UnregisterFunction`、释放 local capacity，并只删除 Run-local state。只有清理
+成功后才移除 finalizer；transient close error 会保留 finalizer 并 requeue reconciliation。
+
+finalizer 不会删除被引用的 PersistentWorkspace 或 ArtifactStore data；这些 resources 保留各自的
+lifecycle owner。runtimed restart 后，owner 会先恢复幂等的 local registration，再关闭它；不能仅因
+in-memory handle 丢失就静默移除 finalizer。
+
 ## Completion 与 Artifact Export
 
 cancellation 与成功完成 sandbox 使用同一个单调的 `spec.termination` request，但 mode 不同。
