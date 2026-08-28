@@ -39,6 +39,8 @@ type activeRun struct {
 	functionRegistrationMu sync.Mutex
 	functionRegistration   *functionRegistrationState
 	functionRegistering    bool
+	functionCloseMu        sync.Mutex
+	functionClosed         atomic.Bool
 }
 
 type functionRegistrationState struct {

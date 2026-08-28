@@ -35,7 +35,7 @@ func (c *Controller) reconcileRunningFunction(ctx context.Context, run *v1alpha1
 	ar := value.(*activeRun)
 	ar.run = run
 	if run.Spec.HasImmediateTermination() {
-		return c.applyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+		return c.closeFunctionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
 	condition := meta.FindStatusCondition(run.Status.Conditions, runstatus.ConditionRunning)
 	if condition != nil && condition.Status == metav1.ConditionFalse {
@@ -56,6 +56,9 @@ func (c *Controller) reconcileReadyFunction(ctx context.Context, run *v1alpha1.R
 	}
 	ar := value.(*activeRun)
 	ar.run = run
+	if run.Spec.HasImmediateTermination() {
+		return c.closeFunctionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
 	return c.reconcileFunctionRegistration(ctx, ar)
 }
 
@@ -182,4 +185,49 @@ func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun) (ctr
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+}
+
+func (c *Controller) closeFunctionAndApplyTerminal(ctx context.Context, ar *activeRun, phase v1alpha1.RunPhase, reason, message string) (ctrl.Result, error) {
+	if err := c.ensureActiveFunctionClosed(ctx, ar); err != nil {
+		c.Log.Error(err, "failed to unregister Function before terminal transition; retrying", "run", client.ObjectKeyFromObject(ar.run))
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	return c.applyTerminal(ctx, ar, phase, reason, message)
+}
+
+func (c *Controller) ensureActiveFunctionClosed(ctx context.Context, ar *activeRun) error {
+	if ar == nil || ar.run == nil {
+		return nil
+	}
+	ar.functionCloseMu.Lock()
+	defer ar.functionCloseMu.Unlock()
+	if ar.functionClosed.Load() {
+		return nil
+	}
+	registration := ar.functionRegistrationRef()
+	if registration == nil {
+		if ar.functionRegistrationInFlight() {
+			return fmt.Errorf("function registration is still in progress")
+		}
+		if err := c.prepareFunction(ctx, ar); err != nil {
+			return fmt.Errorf("prepare function for cleanup: %w", err)
+		}
+		var err error
+		registration, err = c.registerFunction(ctx, ar)
+		if err != nil {
+			return fmt.Errorf("recover function registration for cleanup: %w", err)
+		}
+		ar.finishFunctionRegistration(registration, nil)
+	}
+	if c.functionCli == nil {
+		return fmt.Errorf("FunctionRuntime client is not configured")
+	}
+	closeCtx, cancel := context.WithTimeout(ctx, functionRegistrationTimeout)
+	defer cancel()
+	_, err := c.functionCli.UnregisterFunction(closeCtx, &pb.UnregisterFunctionRequest{Registration: registration, CancelInFlight: true})
+	if err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("unregister Runtime Server function: %w", err)
+	}
+	ar.functionClosed.Store(true)
+	return nil
 }

@@ -205,21 +205,23 @@ dispatch; that separate ambiguity is defined by the invoke contract below.
 
 ## Cleanup and Finalization
 
-Before registering a function, runtimed adds the
-`kruntimes.io/function-cleanup` finalizer. A deleting function Run is reconciled
-even though normal execution creation has stopped:
+Before registering a long-lived Run, runtimed adds the shared
+`kruntimes.io/registration-cleanup` finalizer. Function and Session Runs use
+the same Kubernetes deletion protocol because both hold opaque, Pod-local
+Runtime Server state that must not outlive their Run object. A deleting
+function Run is reconciled even though normal execution creation has stopped:
 
 1. stop accepting new invokes;
 2. wait for or cancel bounded in-flight invokes;
 3. call `UnregisterFunction` idempotently;
 4. remove function-local workspace and retained invocation state;
 5. release the active capacity entry;
-6. remove the finalizer.
+6. remove the shared finalizer.
 
 If the assigned Pod no longer exists, the stale-recovery controller may remove
 the finalizer after confirming that the Pod-local registration cannot still be
 serving. PersistentWorkspace and ArtifactStore cleanup remain owned by their
-existing controllers and policies; the function finalizer must not delete
+existing controllers and policies; the registration-cleanup finalizer must not delete
 shared persistent data implicitly.
 
 Cancellation keeps the Run object and records a terminal status. Deletion is a

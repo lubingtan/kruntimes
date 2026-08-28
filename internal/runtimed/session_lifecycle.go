@@ -320,12 +320,6 @@ func (c *Controller) completeFinalizingSession(ctx context.Context, ar *activeRu
 	return c.applyTerminal(ctx, ar, v1alpha1.RunSucceeded, "SessionCompleted", "session finalized")
 }
 
-func (c *Controller) closeActiveSession(ctx context.Context, ar *activeRun) {
-	if err := c.ensureActiveSessionClosed(ctx, ar); err != nil {
-		c.Log.Error(err, "failed to close Runtime Server session", "run", client.ObjectKeyFromObject(ar.run))
-	}
-}
-
 // ensureActiveSessionClosed closes the Runtime Server session exactly once.
 // A Finalizing Run must observe a successful close before its artifact
 // directory becomes immutable and safe to export.
