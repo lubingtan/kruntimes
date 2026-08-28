@@ -1,0 +1,169 @@
+package runtimed
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
+	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	runretry "github.com/kruntimes/kruntimes/internal/retry"
+	"github.com/kruntimes/kruntimes/internal/runstatus"
+)
+
+const functionRegistrationTimeout = 10 * time.Second
+
+func (c *Controller) reconcileRunningFunction(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	value, exists := c.activeRuns.Load(string(run.UID))
+	if !exists {
+		return ctrl.Result{}, nil
+	}
+	ar := value.(*activeRun)
+	ar.run = run
+	if run.Spec.HasImmediateTermination() {
+		return c.applyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
+	condition := meta.FindStatusCondition(run.Status.Conditions, runstatus.ConditionRunning)
+	if condition != nil && condition.Status == metav1.ConditionFalse {
+		return c.reconcileRetryBackoff(ctx, ar)
+	}
+	return c.reconcileFunctionRegistration(ctx, ar)
+}
+
+func (c *Controller) reconcileReadyFunction(_ context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	if _, exists := c.activeRuns.Load(string(run.UID)); !exists {
+		return ctrl.Result{}, nil
+	}
+	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(c.buildActiveRun(run))}, nil
+}
+
+func (c *Controller) startFunctionRegistrationAsync(ar *activeRun) {
+	if ar == nil || ar.run == nil || !ar.beginFunctionRegistration() {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		if err := c.prepareFunction(ctx, ar); err != nil {
+			c.finishFunctionRegistration(ar, nil, runretry.ReasonPrepareSource, fmt.Errorf("prepare function: %w", err))
+			return
+		}
+		registration, err := c.registerFunction(ctx, ar)
+		if err != nil {
+			c.finishFunctionRegistration(ar, nil, runretry.ReasonRuntimeExecute, fmt.Errorf("register function: %w", err))
+			return
+		}
+		c.finishFunctionRegistration(ar, registration, "", nil)
+	}()
+}
+
+func (c *Controller) finishFunctionRegistration(ar *activeRun, registration *pb.FunctionRegistration, reason string, err error) {
+	var failure *functionRegistrationFailure
+	if err != nil {
+		failure = &functionRegistrationFailure{reason: reason, message: err.Error()}
+		c.Log.Error(err, "local Function registration failed", "run", client.ObjectKeyFromObject(ar.run))
+		c.recordEvent(ar.run, corev1.EventTypeWarning, "FunctionRegistrationFailed", "%s", err)
+	}
+	ar.finishFunctionRegistration(registration, failure)
+	c.enqueueRun(ar.run)
+}
+
+func (c *Controller) prepareFunction(ctx context.Context, ar *activeRun) error {
+	if ar == nil || ar.run == nil {
+		return fmt.Errorf("active Run is required")
+	}
+	if ar.prepared.Load() {
+		return nil
+	}
+	if err := prepareSource(ar); err != nil {
+		return err
+	}
+	if err := c.stageArtifactInputs(ctx, ar); err != nil {
+		return err
+	}
+	ar.prepared.Store(true)
+	return nil
+}
+
+func (c *Controller) registerFunction(ctx context.Context, ar *activeRun) (*pb.FunctionRegistration, error) {
+	if c.functionCli == nil {
+		return nil, fmt.Errorf("FunctionRuntime client is not configured")
+	}
+	request, err := functionRegistrationRequest(ar.run, ar.workDir)
+	if err != nil {
+		return nil, err
+	}
+	registrationCtx, cancel := context.WithTimeout(ctx, functionRegistrationTimeout)
+	defer cancel()
+	response, err := c.functionCli.RegisterFunction(registrationCtx, request, grpc.WaitForReady(true))
+	if err != nil {
+		return nil, err
+	}
+	if response.GetRegistration() == nil || response.GetRegistration().GetRunUid() != string(ar.run.UID) || response.GetRegistration().GetRegistrationId() == "" {
+		return nil, fmt.Errorf("Runtime Server returned invalid function registration")
+	}
+	return response.GetRegistration(), nil
+}
+
+func (c *Controller) reconcileFunctionRegistration(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
+	if ar == nil || ar.run == nil {
+		return ctrl.Result{}, fmt.Errorf("active Run is required")
+	}
+	if c.functionCli == nil {
+		return ctrl.Result{}, fmt.Errorf("FunctionRuntime client is not configured")
+	}
+	registration := ar.functionRegistrationRef()
+	if registration == nil {
+		if failure := ar.consumeFunctionRegistrationFailure(); failure != nil {
+			return c.applyFailure(ctx, ar, failure.reason, failure.message)
+		}
+		if !ar.functionRegistrationInFlight() {
+			c.startFunctionRegistrationAsync(ar)
+		}
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, functionRegistrationTimeout)
+	defer cancel()
+	response, err := c.functionCli.FunctionStatus(statusCtx, &pb.FunctionStatusRequest{Registration: registration})
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, "function registration not found")
+		}
+		return ctrl.Result{}, fmt.Errorf("get FunctionRuntime registration status: %w", err)
+	}
+	if response.GetRegistration() == nil || response.GetRegistration().GetRunUid() != string(ar.run.UID) || response.GetRegistration().GetRegistrationId() != registration.GetRegistrationId() {
+		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, "Runtime Server returned mismatched function registration")
+	}
+	switch response.GetState() {
+	case pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY:
+		return c.applyFunctionReady(ctx, ar)
+	case pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_REGISTERING:
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	case pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_FAILED:
+		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, boundedStatusMessage(response.GetFatalError()))
+	default:
+		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, fmt.Sprintf("Runtime Server function registration is %s", response.GetState()))
+	}
+}
+
+func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
+	run := ar.run
+	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
+		return ctrl.Result{}, nil
+	}
+	run.Status.Phase = v1alpha1.RunReady
+	run.Status.Message = "function registered"
+	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{Type: runstatus.ConditionReady, Status: metav1.ConditionTrue, Reason: "FunctionRegistered", Message: "function is ready for invocation", LastTransitionTime: metav1.Now()})
+	if err := c.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+}

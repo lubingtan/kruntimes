@@ -1293,6 +1293,90 @@ func TestSessionRegistrationAsyncDoesNotUpdateRunStatus(t *testing.T) {
 	}
 }
 
+func TestFunctionRunBecomesReadyFromReconciledRuntimeStatus(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration: registration,
+		State:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileFunctionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileFunctionRegistration: %v", err)
+	}
+	if functionClient.registerRequest != nil {
+		t.Fatal("RegisterFunction was called although the Runtime Server was already ready")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunReady {
+		t.Fatalf("phase = %s, want Ready", updated.Status.Phase)
+	}
+	if condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionReady); condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "FunctionRegistered" {
+		t.Fatalf("Ready condition = %#v, want FunctionRegistered true", condition)
+	}
+}
+
+func TestFunctionRegistrationAsyncDoesNotUpdateRunStatus(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{registerCalled: make(chan struct{})}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient, rlegCh: make(chan event.GenericEvent, 1)}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileFunctionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileFunctionRegistration: %v", err)
+	}
+	select {
+	case <-functionClient.registerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("RegisterFunction was not called")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunRunning {
+		t.Fatalf("phase = %s, want Running before a later reconcile observes Ready", updated.Status.Phase)
+	}
+	select {
+	case <-c.rlegCh:
+	case <-time.After(time.Second):
+		t.Fatal("registration completion did not enqueue the Run")
+	}
+}
+
+func functionLifecycleTestRun() *v1alpha1.Run {
+	inline := "def invoke(event):\n    return event\n"
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "function", Namespace: "default", UID: "function-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "python",
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "handler.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "handler.invoke"}},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning, AssignedPod: "runtime-pod", AssignedPodUID: "runtime-pod-uid", StartTime: &metav1.Time{Time: time.Now()}},
+	}
+}
+
 func TestApplySessionReadyUsesCachedRun(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -2214,6 +2298,36 @@ type fakeSessionRuntimeClient struct {
 	closeRequests   []*pb.CloseSessionRequest
 	closeErr        error
 	registerCalled  chan struct{}
+}
+
+type fakeFunctionRuntimeClient struct {
+	pb.FunctionRuntimeClient
+	registerRequest *pb.RegisterFunctionRequest
+	registerErr     error
+	status          *pb.FunctionStatusResponse
+	statusErr       error
+	registerCalled  chan struct{}
+}
+
+func (f *fakeFunctionRuntimeClient) RegisterFunction(_ context.Context, request *pb.RegisterFunctionRequest, _ ...grpc.CallOption) (*pb.RegisterFunctionResponse, error) {
+	f.registerRequest = request
+	if f.registerCalled != nil {
+		close(f.registerCalled)
+	}
+	if f.registerErr != nil {
+		return nil, f.registerErr
+	}
+	return &pb.RegisterFunctionResponse{Registration: &pb.FunctionRegistration{RunUid: request.RunUid, RegistrationId: "registration-1"}, State: pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY}, nil
+}
+
+func (f *fakeFunctionRuntimeClient) FunctionStatus(context.Context, *pb.FunctionStatusRequest, ...grpc.CallOption) (*pb.FunctionStatusResponse, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.status != nil {
+		return f.status, nil
+	}
+	return &pb.FunctionStatusResponse{State: pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY}, nil
 }
 
 func (f *fakeSessionRuntimeClient) RegisterSession(_ context.Context, request *pb.RegisterSessionRequest, _ ...grpc.CallOption) (*pb.SessionStatus, error) {

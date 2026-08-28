@@ -124,6 +124,7 @@ type Controller struct {
 
 	runtimeCli        pb.RuntimeClient
 	sessionCli        pb.SessionRuntimeClient
+	functionCli       pb.FunctionRuntimeClient
 	SessionOperations *SessionOperationQueue
 	rleg              rlegpkg.RunLifecycleEventGenerator
 	Recorder          record.EventRecorder
@@ -154,6 +155,7 @@ func (c *Controller) Start(ctx context.Context) error {
 	}
 	c.runtimeCli = pb.NewRuntimeClient(conn)
 	c.sessionCli = pb.NewSessionRuntimeClient(conn)
+	c.functionCli = pb.NewFunctionRuntimeClient(conn)
 	go func() { <-ctx.Done(); conn.Close() }()
 
 	c.rleg = rlegpkg.NewGenericRLEG(&statusAdapter{cli: c.runtimeCli}, rlegpkg.DefaultRelistInterval)
@@ -286,7 +288,7 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	klog.Infof("Claimed run %s", run.Name)
 	c.recordActiveRuns(run.Spec.Runtime)
 
-	if run.Spec.Mode.Session != nil {
+	if run.Spec.Mode.Session != nil || run.Spec.Mode.Function != nil {
 		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	}
 	if err := prepareSource(ar); err != nil {
@@ -424,6 +426,9 @@ func (c *Controller) reconcileRunning(ctx context.Context, run *v1alpha1.Run) (c
 	if run.Spec.Mode.Session != nil {
 		return c.reconcileRunningSession(ctx, run)
 	}
+	if run.Spec.Mode.Function != nil {
+		return c.reconcileRunningFunction(ctx, run)
+	}
 	uid := string(run.UID)
 	val, exists := c.activeRuns.Load(uid)
 	if !exists {
@@ -471,9 +476,16 @@ func (c *Controller) reconcileRunningSession(ctx context.Context, run *v1alpha1.
 // reconcileReady handles the long-lived Session Run reservation. Task Runs
 // never enter Ready.
 func (c *Controller) reconcileReady(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
-	if run.Spec.Mode.Session == nil {
-		return ctrl.Result{}, nil
+	if run.Spec.Mode.Session != nil {
+		return c.reconcileReadySession(ctx, run)
 	}
+	if run.Spec.Mode.Function != nil {
+		return c.reconcileReadyFunction(ctx, run)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (c *Controller) reconcileReadySession(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
 	uid := string(run.UID)
 	value, exists := c.activeRuns.Load(uid)
 	if !exists {
