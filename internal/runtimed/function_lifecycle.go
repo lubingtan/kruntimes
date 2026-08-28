@@ -25,7 +25,12 @@ const functionRegistrationTimeout = 10 * time.Second
 func (c *Controller) reconcileRunningFunction(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
 	value, exists := c.activeRuns.Load(string(run.UID))
 	if !exists {
-		return ctrl.Result{}, nil
+		ar := c.buildActiveRun(run)
+		if !c.tryClaimActiveRun(ar) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		c.recordActiveRuns(run.Spec.Runtime)
+		return c.reconcileFunctionRegistration(ctx, ar)
 	}
 	ar := value.(*activeRun)
 	ar.run = run
@@ -39,11 +44,19 @@ func (c *Controller) reconcileRunningFunction(ctx context.Context, run *v1alpha1
 	return c.reconcileFunctionRegistration(ctx, ar)
 }
 
-func (c *Controller) reconcileReadyFunction(_ context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
-	if _, exists := c.activeRuns.Load(string(run.UID)); !exists {
-		return ctrl.Result{}, nil
+func (c *Controller) reconcileReadyFunction(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
+	value, exists := c.activeRuns.Load(string(run.UID))
+	if !exists {
+		ar := c.buildActiveRun(run)
+		if !c.tryClaimActiveRun(ar) {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		c.recordActiveRuns(run.Spec.Runtime)
+		return c.reconcileFunctionRegistration(ctx, ar)
 	}
-	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(c.buildActiveRun(run))}, nil
+	ar := value.(*activeRun)
+	ar.run = run
+	return c.reconcileFunctionRegistration(ctx, ar)
 }
 
 func (c *Controller) startFunctionRegistrationAsync(ar *activeRun) {
@@ -156,8 +169,11 @@ func (c *Controller) reconcileFunctionRegistration(ctx context.Context, ar *acti
 
 func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
 	run := ar.run
-	if run.Status.Phase != v1alpha1.RunRunning || run.Status.AssignedPod != c.PodName {
+	if (run.Status.Phase != v1alpha1.RunRunning && run.Status.Phase != v1alpha1.RunReady) || run.Status.AssignedPod != c.PodName {
 		return ctrl.Result{}, nil
+	}
+	if run.Status.Phase == v1alpha1.RunReady {
+		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	}
 	run.Status.Phase = v1alpha1.RunReady
 	run.Status.Message = "function registered"

@@ -1364,6 +1364,34 @@ func TestFunctionRegistrationAsyncDoesNotUpdateRunStatus(t *testing.T) {
 	}
 }
 
+func TestReadyFunctionRecoversRegistrationAfterRuntimedRestart(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Status.Phase = v1alpha1.RunReady
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{registerCalled: make(chan struct{})}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient, rlegCh: make(chan event.GenericEvent, 1)}
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	select {
+	case <-functionClient.registerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("RegisterFunction was not called to recover the Ready Run")
+	}
+	if functionClient.registerRequest == nil || functionClient.registerRequest.RegistrationAttempt != 1 {
+		t.Fatalf("recovery registration request = %#v, want initial attempt", functionClient.registerRequest)
+	}
+	if c.activeRunCount() != 1 {
+		t.Fatalf("activeRunCount = %d, want 1 after recovery", c.activeRunCount())
+	}
+}
+
 func functionLifecycleTestRun() *v1alpha1.Run {
 	inline := "def invoke(event):\n    return event\n"
 	return &v1alpha1.Run{
