@@ -767,6 +767,49 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
 }
 
+func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-gateway-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+
+	inline := `def handler(event):
+    return {"status": "ok", "value": event["value"]}
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-gateway-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || len(run.Status.Endpoint.CABundle) == 0 {
+		t.Fatalf("Function Run endpoint = %#v, want HTTPS gateway endpoint with a CA bundle", run.Status.Endpoint)
+	}
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"gateway"}`), http.StatusOK)
+	var invocation struct {
+		InvocationID string `json:"invocationId"`
+		Output       []byte `json:"output"`
+		ContentType  string `json:"contentType"`
+	}
+	if err := json.Unmarshal(response, &invocation); err != nil {
+		t.Fatalf("decode Function invocation response: %v", err)
+	}
+	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\"}\n" {
+		t.Fatalf("Function invocation = %#v, want successful JSON response", invocation)
+	}
+
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, "", []byte(`{"value":"unauthenticated"}`), http.StatusUnauthorized)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, sessionGatewayTokenWithoutRunAccess(t), []byte(`{"value":"unauthorized"}`), http.StatusForbidden)
+}
+
 func TestSessionGatewayServesTLS(t *testing.T) {
 	runtimeName := fmt.Sprintf("session-gateway-tls-%d", time.Now().UnixNano())
 	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)

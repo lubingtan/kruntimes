@@ -3,6 +3,8 @@ package runtimed
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -21,6 +23,27 @@ import (
 )
 
 const functionRegistrationTimeout = 10 * time.Second
+
+func (c *Controller) functionEndpoint(run *v1alpha1.Run) *v1alpha1.RunEndpoint {
+	if run == nil || c.GatewayURL == "" {
+		return nil
+	}
+	protocol := v1alpha1.RunEndpointProtocolHTTP
+	if strings.HasPrefix(strings.ToLower(c.GatewayURL), "https://") {
+		protocol = v1alpha1.RunEndpointProtocolHTTPS
+	}
+	endpoint := &v1alpha1.RunEndpoint{
+		Protocol: protocol,
+		URL: fmt.Sprintf(
+			"%s/v1/namespaces/%s/runtimes/%s/functions/%s:invoke",
+			strings.TrimRight(c.GatewayURL, "/"), run.Namespace, run.Spec.Runtime, run.UID,
+		),
+	}
+	if protocol == v1alpha1.RunEndpointProtocolHTTPS {
+		endpoint.CABundle = slices.Clone(c.GatewayCABundle)
+	}
+	return endpoint
+}
 
 func (c *Controller) reconcileRunningFunction(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
 	value, exists := c.activeRuns.Load(string(run.UID))
@@ -209,6 +232,9 @@ func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun, requ
 	}
 	run.Status.Phase = v1alpha1.RunReady
 	run.Status.Message = "function registered"
+	if endpoint := c.functionEndpoint(run); endpoint != nil {
+		run.Status.Endpoint = endpoint
+	}
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{Type: runstatus.ConditionReady, Status: metav1.ConditionTrue, Reason: "FunctionRegistered", Message: "function is ready for invocation", LastTransitionTime: metav1.Now()})
 	if err := c.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err

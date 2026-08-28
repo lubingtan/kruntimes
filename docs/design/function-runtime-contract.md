@@ -23,6 +23,14 @@ route gateway requests, upload artifacts, or schedule capacity. Those concerns
 remain with runtimed, the Runtime gateway, and the control plane. Invocation
 artifacts are out of scope for v0.x.
 
+The same `FunctionRuntime` service is also implemented by runtimed on the
+Runtime Service port for gateway traffic. For that proxy hop only,
+`InvokeFunctionRequest.registration` supplies `run_uid` with an empty
+`registration_id`. runtimed resolves the current assigned owner and its private
+active registration, fills the opaque ID, and calls the colocated Runtime
+Server. A Runtime Server itself always requires a non-empty registration ID;
+the gateway neither sees nor supplies it.
+
 Function support is opt-in for custom Runtimes: a Runtime that supports only
 one-shot execution implements and registers `Runtime` only. The exact shape
 and semantics below require review before `runtime.proto`, generated stubs, or

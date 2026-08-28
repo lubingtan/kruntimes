@@ -24,6 +24,11 @@ Runtime Server 不读取 Kubernetes 对象、不认证调用方、不路由 gate
 artifact，也不调度 capacity。这些职责分别属于 runtimed、Runtime gateway 和 control
 plane。invocation artifact 不属于 v0.x 范围。
 
+runtimed 也会在 Runtime Service port 为 gateway traffic 实现同一个 `FunctionRuntime` service。
+仅在该 proxy hop，`InvokeFunctionRequest.registration` 提供 `run_uid`，而 `registration_id` 为空。
+runtimed 解析当前 assigned owner 及其私有 active registration，填入 opaque ID 后调用 colocated
+Runtime Server。Runtime Server 本身始终要求非空 registration ID；gateway 不会看到或提供它。
+
 function 支持对 custom Runtime 是 opt-in：只支持一次性执行的 Runtime 只需实现并注册 `Runtime`。
 以下精确 message shape 和语义必须在修改 `runtime.proto`、生成 stubs 或内置 Runtime 实现前完成评审。
 

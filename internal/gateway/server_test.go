@@ -86,6 +86,48 @@ func TestGatewayExecutesExactlyOneOperation(t *testing.T) {
 	}
 }
 
+func TestGatewayInvokesFunctionThroughRuntimedProxy(t *testing.T) {
+	run := readyFunctionRun()
+	functionClient := &fakeFunctionRuntimeClient{invoke: func(_ context.Context, request *pb.InvokeFunctionRequest, _ ...grpc.CallOption) (*pb.InvokeFunctionResponse, error) {
+		if request.GetRegistration().GetRunUid() != string(run.UID) || request.GetRegistration().GetRegistrationId() != "" {
+			t.Fatalf("registration = %#v", request.GetRegistration())
+		}
+		if string(request.GetInput()) != `{"value":"hello"}` || request.GetInvocationId() != "caller-id" {
+			t.Fatalf("request = %#v", request)
+		}
+		return &pb.InvokeFunctionResponse{InvocationId: "caller-id", Output: []byte(`{"ok":true}`), ContentType: "application/json"}, nil
+	}}
+	dialer := &fakeDialer{client: &fakeSessionRuntimeClient{}, functionClient: functionClient}
+	server := testServer(t, run, allowAuthorizer{}, dialer)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/runtimes/bash/functions/function-uid:invoke", strings.NewReader(`{"value":"hello"}`)).WithContext(t.Context())
+	request.Header.Set("X-Kruntime-Invocation-ID", "caller-id")
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"invocationId":"caller-id"`) {
+		t.Fatalf("response = %s", response.Body.String())
+	}
+}
+
+func TestGatewayRejectsOversizedFunctionInputBeforeDialingRuntime(t *testing.T) {
+	dialer := &fakeDialer{client: &fakeSessionRuntimeClient{}, functionClient: &fakeFunctionRuntimeClient{}}
+	server := testServer(t, readyFunctionRun(), allowAuthorizer{}, dialer)
+	server.MaxRequestBodyBytes = 8
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/namespaces/default/runtimes/bash/functions/function-uid:invoke", strings.NewReader(`{"value":"too large"}`))
+	server.ServeHTTP(response, request)
+
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if dialer.address != "" {
+		t.Fatalf("dialed Runtime Service %q for rejected request", dialer.address)
+	}
+}
+
 func TestGatewayRejectsRequestBodyOverConfiguredLimitBeforeDialingRuntime(t *testing.T) {
 	dialer := &fakeDialer{client: &fakeSessionRuntimeClient{}}
 	server := testServer(t, readySessionRun(), allowAuthorizer{}, dialer)
@@ -260,7 +302,11 @@ func testServer(t *testing.T, run *v1alpha1.Run, authorizer Authorizer, dialer S
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&v1alpha1.Run{}, runtimeIndexField, func(object client.Object) []string {
 		return []string{object.(*v1alpha1.Run).Spec.Runtime}
 	}).WithObjects(run).Build()
-	return &Server{Runs: reader, Authorizer: authorizer, Dialer: dialer}
+	return &Server{Runs: reader, Authorizer: authorizer, Dialer: dialer, FunctionDialer: dialer.(FunctionRuntimeDialer)}
+}
+
+func readyFunctionRun() *v1alpha1.Run {
+	return &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: "function", Namespace: "default", UID: types.UID("function-uid")}, Spec: v1alpha1.RunSpec{Runtime: "bash", Mode: v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "handler.invoke"}}}, Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, AssignedPod: "runtime-pod", AssignedPodUID: "pod-uid"}}
 }
 
 func readySessionRun() *v1alpha1.Run {
@@ -282,8 +328,14 @@ func (denyAuthorizer) Authorize(context.Context, *http.Request, *v1alpha1.Run) e
 }
 
 type fakeDialer struct {
-	client  pb.SessionRuntimeClient
-	address string
+	client         pb.SessionRuntimeClient
+	functionClient pb.FunctionRuntimeClient
+	address        string
+}
+
+func (d *fakeDialer) DialFunction(_ context.Context, address string) (pb.FunctionRuntimeClient, io.Closer, error) {
+	d.address = address
+	return d.functionClient, nopCloser{}, nil
 }
 
 func (d *fakeDialer) Dial(_ context.Context, address string) (pb.SessionRuntimeClient, io.Closer, error) {
@@ -300,6 +352,18 @@ type fakeSessionRuntimeClient struct {
 	status  func(context.Context, *pb.GetSessionStatusRequest, ...grpc.CallOption) (*pb.SessionStatus, error)
 	execute func(context.Context, *pb.ExecuteSessionOperationRequest, ...grpc.CallOption) (*pb.ExecuteSessionOperationResponse, error)
 	list    func(context.Context, *pb.ListSessionFilesRequest, ...grpc.CallOption) (*pb.ListSessionFilesResponse, error)
+}
+
+type fakeFunctionRuntimeClient struct {
+	pb.FunctionRuntimeClient
+	invoke func(context.Context, *pb.InvokeFunctionRequest, ...grpc.CallOption) (*pb.InvokeFunctionResponse, error)
+}
+
+func (c *fakeFunctionRuntimeClient) InvokeFunction(ctx context.Context, request *pb.InvokeFunctionRequest, options ...grpc.CallOption) (*pb.InvokeFunctionResponse, error) {
+	if c.invoke == nil {
+		return nil, status.Error(codes.Unimplemented, "InvokeFunction")
+	}
+	return c.invoke(ctx, request, options...)
 }
 
 func (c *fakeSessionRuntimeClient) GetSessionStatus(ctx context.Context, request *pb.GetSessionStatusRequest, options ...grpc.CallOption) (*pb.SessionStatus, error) {

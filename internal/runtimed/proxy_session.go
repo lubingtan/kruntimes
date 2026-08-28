@@ -25,7 +25,7 @@ import (
 
 const (
 	sessionForwardedMetadataKey = "kruntimes-session-forwarded"
-	sessionRunRuntimeIndexField = "spec.runtime"
+	runtimeRunIndexField        = "spec.runtime"
 )
 
 // sessionRuntimeProxy serves gateway-originated SessionRuntime requests on a
@@ -258,7 +258,7 @@ func (s *sessionRuntimeProxy) sessionRun(ctx context.Context, identity *pb.Sessi
 	var runs v1alpha1.RunList
 	if err := s.reader.List(ctx, &runs,
 		client.InNamespace(s.namespace),
-		client.MatchingFields{sessionRunRuntimeIndexField: s.runtimeName},
+		client.MatchingFields{runtimeRunIndexField: s.runtimeName},
 	); err != nil {
 		return nil, status.Errorf(codes.Internal, "list Session Runs: %v", err)
 	}

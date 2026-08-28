@@ -51,17 +51,23 @@ type SessionRuntimeDialer interface {
 	Dial(context.Context, string) (pb.SessionRuntimeClient, io.Closer, error)
 }
 
+// FunctionRuntimeDialer creates the runtimed FunctionRuntime proxy client.
+type FunctionRuntimeDialer interface {
+	DialFunction(context.Context, string) (pb.FunctionRuntimeClient, io.Closer, error)
+}
+
 // Server exposes a versioned HTTP API for already-ready Session Runs.
 // Run reads are served through the configured controller-runtime cache.
 type Server struct {
-	Runs         client.Reader
-	Authorizer   Authorizer
-	Dialer       SessionRuntimeDialer
-	RuntimePort  int
-	HTTPAddress  string
-	HTTPSAddress string
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
+	Runs           client.Reader
+	Authorizer     Authorizer
+	Dialer         SessionRuntimeDialer
+	FunctionDialer FunctionRuntimeDialer
+	RuntimePort    int
+	HTTPAddress    string
+	HTTPSAddress   string
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
 
 	// TLSCertificateFile and TLSPrivateKeyFile enable TLS when both paths are
 	// configured. Supplying only one is a startup error; the gateway never
@@ -188,6 +194,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.requestLimiter.release()
 
+	if namespace, runtimeName, runUID, ok := functionRoute(r.URL.Path); ok {
+		s.serveFunctionInvoke(w, r, namespace, runtimeName, runUID)
+		return
+	}
 	namespace, runtimeName, runUID, suffix, ok := sessionRoute(r.URL.Path)
 	if !ok {
 		s.writeError(w, http.StatusNotFound, "endpoint not found")
@@ -219,6 +229,125 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.methodNotAllowed(w)
 	}
+}
+
+func (s *Server) serveFunctionInvoke(w http.ResponseWriter, r *http.Request, namespace, runtimeName, runUID string) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w)
+		return
+	}
+	run, err := s.functionRun(r.Context(), namespace, runtimeName, runUID)
+	if err != nil {
+		s.writeGatewayError(w, err)
+		return
+	}
+	if s.Authorizer == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "gateway authorization is not configured")
+		return
+	}
+	if err := s.Authorizer.Authorize(r.Context(), r, run); err != nil {
+		s.writeGatewayError(w, err)
+		return
+	}
+	input, err := s.functionInput(r)
+	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := r.Header.Get("X-Kruntime-Invocation-ID")
+	if len(id) > 128 {
+		s.writeError(w, http.StatusBadRequest, "invocation ID exceeds 128 bytes")
+		return
+	}
+	client, closer, err := s.functionClient(r.Context(), run)
+	if err != nil {
+		s.writeGatewayError(w, err)
+		return
+	}
+	defer closer.Close()
+	response, err := client.InvokeFunction(r.Context(), &pb.InvokeFunctionRequest{Registration: &pb.FunctionRegistration{RunUid: string(run.UID)}, InvocationId: id, Input: input, ContentType: "application/json"})
+	if err != nil {
+		s.writeGatewayError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, functionInvokeResponse{InvocationID: response.GetInvocationId(), Output: response.GetOutput(), ContentType: response.GetContentType(), Outputs: response.GetOutputs()})
+}
+
+func (s *Server) functionInput(r *http.Request) ([]byte, error) {
+	defer r.Body.Close()
+	body := &io.LimitedReader{R: r.Body, N: s.maxRequestBodyBytes() + 1}
+	input, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("read request: %w", err)
+	}
+	if body.N == 0 {
+		return nil, errRequestBodyTooLarge
+	}
+	if !json.Valid(input) {
+		return nil, errors.New("function input must be valid JSON")
+	}
+	return input, nil
+}
+
+func (s *Server) functionRun(ctx context.Context, namespace, runtimeName, runUID string) (*v1alpha1.Run, error) {
+	if s.Runs == nil || s.FunctionDialer == nil {
+		return nil, status.Error(codes.FailedPrecondition, "gateway is not configured")
+	}
+	var runs v1alpha1.RunList
+	if err := s.Runs.List(ctx, &runs, client.InNamespace(namespace), client.MatchingFields{runtimeIndexField: runtimeName}); err != nil {
+		return nil, status.Errorf(codes.Internal, "list Runtime Runs: %v", err)
+	}
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if string(run.UID) == runUID {
+			if run.Spec.Mode.Function == nil || run.Spec.Runtime != runtimeName {
+				return nil, status.Error(codes.NotFound, "function Run not found")
+			}
+			if run.Status.Phase != v1alpha1.RunReady || run.Status.AssignedPodUID == "" {
+				return nil, status.Errorf(codes.FailedPrecondition, "function Run is %s, not Ready", run.Status.Phase)
+			}
+			return run, nil
+		}
+	}
+	return nil, status.Error(codes.NotFound, "function Run not found")
+}
+
+func (s *Server) functionClient(ctx context.Context, run *v1alpha1.Run) (pb.FunctionRuntimeClient, io.Closer, error) {
+	port := s.RuntimePort
+	if port == 0 {
+		port = defaultRuntimeServicePort
+	}
+	client, closer, err := s.FunctionDialer.DialFunction(ctx, fmt.Sprintf("runtime-%s.%s:%d", run.Spec.Runtime, run.Namespace, port))
+	if err != nil {
+		return nil, nil, status.Errorf(codes.Unavailable, "dial Runtime Service: %v", err)
+	}
+	return client, closer, nil
+}
+
+func functionRoute(path string) (namespace, runtimeName, runUID string, ok bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 7 || parts[0] != "v1" || parts[1] != "namespaces" || parts[3] != "runtimes" || parts[5] != "functions" {
+		return "", "", "", false
+	}
+	var err error
+	if namespace, err = url.PathUnescape(parts[2]); err != nil || namespace == "" {
+		return "", "", "", false
+	}
+	if runtimeName, err = url.PathUnescape(parts[4]); err != nil || runtimeName == "" {
+		return "", "", "", false
+	}
+	if !strings.HasSuffix(parts[6], ":invoke") {
+		return "", "", "", false
+	}
+	runUID, err = url.PathUnescape(strings.TrimSuffix(parts[6], ":invoke"))
+	if err != nil || runUID == "" {
+		return "", "", "", false
+	}
+	return namespace, runtimeName, runUID, true
 }
 
 func (s *Server) maxConcurrentRequests() int {
@@ -619,6 +748,12 @@ type sessionCommandResultResponse struct {
 	Stdout   []byte `json:"stdout,omitempty"`
 	Stderr   []byte `json:"stderr,omitempty"`
 	TimedOut bool   `json:"timedOut,omitempty"`
+}
+type functionInvokeResponse struct {
+	InvocationID string            `json:"invocationId"`
+	Output       []byte            `json:"output,omitempty"`
+	ContentType  string            `json:"contentType,omitempty"`
+	Outputs      map[string]string `json:"outputs,omitempty"`
 }
 type sessionFileInfoResponse struct {
 	Path      string `json:"path"`

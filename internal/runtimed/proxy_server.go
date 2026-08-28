@@ -25,6 +25,7 @@ func StartRuntimeProxyServer(
 	apiReader, sessionReader client.Reader,
 	store artifact.Store,
 	operations *SessionOperationQueue,
+	functionController *Controller,
 	runtimeNamespace,
 	runtimeName,
 	podName string,
@@ -55,6 +56,15 @@ func StartRuntimeProxyServer(
 		sessionProxy.operations = operations
 	}
 	pb.RegisterSessionRuntimeServer(srv, sessionProxy)
+	pb.RegisterFunctionRuntimeServer(srv, newFunctionRuntimeProxy(
+		sessionReader,
+		pb.NewFunctionRuntimeClient(conn),
+		functionController,
+		runtimeNamespace,
+		runtimeName,
+		podName,
+		statusPort,
+	))
 	if store != nil {
 		RegisterArtifactService(srv, apiReader, store, runtimeNamespace, runtimeName)
 	}

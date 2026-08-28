@@ -232,8 +232,9 @@ Pod。请求处理规则：
 
 - UID 或 current-object 不匹配：`404 Not Found`；
 - Run 已知但 not ready、recovering 或 terminating：`503 Service Unavailable`；
-- local owner：调用本地 Runtime Server；
-- remote owner：最多 proxy 一次到 owning Pod gateway port；
+- local owner：解析私有 registration reference 后调用本地 Runtime Server；
+- remote owner：将相同的 `FunctionRuntime.InvokeFunction` request 最多 proxy 一次到 owning Pod 的
+  runtimed port；
 - owner stale 或 unreachable：返回 `503 Service Unavailable` 并 enqueue recovery；
 - 达到 local concurrency limit：`429 Too Many Requests`。
 
@@ -265,7 +266,7 @@ namespaces。
 第一版 HTTPS request 明确保持有界：
 
 ```http
-POST /v1/namespaces/{namespace}/runs/{name}/{uid}/invoke
+POST /v1/namespaces/{namespace}/runtimes/{runtime}/functions/{uid}:invoke
 Authorization: Bearer <kubernetes-token>
 Content-Type: application/json
 X-Kruntime-Invocation-ID: <caller-generated-id>

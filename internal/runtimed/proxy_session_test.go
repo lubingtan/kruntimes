@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -228,7 +229,7 @@ func newSessionProxyReader(t *testing.T, objects ...runtime.Object) client.Clien
 	}
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithIndex(&v1alpha1.Run{}, sessionRunRuntimeIndexField, func(object client.Object) []string {
+		WithIndex(&v1alpha1.Run{}, runtimeRunIndexField, func(object client.Object) []string {
 			run, ok := object.(*v1alpha1.Run)
 			if !ok || run.Spec.Runtime == "" {
 				return nil
@@ -279,4 +280,72 @@ func TestForwardedRecognizesIncomingMarker(t *testing.T) {
 	if !forwarded(ctx) {
 		t.Fatal("forwarded() = false, want true")
 	}
+}
+
+func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
+	run := proxyFunctionRun("function-run", "bash", "pod-a", "pod-a-uid")
+	controller := &Controller{}
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "private-registration"}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(registration, nil)
+	controller.activeRuns.Store(string(run.UID), ar)
+	local := &functionRuntimeClient{invoke: func(_ context.Context, request *pb.InvokeFunctionRequest) (*pb.InvokeFunctionResponse, error) {
+		if request.GetRegistration().GetRegistrationId() != "private-registration" || request.GetRegistration().GetRunUid() != string(run.UID) {
+			t.Fatalf("local request registration = %#v", request.GetRegistration())
+		}
+		return &pb.InvokeFunctionResponse{InvocationId: request.GetInvocationId(), Output: request.GetInput()}, nil
+	}}
+	proxy := newFunctionRuntimeProxy(newSessionProxyReader(t, run), local, controller, run.Namespace, "bash", "pod-a", "9093")
+	response, err := proxy.InvokeFunction(t.Context(), &pb.InvokeFunctionRequest{Registration: &pb.FunctionRegistration{RunUid: string(run.UID)}, InvocationId: "invoke-1", Input: []byte(`{"ok":true}`), ContentType: "application/json"})
+	if err != nil {
+		t.Fatalf("InvokeFunction: %v", err)
+	}
+	if response.GetInvocationId() != "invoke-1" || string(response.GetOutput()) != `{"ok":true}` {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestFunctionRuntimeProxyForwardsToOwner(t *testing.T) {
+	run := proxyFunctionRun("function-run", "bash", "pod-b", "pod-b-uid")
+	owner := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: run.Namespace, UID: types.UID("pod-b-uid"), Labels: map[string]string{"runtime": "bash"}}, Status: corev1.PodStatus{PodIP: "10.0.0.2"}}
+	proxy := newFunctionRuntimeProxy(newSessionProxyReader(t, run, owner), &functionRuntimeClient{}, &Controller{}, run.Namespace, "bash", "pod-a", "9093")
+	proxy.dialPeer = func(_ context.Context, address string) (pb.FunctionRuntimeClient, io.Closer, error) {
+		if address != net.JoinHostPort(owner.Status.PodIP, "9093") {
+			t.Fatalf("peer address = %q", address)
+		}
+		return &functionRuntimeClient{invoke: func(ctx context.Context, request *pb.InvokeFunctionRequest) (*pb.InvokeFunctionResponse, error) {
+			values, _ := metadata.FromOutgoingContext(ctx)
+			if len(values.Get(sessionForwardedMetadataKey)) == 0 {
+				t.Fatal("missing forwarding marker")
+			}
+			return &pb.InvokeFunctionResponse{}, nil
+		}}, nopCloser{}, nil
+	}
+	if _, err := proxy.InvokeFunction(t.Context(), &pb.InvokeFunctionRequest{Registration: &pb.FunctionRegistration{RunUid: string(run.UID)}}); err != nil {
+		t.Fatalf("InvokeFunction: %v", err)
+	}
+}
+
+func proxyFunctionRun(name, runtimeName, podName, podUID string) *v1alpha1.Run {
+	return &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")}, Spec: v1alpha1.RunSpec{Runtime: runtimeName, Mode: v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "handler.invoke"}}}, Status: v1alpha1.RunStatus{Phase: v1alpha1.RunReady, AssignedPod: podName, AssignedPodUID: podUID}}
+}
+
+type functionRuntimeClient struct {
+	invoke func(context.Context, *pb.InvokeFunctionRequest) (*pb.InvokeFunctionResponse, error)
+}
+
+func (c *functionRuntimeClient) RegisterFunction(context.Context, *pb.RegisterFunctionRequest, ...grpc.CallOption) (*pb.RegisterFunctionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "RegisterFunction")
+}
+func (c *functionRuntimeClient) FunctionStatus(context.Context, *pb.FunctionStatusRequest, ...grpc.CallOption) (*pb.FunctionStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "FunctionStatus")
+}
+func (c *functionRuntimeClient) InvokeFunction(ctx context.Context, request *pb.InvokeFunctionRequest, _ ...grpc.CallOption) (*pb.InvokeFunctionResponse, error) {
+	if c.invoke == nil {
+		return nil, status.Error(codes.Unimplemented, "InvokeFunction")
+	}
+	return c.invoke(ctx, request)
+}
+func (c *functionRuntimeClient) UnregisterFunction(context.Context, *pb.UnregisterFunctionRequest, ...grpc.CallOption) (*pb.UnregisterFunctionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "UnregisterFunction")
 }
