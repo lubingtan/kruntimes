@@ -37,6 +37,9 @@ func (c *Controller) reconcileRunningFunction(ctx context.Context, run *v1alpha1
 	if run.Spec.HasImmediateTermination() {
 		return c.closeFunctionAndApplyTerminal(ctx, ar, v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
+	if !ar.deadline.IsZero() && !time.Now().Before(ar.deadline) {
+		return c.closeFunctionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, fmt.Sprintf("timeout after %s", run.Spec.Timeout.Duration))
+	}
 	condition := meta.FindStatusCondition(run.Status.Conditions, runstatus.ConditionRunning)
 	if condition != nil && condition.Status == metav1.ConditionFalse {
 		return c.reconcileRetryBackoff(ctx, ar)
@@ -139,7 +142,7 @@ func (c *Controller) reconcileFunctionRegistration(ctx context.Context, ar *acti
 	registration := ar.functionRegistrationRef()
 	if registration == nil {
 		if failure := ar.consumeFunctionRegistrationFailure(); failure != nil {
-			return c.applyFailure(ctx, ar, failure.reason, failure.message)
+			return c.applyFunctionRegistrationFailure(ctx, ar, failure.reason, failure.message)
 		}
 		if !ar.functionRegistrationInFlight() {
 			c.startFunctionRegistrationAsync(ar)
@@ -151,32 +154,58 @@ func (c *Controller) reconcileFunctionRegistration(ctx context.Context, ar *acti
 	response, err := c.functionCli.FunctionStatus(statusCtx, &pb.FunctionStatusRequest{Registration: registration})
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
-			return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, "function registration not found")
+			return c.applyFunctionRegistrationFailure(ctx, ar, runretry.ReasonRuntimeExecute, "function registration not found")
 		}
 		return ctrl.Result{}, fmt.Errorf("get FunctionRuntime registration status: %w", err)
 	}
 	if response.GetRegistration() == nil || response.GetRegistration().GetRunUid() != string(ar.run.UID) || response.GetRegistration().GetRegistrationId() != registration.GetRegistrationId() {
-		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, "Runtime Server returned mismatched function registration")
+		return c.applyFunctionRegistrationFailure(ctx, ar, runretry.ReasonRuntimeExecute, "Runtime Server returned mismatched function registration")
 	}
 	switch response.GetState() {
 	case pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY:
-		return c.applyFunctionReady(ctx, ar)
+		return c.reconcileFunctionReadyStatus(ctx, ar, response)
 	case pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_REGISTERING:
 		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	case pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_FAILED:
-		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, boundedStatusMessage(response.GetFatalError()))
+		return c.applyFunctionRegistrationFailure(ctx, ar, runretry.ReasonRuntimeExecute, boundedStatusMessage(response.GetFatalError()))
 	default:
-		return c.applyFailure(ctx, ar, runretry.ReasonRuntimeExecute, fmt.Sprintf("Runtime Server function registration is %s", response.GetState()))
+		return c.applyFunctionRegistrationFailure(ctx, ar, runretry.ReasonRuntimeExecute, fmt.Sprintf("Runtime Server function registration is %s", response.GetState()))
 	}
 }
 
-func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun) (ctrl.Result, error) {
+func (c *Controller) reconcileFunctionReadyStatus(ctx context.Context, ar *activeRun, response *pb.FunctionStatusResponse) (ctrl.Result, error) {
+	if ar == nil || ar.run == nil || response == nil {
+		return ctrl.Result{}, fmt.Errorf("active Function Run status is required")
+	}
+	now := time.Now()
+	if !ar.deadline.IsZero() {
+		if !now.Before(ar.deadline) {
+			return c.closeFunctionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, fmt.Sprintf("timeout after %s", ar.run.Spec.Timeout.Duration))
+		}
+	}
+
+	requeueAfter := activeRunRequeueAfter(ar)
+	if idleTimeout := ar.run.Spec.Mode.Function.IdleTimeoutSeconds; idleTimeout != nil {
+		lastActivity := time.Unix(0, response.GetLastActivityUnixNano())
+		if response.GetLastActivityUnixNano() <= 0 {
+			return c.applyFunctionRegistrationFailure(ctx, ar, runretry.ReasonRuntimeExecute, "Runtime Server returned no function activity timestamp")
+		}
+		idleDeadline := lastActivity.Add(time.Duration(*idleTimeout) * time.Second)
+		if !now.Before(idleDeadline) {
+			return c.closeFunctionAndApplyTerminal(ctx, ar, v1alpha1.RunTimeout, runretry.ReasonTimeout, "function idle timeout exceeded")
+		}
+		requeueAfter = min(requeueAfter, time.Until(idleDeadline))
+	}
+	return c.applyFunctionReady(ctx, ar, requeueAfter)
+}
+
+func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun, requeueAfter time.Duration) (ctrl.Result, error) {
 	run := ar.run
 	if (run.Status.Phase != v1alpha1.RunRunning && run.Status.Phase != v1alpha1.RunReady) || run.Status.AssignedPod != c.PodName {
 		return ctrl.Result{}, nil
 	}
 	if run.Status.Phase == v1alpha1.RunReady {
-		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	run.Status.Phase = v1alpha1.RunReady
 	run.Status.Message = "function registered"
@@ -184,7 +213,19 @@ func (c *Controller) applyFunctionReady(ctx context.Context, ar *activeRun) (ctr
 	if err := c.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// applyFunctionRegistrationFailure lets the generic retry engine own status
+// transitions, then drops the local opaque handle when it scheduled another
+// registration attempt. Keeping that handle would otherwise make the next
+// attempt poll the failed generation forever instead of registering anew.
+func (c *Controller) applyFunctionRegistrationFailure(ctx context.Context, ar *activeRun, reason, message string) (ctrl.Result, error) {
+	result, err := c.applyFailure(ctx, ar, reason, message)
+	if err == nil && ar.run.Status.Phase == v1alpha1.RunRunning {
+		ar.resetFunctionRegistration()
+	}
+	return result, err
 }
 
 func (c *Controller) closeFunctionAndApplyTerminal(ctx context.Context, ar *activeRun, phase v1alpha1.RunPhase, reason, message string) (ctrl.Result, error) {

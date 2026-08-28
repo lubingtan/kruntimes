@@ -1590,6 +1590,116 @@ func TestDeletingSessionClosesBeforeRemovingFinalizer(t *testing.T) {
 	}
 }
 
+func TestReadyFunctionTotalTimeoutUnregistersBeforeTimeoutStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	totalTimeout := metav1.Duration{Duration: time.Second}
+	run := functionLifecycleTestRun()
+	run.Spec.Timeout = &totalTimeout
+	run.Status.Phase = v1alpha1.RunReady
+	run.Status.StartTime = &metav1.Time{Time: time.Now().Add(-2 * time.Second)}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration: registration,
+		State:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := c.buildActiveRun(run)
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	if len(functionClient.unregisterRequests) != 1 {
+		t.Fatalf("UnregisterFunction requests = %#v, want one", functionClient.unregisterRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunTimeout || updated.Status.Message != "timeout after 1s" {
+		t.Fatalf("status = %#v, want Timeout after total timeout", updated.Status)
+	}
+}
+
+func TestReadyFunctionIdleTimeoutUnregistersBeforeTimeoutStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	idleTimeout := int32(1)
+	run := functionLifecycleTestRun()
+	run.Spec.Mode.Function.IdleTimeoutSeconds = &idleTimeout
+	run.Status.Phase = v1alpha1.RunReady
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration:         registration,
+		State:                pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+		LastActivityUnixNano: time.Now().Add(-2 * time.Second).UnixNano(),
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := c.buildActiveRun(run)
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	if len(functionClient.unregisterRequests) != 1 {
+		t.Fatalf("UnregisterFunction requests = %#v, want one", functionClient.unregisterRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunTimeout || updated.Status.Message != "function idle timeout exceeded" {
+		t.Fatalf("status = %#v, want idle Timeout", updated.Status)
+	}
+}
+
+func TestFunctionRegistrationFailureResetsLocalHandleForRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Spec.RetryPolicy = &v1alpha1.RetryPolicy{MaxAttempts: 2}
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration: registration,
+		State:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_FAILED,
+		FatalError:   "registration failed",
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := c.buildActiveRun(run)
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileFunctionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileFunctionRegistration: %v", err)
+	}
+	if ar.functionRegistrationRef() != nil {
+		t.Fatal("failed registration handle was retained instead of reset for retry")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Attempt != 2 {
+		t.Fatalf("attempt = %d, want 2", updated.Status.Attempt)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionRunning)
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		t.Fatalf("Running condition = %#v, want retry backoff", condition)
+	}
+}
+
 func functionLifecycleTestRun() *v1alpha1.Run {
 	inline := "def invoke(event):\n    return event\n"
 	return &v1alpha1.Run{

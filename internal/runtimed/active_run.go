@@ -97,6 +97,18 @@ func (ar *activeRun) consumeFunctionRegistrationFailure() *functionRegistrationF
 	return failure
 }
 
+// resetFunctionRegistration drops the local reference after the shared retry
+// engine has advanced the registration attempt. The next reconciliation then
+// issues RegisterFunction for that new attempt; a Runtime Server uses the
+// attempt to fence any prior registration generation.
+func (ar *activeRun) resetFunctionRegistration() {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	ar.functionRegistering = false
+	ar.functionRegistration = nil
+	ar.functionClosed.Store(false)
+}
+
 // executionStartFailure is recorded by the asynchronous local execution
 // startup. Reconcile consumes it and applies the normal Run retry semantics;
 // the goroutine itself never mutates Kubernetes status.
