@@ -1,6 +1,8 @@
 # Function Mode
 
-This document describes a target v0.x design. It is not implemented yet.
+This document describes the v0.x Function-mode design and its implemented
+control-plane and invoke-dataplane baseline. Deferred work is called out in
+the [roadmap](../roadmap/).
 
 The goal is to let kruntimes expose low-latency fixed-handler invocations
 without putting every invocation through Kubernetes reconciliation. Mutable

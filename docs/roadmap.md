@@ -161,29 +161,29 @@ wiring from accumulating avoidable conflicts.
     [Function Runtime Server Contract](design/function-runtime-contract.md);
   - [x] add idempotent register/status/invoke/unregister protobuf operations
     keyed by Run UID;
-  - [ ] implement built-in function adapters:
+  - [x] implement built-in function adapters:
     - [x] Bash FunctionRuntime adapter with handler validation, registration
       fencing, one in-flight invocation, bounded output, and unregister drain;
     - [x] Python FunctionRuntime adapter with handler validation, registration
       fencing, one in-flight invocation, bounded output, and unregister drain;
   - [ ] add bounded invocation outputs/artifact references and structured logs
     keyed by Run UID and invocation ID;
-  - [ ] implement the function control-plane lifecycle in independently
+  - [x] implement the function control-plane lifecycle in independently
     reviewable slices:
     - [x] add a deterministic FunctionRuntime registration request builder,
       including immutable-input digest coverage;
     - [x] materialize inline function source at the validated
       `source.inlinePath` below the Run working directory;
-    - [ ] transition assigned function Runs through source preparation,
+    - [x] transition assigned function Runs through source preparation,
       cleanup-finalizer installation, local registration through a runtimed
       FunctionRuntime client, and `Running -> Ready`;
-    - [ ] observe local `FunctionStatus` for fatal registration loss, total Run
+    - [x] observe local `FunctionStatus` for fatal registration loss, total Run
       timeout, and Runtime Server-owned idle timeout;
-    - [ ] integrate registration failures with the shared retry engine without
+    - [x] integrate registration failures with the shared retry engine without
       retrying individual invocation failures;
-    - [ ] implement cancellation and deletion finalization: drain or cancel the
+    - [x] implement cancellation and deletion finalization: drain or cancel the
       local registration, clean only function-local state, and release capacity;
-    - [ ] recover active function registrations after runtimed restart and
+    - [x] recover active function registrations after runtimed restart and
       reconcile stale Runtime Pod assignments with assignment-UID fencing;
     - [ ] add unit, integration, and E2E coverage for registration, retry,
       timeout, cancellation, deletion, restart recovery, and stale-pod fencing;
