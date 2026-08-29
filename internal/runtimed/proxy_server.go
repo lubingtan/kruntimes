@@ -46,6 +46,7 @@ func StartRuntimeProxyServer(
 	pb.RegisterRuntimeServer(srv, &runtimeStatusProxy{runtimeCli: pb.NewRuntimeClient(conn)})
 	sessionProxy := newSessionRuntimeProxy(
 		sessionReader,
+		apiReader,
 		pb.NewSessionRuntimeClient(conn),
 		runtimeNamespace,
 		runtimeName,
@@ -58,6 +59,7 @@ func StartRuntimeProxyServer(
 	pb.RegisterSessionRuntimeServer(srv, sessionProxy)
 	pb.RegisterFunctionRuntimeServer(srv, newFunctionRuntimeProxy(
 		sessionReader,
+		apiReader,
 		pb.NewFunctionRuntimeClient(conn),
 		functionController,
 		runtimeNamespace,

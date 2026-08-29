@@ -28,6 +28,7 @@ type functionRuntimeProxy struct {
 	pb.UnimplementedFunctionRuntimeServer
 
 	reader      client.Reader
+	podReader   client.Reader
 	local       pb.FunctionRuntimeClient
 	controller  *Controller
 	namespace   string
@@ -37,9 +38,9 @@ type functionRuntimeProxy struct {
 	dialPeer    func(context.Context, string) (pb.FunctionRuntimeClient, io.Closer, error)
 }
 
-func newFunctionRuntimeProxy(reader client.Reader, local pb.FunctionRuntimeClient, controller *Controller, namespace, runtimeName, podName, statusPort string) *functionRuntimeProxy {
+func newFunctionRuntimeProxy(reader, podReader client.Reader, local pb.FunctionRuntimeClient, controller *Controller, namespace, runtimeName, podName, statusPort string) *functionRuntimeProxy {
 	return &functionRuntimeProxy{
-		reader: reader, local: local, controller: controller, namespace: namespace, runtimeName: runtimeName,
+		reader: reader, podReader: podReader, local: local, controller: controller, namespace: namespace, runtimeName: runtimeName,
 		podName: podName, statusPort: statusPort, dialPeer: dialFunctionRuntimePeer,
 	}
 }
@@ -54,7 +55,7 @@ func (s *functionRuntimeProxy) InvokeFunction(ctx context.Context, request *pb.I
 			return nil, status.Error(codes.FailedPrecondition, "forwarded function request did not reach its assigned Runtime Pod")
 		}
 		owner := &corev1.Pod{}
-		if err := s.reader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Status.AssignedPod}, owner); err != nil {
+		if err := s.podReader.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: run.Status.AssignedPod}, owner); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil, status.Error(codes.Unavailable, "assigned Runtime Pod is not available")
 			}
@@ -95,7 +96,7 @@ func (s *functionRuntimeProxy) functionRun(ctx context.Context, registration *pb
 	if registration == nil || registration.GetRunUid() == "" || registration.GetRegistrationId() != "" {
 		return nil, status.Error(codes.InvalidArgument, "gateway function request requires a Run UID and no registration ID")
 	}
-	if s.reader == nil || s.local == nil || s.controller == nil || s.namespace == "" || s.runtimeName == "" || s.podName == "" {
+	if s.reader == nil || s.podReader == nil || s.local == nil || s.controller == nil || s.namespace == "" || s.runtimeName == "" || s.podName == "" {
 		return nil, status.Error(codes.FailedPrecondition, "FunctionRuntime proxy is not configured")
 	}
 	var runs v1alpha1.RunList
@@ -137,7 +138,7 @@ func functionInvocationTimeout(run *v1alpha1.Run, requestedMillis int64) (time.D
 }
 
 func dialFunctionRuntimePeer(_ context.Context, address string) (pb.FunctionRuntimeClient, io.Closer, error) {
-	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	connection, err := grpc.NewClient(runtimePeerTarget(address), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("create FunctionRuntime client: %w", err)
 	}

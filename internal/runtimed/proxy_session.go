@@ -35,6 +35,7 @@ type sessionRuntimeProxy struct {
 	pb.UnimplementedSessionRuntimeServer
 
 	reader      client.Reader
+	podReader   client.Reader
 	local       pb.SessionRuntimeClient
 	namespace   string
 	runtimeName string
@@ -56,11 +57,13 @@ type sessionRoute struct {
 
 func newSessionRuntimeProxy(
 	reader client.Reader,
+	podReader client.Reader,
 	local pb.SessionRuntimeClient,
 	namespace, runtimeName, podName, statusPort string,
 ) *sessionRuntimeProxy {
 	return &sessionRuntimeProxy{
 		reader:      reader,
+		podReader:   podReader,
 		local:       local,
 		namespace:   namespace,
 		runtimeName: runtimeName,
@@ -227,7 +230,7 @@ func (s *sessionRuntimeProxy) route(ctx context.Context, identity *pb.SessionIde
 
 	owner := &corev1.Pod{}
 	ownerKey := client.ObjectKey{Namespace: run.Namespace, Name: run.Status.AssignedPod}
-	if err := s.reader.Get(ctx, ownerKey, owner); err != nil {
+	if err := s.podReader.Get(ctx, ownerKey, owner); err != nil {
 		if apierrors.IsNotFound(err) {
 			return sessionRoute{}, status.Error(codes.Unavailable, "assigned Runtime Pod is not available")
 		}
@@ -251,7 +254,7 @@ func (s *sessionRuntimeProxy) sessionRun(ctx context.Context, identity *pb.Sessi
 	if identity == nil || identity.GetRunUid() == "" || identity.GetAssignedPodUid() == "" {
 		return nil, status.Error(codes.InvalidArgument, "session run uid and assigned pod uid are required")
 	}
-	if s.reader == nil || s.local == nil || s.namespace == "" || s.runtimeName == "" || s.podName == "" {
+	if s.reader == nil || s.podReader == nil || s.local == nil || s.namespace == "" || s.runtimeName == "" || s.podName == "" {
 		return nil, status.Error(codes.FailedPrecondition, "SessionRuntime proxy is not configured")
 	}
 
@@ -293,8 +296,15 @@ func withForwardedMarker(ctx context.Context) context.Context {
 	return metadata.NewOutgoingContext(ctx, forwardedValues)
 }
 
-func dialSessionRuntimePeer(ctx context.Context, address string) (pb.SessionRuntimeClient, io.Closer, error) {
-	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func runtimePeerTarget(address string) string {
+	// grpc.NewClient resolves bare targets with DNS. Owner routing uses a Pod IP,
+	// so force the passthrough resolver instead of attempting a DNS lookup for
+	// that literal IP.
+	return "passthrough:///" + address
+}
+
+func dialSessionRuntimePeer(_ context.Context, address string) (pb.SessionRuntimeClient, io.Closer, error) {
+	connection, err := grpc.NewClient(runtimePeerTarget(address), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("create SessionRuntime client: %w", err)
 	}

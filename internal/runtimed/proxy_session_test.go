@@ -34,7 +34,7 @@ func TestSessionRuntimeProxyCallsLocalRuntimeServerForOwner(t *testing.T) {
 		}
 		return &pb.ExecuteSessionOperationResponse{Command: &pb.SessionCommandResult{ExitCode: 0, Stdout: []byte("done")}}, nil
 	}}
-	proxy := newSessionRuntimeProxy(reader, local, run.Namespace, "bash", "pod-a", "9093")
+	proxy := newSessionRuntimeProxy(reader, reader, local, run.Namespace, "bash", "pod-a", "9093")
 
 	response, err := proxy.ExecuteSessionOperation(t.Context(), &pb.ExecuteSessionOperationRequest{
 		Identity:  &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: "pod-a-uid"},
@@ -57,7 +57,7 @@ func TestSessionRuntimeProxyPreservesFilePageFields(t *testing.T) {
 		}
 		return &pb.ListSessionFilesResponse{NextPageToken: "next-notes"}, nil
 	}}
-	proxy := newSessionRuntimeProxy(reader, local, run.Namespace, "bash", "pod-a", "9093")
+	proxy := newSessionRuntimeProxy(reader, reader, local, run.Namespace, "bash", "pod-a", "9093")
 
 	response, err := proxy.ListSessionFiles(t.Context(), &pb.ListSessionFilesRequest{
 		Identity:  &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: "pod-a-uid"},
@@ -83,7 +83,7 @@ func TestSessionRuntimeProxyEmitsStructuredCommandAndAuditLogs(t *testing.T) {
 			Stderr:   []byte("problem\n"),
 		}}, nil
 	}}
-	proxy := newSessionRuntimeProxy(reader, local, run.Namespace, "bash", "pod-a", "9093")
+	proxy := newSessionRuntimeProxy(reader, reader, local, run.Namespace, "bash", "pod-a", "9093")
 	var output bytes.Buffer
 	proxy.logWriter = &output
 
@@ -153,7 +153,7 @@ func TestSessionRuntimeProxyForwardsToAssignedRuntimePod(t *testing.T) {
 		}
 		return &pb.ExecuteSessionOperationResponse{}, nil
 	}}
-	proxy := newSessionRuntimeProxy(reader, &sessionRuntimeClient{}, run.Namespace, "bash", "pod-a", "9093")
+	proxy := newSessionRuntimeProxy(reader, reader, &sessionRuntimeClient{}, run.Namespace, "bash", "pod-a", "9093")
 	proxy.dialPeer = func(_ context.Context, address string) (pb.SessionRuntimeClient, io.Closer, error) {
 		if address != net.JoinHostPort(owner.Status.PodIP, "9093") {
 			t.Fatalf("peer address = %q, want %q", address, net.JoinHostPort(owner.Status.PodIP, "9093"))
@@ -181,7 +181,8 @@ func TestSessionRuntimeProxyRejectsOwnerFromAnotherRuntime(t *testing.T) {
 		},
 		Status: corev1.PodStatus{PodIP: "10.0.0.2"},
 	}
-	proxy := newSessionRuntimeProxy(newSessionProxyReader(t, run, owner), &sessionRuntimeClient{}, run.Namespace, "bash", "pod-a", "9093")
+	reader := newSessionProxyReader(t, run, owner)
+	proxy := newSessionRuntimeProxy(reader, reader, &sessionRuntimeClient{}, run.Namespace, "bash", "pod-a", "9093")
 	proxy.dialPeer = func(context.Context, string) (pb.SessionRuntimeClient, io.Closer, error) {
 		t.Fatal("dialPeer must not be called for a different Runtime")
 		return nil, nil, nil
@@ -197,7 +198,8 @@ func TestSessionRuntimeProxyRejectsOwnerFromAnotherRuntime(t *testing.T) {
 
 func TestSessionRuntimeProxyRejectsStaleAssignment(t *testing.T) {
 	run := proxySessionRun("session-run", "bash", "pod-a", "pod-a-uid")
-	proxy := newSessionRuntimeProxy(newSessionProxyReader(t, run), &sessionRuntimeClient{}, run.Namespace, "bash", "pod-a", "9093")
+	reader := newSessionProxyReader(t, run)
+	proxy := newSessionRuntimeProxy(reader, reader, &sessionRuntimeClient{}, run.Namespace, "bash", "pod-a", "9093")
 
 	_, err := proxy.GetSessionStatus(t.Context(), &pb.GetSessionStatusRequest{
 		Identity: &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: "old-pod-uid"},
@@ -282,6 +284,13 @@ func TestForwardedRecognizesIncomingMarker(t *testing.T) {
 	}
 }
 
+func TestRuntimePeerTargetUsesPassthroughResolver(t *testing.T) {
+	address := net.JoinHostPort("10.0.0.2", "9093")
+	if got, want := runtimePeerTarget(address), "passthrough:///"+address; got != want {
+		t.Fatalf("runtimePeerTarget(%q) = %q, want %q", address, got, want)
+	}
+}
+
 func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
 	run := proxyFunctionRun("function-run", "bash", "pod-a", "pod-a-uid")
 	controller := &Controller{}
@@ -295,7 +304,8 @@ func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
 		}
 		return &pb.InvokeFunctionResponse{InvocationId: request.GetInvocationId(), Output: request.GetInput()}, nil
 	}}
-	proxy := newFunctionRuntimeProxy(newSessionProxyReader(t, run), local, controller, run.Namespace, "bash", "pod-a", "9093")
+	reader := newSessionProxyReader(t, run)
+	proxy := newFunctionRuntimeProxy(reader, reader, local, controller, run.Namespace, "bash", "pod-a", "9093")
 	response, err := proxy.InvokeFunction(t.Context(), &pb.InvokeFunctionRequest{Registration: &pb.FunctionRegistration{RunUid: string(run.UID)}, InvocationId: "invoke-1", Input: []byte(`{"ok":true}`), ContentType: "application/json"})
 	if err != nil {
 		t.Fatalf("InvokeFunction: %v", err)
@@ -308,7 +318,8 @@ func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
 func TestFunctionRuntimeProxyForwardsToOwner(t *testing.T) {
 	run := proxyFunctionRun("function-run", "bash", "pod-b", "pod-b-uid")
 	owner := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-b", Namespace: run.Namespace, UID: types.UID("pod-b-uid"), Labels: map[string]string{"runtime": "bash"}}, Status: corev1.PodStatus{PodIP: "10.0.0.2"}}
-	proxy := newFunctionRuntimeProxy(newSessionProxyReader(t, run, owner), &functionRuntimeClient{}, &Controller{}, run.Namespace, "bash", "pod-a", "9093")
+	reader := newSessionProxyReader(t, run, owner)
+	proxy := newFunctionRuntimeProxy(reader, reader, &functionRuntimeClient{}, &Controller{}, run.Namespace, "bash", "pod-a", "9093")
 	proxy.dialPeer = func(_ context.Context, address string) (pb.FunctionRuntimeClient, io.Closer, error) {
 		if address != net.JoinHostPort(owner.Status.PodIP, "9093") {
 			t.Fatalf("peer address = %q", address)
