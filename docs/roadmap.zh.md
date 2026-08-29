@@ -139,27 +139,27 @@ controller wiring 累积不必要的冲突。
   - [x] review 并确认
     [Function Runtime Server 协议](design/function-runtime-contract.md)；
   - [x] 增加以 Run UID 为 key 的幂等 register/status/invoke/unregister protobuf operations；
-  - [ ] 实现内置 function adapters：
+  - [x] 实现内置 function adapters：
     - [x] Bash FunctionRuntime adapter：handler validation、registration fencing、单个
       in-flight invocation、有界输出和 unregister drain；
     - [x] Python FunctionRuntime adapter：handler validation、registration fencing、单个
       in-flight invocation、有界输出和 unregister drain；
   - [ ] 增加有界 invocation outputs/artifact references，以及以 Run UID 和 invocation ID
     为 key 的 structured logs；
-  - [ ] 以可独立 review 的分片实现 function control-plane lifecycle：
+  - [x] 以可独立 review 的分片实现 function control-plane lifecycle：
     - [x] 增加 deterministic FunctionRuntime registration request builder，
       包含 immutable-input digest coverage；
     - [x] 在 Run working directory 下经过验证的 `source.inlinePath` 物化 inline function source；
-    - [ ] 让已 assigned 的 function Run 完成 source preparation、安装 cleanup finalizer，
+    - [x] 让已 assigned 的 function Run 完成 source preparation、安装 cleanup finalizer，
       通过 runtimed FunctionRuntime client 进行 local registration，并完成
       `Running -> Ready` transition；
-    - [ ] 观察 local `FunctionStatus`，处理 fatal registration loss、total Run timeout 和
+    - [x] 观察 local `FunctionStatus`，处理 fatal registration loss、total Run timeout 和
       Runtime Server-owned idle timeout；
-    - [ ] 将 registration failure 接入 shared retry engine，同时不 retry 单次 invocation
+    - [x] 将 registration failure 接入 shared retry engine，同时不 retry 单次 invocation
       failure；
-    - [ ] 实现 cancellation 和 deletion finalization：drain 或 cancel local registration，
+    - [x] 实现 cancellation 和 deletion finalization：drain 或 cancel local registration，
       只清理 function-local state，并释放 capacity；
-    - [ ] 在 runtimed restart 后恢复 active function registration，并使用 assignment-UID
+    - [x] 在 runtimed restart 后恢复 active function registration，并使用 assignment-UID
       fencing reconcile stale Runtime Pod assignment；
     - [ ] 增加 registration、retry、timeout、cancellation、deletion、restart recovery 和
       stale-pod fencing 的 unit、integration 和 E2E coverage；

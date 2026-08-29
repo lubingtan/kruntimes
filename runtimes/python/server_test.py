@@ -355,6 +355,11 @@ def handler(event):
 """, filename="app.py")
         registration = self._register_function(wd)
 
+        initial_status = self.function_stub.FunctionStatus(
+            runtime_pb2.FunctionStatusRequest(registration=registration)
+        )
+        self.assertGreater(initial_status.last_activity_unix_nano, 0)
+
         response = self.function_stub.InvokeFunction(
             runtime_pb2.InvokeFunctionRequest(
                 registration=registration,

@@ -104,6 +104,24 @@ resubmitting the same Run cannot restore it; a client that needs a new sandbox
 must create a new Session Run. Explicit suspend and resume semantics are a
 separate v1 design item, not an implicit consequence of timeout recovery.
 
+## Deletion Cleanup
+
+Before Session or Function registration, runtimed adds the shared
+`kruntimes.io/registration-cleanup` finalizer. Deletion is different from a
+normal terminal phase: Kubernetes may delete a Run while it is `Running`,
+`Ready`, or `Finalizing`, and status updates are not the deletion protocol.
+The finalizer keeps the object present until its owning runtimed has stopped
+new data-plane work, idempotently called `CloseSession` or
+`UnregisterFunction`, released local capacity, and removed only Run-local
+state. It is removed only after that cleanup succeeds; a transient close error
+keeps the finalizer and requeues reconciliation.
+
+The finalizer never deletes a referenced PersistentWorkspace or ArtifactStore
+data. Those resources retain their own lifecycle owners. After a runtimed
+restart, the owner recovers an idempotent local registration before closing it;
+it must not silently remove the finalizer merely because its in-memory handle
+was lost.
+
 ## Completion and Artifact Export
 
 Cancellation and successful sandbox completion use the same monotonic

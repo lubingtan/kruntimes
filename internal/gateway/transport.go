@@ -23,3 +23,11 @@ func (GRPCDialer) Dial(_ context.Context, address string) (pb.SessionRuntimeClie
 	}
 	return pb.NewSessionRuntimeClient(connection), connection, nil
 }
+
+func (GRPCDialer) DialFunction(_ context.Context, address string) (pb.FunctionRuntimeClient, io.Closer, error) {
+	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("create FunctionRuntime client: %w", err)
+	}
+	return pb.NewFunctionRuntimeClient(connection), connection, nil
+}

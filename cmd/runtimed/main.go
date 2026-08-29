@@ -225,24 +225,6 @@ func main() {
 
 	sessionOperations := runtimed.NewSessionOperationQueue(sessionMaxQueueSize, sessionMaxTimeout)
 
-	// Start gRPC proxies for logs, artifacts, and SessionRuntime requests.
-	go func() {
-		if err := runtimed.StartRuntimeProxyServer(
-			ctx,
-			runtimeEndpoint,
-			statusAddr,
-			mgr.GetAPIReader(),
-			mgr.GetCache(),
-			artifactStore,
-			sessionOperations,
-			runtimeNamespace,
-			runtimeName,
-			podName,
-		); err != nil {
-			klog.Errorf("Status proxy: %v", err)
-		}
-	}()
-
 	runtimedCtrl := &runtimed.Controller{
 		Client:              mgr.GetClient(),
 		PodReader:           mgr.GetAPIReader(),
@@ -263,6 +245,25 @@ func main() {
 		GatewayCABundle:     gatewayCABundle,
 		Recorder:            mgr.GetEventRecorderFor("runtimed"),
 	}
+
+	// Start gRPC proxies for logs, artifacts, and long-lived Runtime requests.
+	go func() {
+		if err := runtimed.StartRuntimeProxyServer(
+			ctx,
+			runtimeEndpoint,
+			statusAddr,
+			mgr.GetAPIReader(),
+			mgr.GetCache(),
+			artifactStore,
+			sessionOperations,
+			runtimedCtrl,
+			runtimeNamespace,
+			runtimeName,
+			podName,
+		); err != nil {
+			klog.Errorf("Status proxy: %v", err)
+		}
+	}()
 
 	if err := runtimedCtrl.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Runtimed")

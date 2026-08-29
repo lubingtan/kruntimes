@@ -27,9 +27,9 @@ const (
 	RunTimeout    RunPhase = "Timeout"
 	RunCancelled  RunPhase = "Cancelled"
 
-	// RunFunctionCleanupFinalizer ensures that a function registration is
-	// released before its Run is deleted.
-	RunFunctionCleanupFinalizer = "kruntimes.io/function-cleanup"
+	// RunRegistrationCleanupFinalizer ensures that a long-lived Runtime Server
+	// registration is released before its Run is deleted.
+	RunRegistrationCleanupFinalizer = "kruntimes.io/registration-cleanup"
 )
 
 // RunEndpointProtocol identifies the public protocol for invoking a function Run.

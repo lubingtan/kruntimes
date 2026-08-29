@@ -1,6 +1,7 @@
 # Function Mode
 
-本文描述 v0.x 的目标设计，当前尚未实现。Agent sandbox 使用独立的
+本文描述 v0.x Function-mode 设计及已经实现的 control-plane 和 invoke-dataplane 基线；延后
+工作见 [roadmap](../roadmap/)。Agent sandbox 使用独立的
 [Agent Sandbox 的 Session Mode](../session-mode/) 设计。
 
 目标是让 kruntimes 提供低延迟的固定 handler 调用，而不把每次 invocation 都交给

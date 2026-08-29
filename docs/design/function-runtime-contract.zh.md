@@ -24,6 +24,11 @@ Runtime Server 不读取 Kubernetes 对象、不认证调用方、不路由 gate
 artifact，也不调度 capacity。这些职责分别属于 runtimed、Runtime gateway 和 control
 plane。invocation artifact 不属于 v0.x 范围。
 
+runtimed 也会在 Runtime Service port 为 gateway traffic 实现同一个 `FunctionRuntime` service。
+仅在该 proxy hop，`InvokeFunctionRequest.registration` 提供 `run_uid`，而 `registration_id` 为空。
+runtimed 解析当前 assigned owner 及其私有 active registration，填入 opaque ID 后调用 colocated
+Runtime Server。Runtime Server 本身始终要求非空 registration ID；gateway 不会看到或提供它。
+
 function 支持对 custom Runtime 是 opt-in：只支持一次性执行的 Runtime 只需实现并注册 `Runtime`。
 以下精确 message shape 和语义必须在修改 `runtime.proto`、生成 stubs 或内置 Runtime 实现前完成评审。
 
@@ -202,10 +207,11 @@ gateway 初期接收 JSON，并设置 `content_type=application/json`。本地�
   attempt 返回 `FailedPrecondition`。
 - 永久初始化失败通过 `FunctionStatus` 的 `FAILED` 和有界 `fatal_error` 暴露。
 
-`FunctionStatus` 只读取 Runtime Server 本地状态。`last_activity_unix_nano` 在尚无已完成或
-in-flight 工作时为零。`fatal_error` 是有界诊断文本而不是日志。`NotFound` 表示没有该 Run UID
-的 registration；`FailedPrecondition` 表示 registration ID 已过期、正在 drain 或未就绪。
-runtimed 以有界频率轮询它用于健康检查和 idle timeout，绝不把每次 activity 更新写回 Kubernetes。
+`FunctionStatus` 只读取 Runtime Server 本地状态。`last_activity_unix_nano` 在 registration
+变为 ready 时初始化，并在 invocation 开始或完成时更新。这样从未 invoke 的 registration 也会受其
+idle timeout 约束。`fatal_error` 是有界诊断文本而不是日志。`NotFound` 表示没有该 Run UID 的
+registration；`FailedPrecondition` 表示 registration ID 已过期、正在 drain 或未就绪。runtimed
+以有界频率轮询它用于健康检查和 idle timeout，绝不把每次 activity 更新写回 Kubernetes。
 
 如果被分配的 Runtime Pod 没有注册 `FunctionRuntime`，runtimed 会收到 `Unimplemented`。这是永久
 配置失败：Run 不能回退到一次性执行，而是依照不兼容 Runtime 的正常 terminal 或 retry policy 处理。

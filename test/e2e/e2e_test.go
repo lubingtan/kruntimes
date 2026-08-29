@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	appsv1 "k8s.io/api/apps/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 	"github.com/kruntimes/kruntimes/internal/krt"
 	runretry "github.com/kruntimes/kruntimes/internal/retry"
@@ -122,6 +125,10 @@ func ensureRuntime(t *testing.T, name, image string, port int32) {
 }
 
 func ensureRuntimeWithRunsCapacity(t *testing.T, name, image string, port int32, runsCapacity int32) {
+	ensureRuntimeWithReplicasAndRunsCapacity(t, name, image, port, 1, runsCapacity)
+}
+
+func ensureRuntimeWithReplicasAndRunsCapacity(t *testing.T, name, image string, port, replicas, runsCapacity int32) {
 	t.Helper()
 
 	rt := &v1alpha1.Runtime{
@@ -132,7 +139,7 @@ func ensureRuntimeWithRunsCapacity(t *testing.T, name, image string, port int32,
 		Spec: v1alpha1.RuntimeSpec{
 			Template: runtimePodTemplate(image, port),
 			Port:     port,
-			Replicas: 1,
+			Replicas: replicas,
 		},
 	}
 	if runsCapacity > 0 {
@@ -151,7 +158,7 @@ func ensureRuntimeWithRunsCapacity(t *testing.T, name, image string, port int32,
 		}
 		existing.Spec.Template = rt.Spec.Template
 		existing.Spec.Port = port
-		existing.Spec.Replicas = 1
+		existing.Spec.Replicas = replicas
 		if runsCapacity > 0 {
 			existing.Spec.Capacity = rt.Spec.Capacity
 		}
@@ -765,6 +772,305 @@ func TestSessionGatewayExecutesAuthorizedOperation(t *testing.T) {
 	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
 	assertCancelledRun(t, run)
 	_ = waitForGatewayResponse(t, http.MethodGet, baseURL, token, nil, http.StatusConflict)
+}
+
+func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-gateway-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+
+	inline := `def handler(event):
+    return {"status": "ok", "value": event["value"]}
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-gateway-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	if run.Status.Endpoint == nil || run.Status.Endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || len(run.Status.Endpoint.CABundle) == 0 {
+		t.Fatalf("Function Run endpoint = %#v, want HTTPS gateway endpoint with a CA bundle", run.Status.Endpoint)
+	}
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"gateway"}`), http.StatusOK)
+	var invocation struct {
+		InvocationID string `json:"invocationId"`
+		Output       []byte `json:"output"`
+		ContentType  string `json:"contentType"`
+	}
+	if err := json.Unmarshal(response, &invocation); err != nil {
+		t.Fatalf("decode Function invocation response: %v", err)
+	}
+	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\"}\n" {
+		t.Fatalf("Function invocation = %#v, want successful JSON response", invocation)
+	}
+	secondResponse := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"again"}`), http.StatusOK)
+	if err := json.Unmarshal(secondResponse, &invocation); err != nil {
+		t.Fatalf("decode repeated Function invocation response: %v", err)
+	}
+	if invocation.InvocationID == "" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"again\"}\n" {
+		t.Fatalf("repeated Function invocation = %#v, want successful JSON response", invocation)
+	}
+
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, "", []byte(`{"value":"unauthenticated"}`), http.StatusUnauthorized)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, sessionGatewayTokenWithoutRunAccess(t), []byte(`{"value":"unauthorized"}`), http.StatusForbidden)
+}
+
+func TestFunctionRunExpiresWhenIdle(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-idle-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	idleTimeout := int32(1)
+	inline := `def handler(event):
+    return event
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-idle-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler", IdleTimeoutSeconds: &idleTimeout}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create idle Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	waitForRunPhase(t, run, 15*time.Second, v1alpha1.RunTimeout)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || condition.Reason != runretry.ReasonTimeout {
+		t.Fatalf("Completed condition = %#v, want Timeout", condition)
+	}
+}
+
+func TestFunctionRunRecoversInvocationAfterRuntimedRestart(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-recovery-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	inline := `def handler(event):
+    return {"value": event["value"]}
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-recovery-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create recovering Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	baseURL := gatewayEndpointURL(t, waitForGatewayPod(t), run.Status.Endpoint.URL)
+	token := sessionGatewayToken(t, run)
+	_ = waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"before"}`), http.StatusOK)
+	previousRestartCount := runtimedRestartCount(t, run.Status.AssignedPod)
+	killRuntimed(t, run.Status.AssignedPod)
+	waitForRuntimedRestart(t, run.Status.AssignedPod, previousRestartCount)
+
+	response := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"after"}`), http.StatusOK)
+	var invocation struct {
+		Output []byte `json:"output"`
+	}
+	if err := json.Unmarshal(response, &invocation); err != nil {
+		t.Fatalf("decode recovered Function invocation response: %v", err)
+	}
+	if string(invocation.Output) != "{\"value\": \"after\"}\n" {
+		t.Fatalf("recovered Function invocation = %#v, want post-restart output", invocation)
+	}
+}
+
+func TestFunctionRuntimeProxyForwardsToNonOwnerPod(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-proxy-%d", time.Now().UnixNano())
+	ensureRuntimeWithReplicasAndRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 2, 1)
+	waitForRuntimeReadyReplicas(t, runtimeName, 2, 60*time.Second)
+	inline := `def handler(event):
+    return {"value": event["value"]}
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-proxy-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create proxied Function Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	var pods corev1.PodList
+	if err := k8sClient.List(context.Background(), &pods, client.InNamespace(run.Namespace), client.MatchingLabels{"runtime": runtimeName}); err != nil {
+		t.Fatalf("list Runtime Pods: %v", err)
+	}
+	var proxyPod *corev1.Pod
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Name != run.Status.AssignedPod && podReady(pod) {
+			proxyPod = pod
+			break
+		}
+	}
+	if proxyPod == nil {
+		t.Fatalf("Runtime Pods = %#v, want a ready non-owner for Function proxy test", pods.Items)
+	}
+	ownerPod := &corev1.Pod{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: run.Namespace, Name: run.Status.AssignedPod}, ownerPod); err != nil {
+		t.Fatalf("get owner Runtime Pod: %v", err)
+	}
+	if ownerPod.Status.PodIP == "" {
+		t.Fatalf("owner Runtime Pod %s has no Pod IP", ownerPod.Name)
+	}
+	if _, stderr, err := execInPod(context.Background(), proxyPod.Name, "runtimed", []string{"/bin/bash", "-c", fmt.Sprintf("timeout 3 /bin/bash -c '>/dev/tcp/%s/9093'", ownerPod.Status.PodIP)}); err != nil {
+		t.Fatalf("non-owner runtimed cannot reach owner %s: %v: %s", ownerPod.Status.PodIP, err, stderr)
+	}
+
+	ownerPort := availableLocalPort(t)
+	ownerForward, err := forwardPodPort(t.Context(), ownerPod.Namespace, ownerPod.Name, ownerPort, 9093)
+	if err != nil {
+		t.Fatalf("port-forward owner runtimed: %v", err)
+	}
+	ownerConnection, err := grpc.NewClient(fmt.Sprintf("passthrough:///127.0.0.1:%d", ownerPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		_ = ownerForward.Close()
+		t.Fatalf("dial owner runtimed: %v", err)
+	}
+	directCtx, directCancel := context.WithTimeout(t.Context(), 10*time.Second)
+	directResponse, directErr := pb.NewFunctionRuntimeClient(ownerConnection).InvokeFunction(directCtx, &pb.InvokeFunctionRequest{
+		Registration: &pb.FunctionRegistration{RunUid: string(run.UID)}, InvocationId: "owner-invoke", ContentType: "application/json", Input: []byte(`{"value":"owner"}`),
+	})
+	directCancel()
+	_ = ownerConnection.Close()
+	_ = ownerForward.Close()
+	if directErr != nil {
+		t.Fatalf("invoke Function through owner runtimed: %v", directErr)
+	}
+	if string(directResponse.GetOutput()) != "{\"value\": \"owner\"}\n" {
+		t.Fatalf("owner Function invocation = %#v, want direct response", directResponse)
+	}
+
+	localPort := availableLocalPort(t)
+	forward, err := forwardPodPort(t.Context(), proxyPod.Namespace, proxyPod.Name, localPort, 9093)
+	if err != nil {
+		t.Fatalf("port-forward non-owner runtimed: %v", err)
+	}
+	t.Cleanup(func() { _ = forward.Close() })
+	connection, err := grpc.NewClient(fmt.Sprintf("passthrough:///127.0.0.1:%d", localPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial non-owner runtimed: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	invokeCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	response, err := pb.NewFunctionRuntimeClient(connection).InvokeFunction(invokeCtx, &pb.InvokeFunctionRequest{
+		Registration: &pb.FunctionRegistration{RunUid: string(run.UID)},
+		InvocationId: "proxied-invoke",
+		ContentType:  "application/json",
+		Input:        []byte(`{"value":"proxied"}`),
+	})
+	if err != nil {
+		t.Logf("non-owner runtimed logs:\n%s", runtimedPodLogs(t, proxyPod.Namespace, proxyPod.Name))
+		t.Logf("owner runtimed logs:\n%s", runtimedPodLogs(t, ownerPod.Namespace, ownerPod.Name))
+		t.Fatalf("invoke Function through non-owner runtimed: %v", err)
+	}
+	if response.GetInvocationId() != "proxied-invoke" || string(response.GetOutput()) != "{\"value\": \"proxied\"}\n" {
+		t.Fatalf("proxied Function invocation = %#v, want non-owner forwarding response", response)
+	}
+}
+
+func TestSessionRuntimeProxyForwardsToNonOwnerPod(t *testing.T) {
+	runtimeName := fmt.Sprintf("session-proxy-%d", time.Now().UnixNano())
+	ensureRuntimeWithReplicasAndRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 2, 1)
+	waitForRuntimeReadyReplicas(t, runtimeName, 2, 60*time.Second)
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-proxy-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), run); err != nil {
+		t.Fatalf("create proxied Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), run) })
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	var pods corev1.PodList
+	if err := k8sClient.List(context.Background(), &pods, client.InNamespace(run.Namespace), client.MatchingLabels{"runtime": runtimeName}); err != nil {
+		t.Fatalf("list Runtime Pods: %v", err)
+	}
+	var proxyPod *corev1.Pod
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Name != run.Status.AssignedPod && podReady(pod) {
+			proxyPod = pod
+			break
+		}
+	}
+	if proxyPod == nil {
+		t.Fatalf("Runtime Pods = %#v, want a ready non-owner for Session proxy test", pods.Items)
+	}
+	ownerPod := &corev1.Pod{}
+	if err := k8sClient.Get(context.Background(), client.ObjectKey{Namespace: run.Namespace, Name: run.Status.AssignedPod}, ownerPod); err != nil {
+		t.Fatalf("get owner Runtime Pod: %v", err)
+	}
+	if ownerPod.Status.PodIP == "" {
+		t.Fatalf("owner Runtime Pod %s has no Pod IP", ownerPod.Name)
+	}
+	if _, stderr, err := execInPod(context.Background(), proxyPod.Name, "runtimed", []string{"/bin/bash", "-c", fmt.Sprintf("timeout 3 /bin/bash -c '>/dev/tcp/%s/9093'", ownerPod.Status.PodIP)}); err != nil {
+		t.Fatalf("non-owner runtimed cannot reach owner %s: %v: %s", ownerPod.Status.PodIP, err, stderr)
+	}
+
+	localPort := availableLocalPort(t)
+	forward, err := forwardPodPort(t.Context(), proxyPod.Namespace, proxyPod.Name, localPort, 9093)
+	if err != nil {
+		t.Fatalf("port-forward non-owner runtimed: %v", err)
+	}
+	t.Cleanup(func() { _ = forward.Close() })
+	connection, err := grpc.NewClient(fmt.Sprintf("passthrough:///127.0.0.1:%d", localPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial non-owner runtimed: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	statusCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	response, err := pb.NewSessionRuntimeClient(connection).GetSessionStatus(statusCtx, &pb.GetSessionStatusRequest{
+		Identity: &pb.SessionIdentity{RunUid: string(run.UID), AssignedPodUid: string(run.Status.AssignedPodUID)},
+	})
+	if err != nil {
+		t.Logf("non-owner runtimed logs:\n%s", runtimedPodLogs(t, proxyPod.Namespace, proxyPod.Name))
+		t.Logf("owner runtimed logs:\n%s", runtimedPodLogs(t, ownerPod.Namespace, ownerPod.Name))
+		t.Fatalf("get Session status through non-owner runtimed: %v", err)
+	}
+	if response.GetState() != pb.SessionState_SESSION_STATE_READY {
+		t.Fatalf("proxied Session state = %s, want %s", response.GetState(), pb.SessionState_SESSION_STATE_READY)
+	}
+}
+
+func runtimedPodLogs(t *testing.T, namespace, podName string) string {
+	t.Helper()
+	stream, err := coreClientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{Container: "runtimed"}).Stream(context.Background())
+	if err != nil {
+		return fmt.Sprintf("get logs: %v", err)
+	}
+	defer stream.Close()
+	contents, err := io.ReadAll(stream)
+	if err != nil {
+		return fmt.Sprintf("read logs: %v", err)
+	}
+	return string(contents)
 }
 
 func TestSessionGatewayServesTLS(t *testing.T) {

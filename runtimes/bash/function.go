@@ -79,14 +79,15 @@ func (s *Server) RegisterFunction(ctx context.Context, req *pb.RegisterFunctionR
 		return nil, status.Errorf(codes.Internal, "generate registration id: %v", err)
 	}
 	entry := &functionEntry{
-		registration: &pb.FunctionRegistration{RunUid: req.RunUid, RegistrationId: registrationID},
-		attempt:      req.RegistrationAttempt,
-		digest:       req.RegistrationDigest,
-		workingDir:   workingDir,
-		handlerFile:  handlerFile,
-		handlerName:  handlerName,
-		env:          cloneStringMap(req.Env),
-		state:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+		registration:         &pb.FunctionRegistration{RunUid: req.RunUid, RegistrationId: registrationID},
+		attempt:              req.RegistrationAttempt,
+		digest:               req.RegistrationDigest,
+		workingDir:           workingDir,
+		handlerFile:          handlerFile,
+		handlerName:          handlerName,
+		env:                  cloneStringMap(req.Env),
+		state:                pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+		lastActivityUnixNano: time.Now().UnixNano(),
 	}
 	s.mu.Lock()
 	s.functions[req.RunUid] = entry

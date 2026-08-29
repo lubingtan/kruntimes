@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
 )
 
@@ -35,6 +36,77 @@ type activeRun struct {
 	sessionRegistering     bool
 	sessionCloseMu         sync.Mutex
 	sessionClosed          atomic.Bool
+	functionRegistrationMu sync.Mutex
+	functionRegistration   *functionRegistrationState
+	functionRegistering    bool
+	functionCloseMu        sync.Mutex
+	functionClosed         atomic.Bool
+}
+
+type functionRegistrationState struct {
+	registration *pb.FunctionRegistration
+	failure      *functionRegistrationFailure
+}
+
+type functionRegistrationFailure struct {
+	reason  string
+	message string
+}
+
+func (ar *activeRun) beginFunctionRegistration() bool {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	if ar.functionRegistering {
+		return false
+	}
+	ar.functionRegistering = true
+	ar.functionRegistration = nil
+	return true
+}
+
+func (ar *activeRun) finishFunctionRegistration(registration *pb.FunctionRegistration, failure *functionRegistrationFailure) {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	ar.functionRegistering = false
+	ar.functionRegistration = &functionRegistrationState{registration: registration, failure: failure}
+}
+
+func (ar *activeRun) functionRegistrationInFlight() bool {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	return ar.functionRegistering
+}
+
+func (ar *activeRun) functionRegistrationRef() *pb.FunctionRegistration {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	if ar.functionRegistration == nil || ar.functionRegistration.registration == nil {
+		return nil
+	}
+	return ar.functionRegistration.registration
+}
+
+func (ar *activeRun) consumeFunctionRegistrationFailure() *functionRegistrationFailure {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	if ar.functionRegistration == nil {
+		return nil
+	}
+	failure := ar.functionRegistration.failure
+	ar.functionRegistration.failure = nil
+	return failure
+}
+
+// resetFunctionRegistration drops the local reference after the shared retry
+// engine has advanced the registration attempt. The next reconciliation then
+// issues RegisterFunction for that new attempt; a Runtime Server uses the
+// attempt to fence any prior registration generation.
+func (ar *activeRun) resetFunctionRegistration() {
+	ar.functionRegistrationMu.Lock()
+	defer ar.functionRegistrationMu.Unlock()
+	ar.functionRegistering = false
+	ar.functionRegistration = nil
+	ar.functionClosed.Store(false)
 }
 
 // executionStartFailure is recorded by the asynchronous local execution

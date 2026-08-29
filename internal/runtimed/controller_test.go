@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1293,6 +1294,428 @@ func TestSessionRegistrationAsyncDoesNotUpdateRunStatus(t *testing.T) {
 	}
 }
 
+func TestFunctionRunBecomesReadyFromReconciledRuntimeStatus(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration: registration,
+		State:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient, GatewayURL: "https://gateway.default.svc", GatewayCABundle: []byte("test-ca")}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileFunctionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileFunctionRegistration: %v", err)
+	}
+	if functionClient.registerRequest != nil {
+		t.Fatal("RegisterFunction was called although the Runtime Server was already ready")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunReady {
+		t.Fatalf("phase = %s, want Ready", updated.Status.Phase)
+	}
+	if condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionReady); condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "FunctionRegistered" {
+		t.Fatalf("Ready condition = %#v, want FunctionRegistered true", condition)
+	}
+	if endpoint := updated.Status.Endpoint; endpoint == nil || endpoint.Protocol != v1alpha1.RunEndpointProtocolHTTPS || endpoint.URL != "https://gateway.default.svc/v1/namespaces/default/runtimes/python/functions/function-uid:invoke" || string(endpoint.CABundle) != "test-ca" {
+		t.Fatalf("endpoint = %#v", endpoint)
+	}
+}
+
+func TestFunctionRegistrationAsyncDoesNotUpdateRunStatus(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{registerCalled: make(chan struct{})}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient, rlegCh: make(chan event.GenericEvent, 1)}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileFunctionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileFunctionRegistration: %v", err)
+	}
+	select {
+	case <-functionClient.registerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("RegisterFunction was not called")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunRunning {
+		t.Fatalf("phase = %s, want Running before a later reconcile observes Ready", updated.Status.Phase)
+	}
+	select {
+	case <-c.rlegCh:
+	case <-time.After(time.Second):
+		t.Fatal("registration completion did not enqueue the Run")
+	}
+}
+
+func TestReadyFunctionRecoversRegistrationAfterRuntimedRestart(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Status.Phase = v1alpha1.RunReady
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{registerCalled: make(chan struct{})}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient, rlegCh: make(chan event.GenericEvent, 1)}
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	select {
+	case <-functionClient.registerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("RegisterFunction was not called to recover the Ready Run")
+	}
+	if functionClient.registerRequest == nil || functionClient.registerRequest.RegistrationAttempt != 1 {
+		t.Fatalf("recovery registration request = %#v, want initial attempt", functionClient.registerRequest)
+	}
+	if c.activeRunCount() != 1 {
+		t.Fatalf("activeRunCount = %d, want 1 after recovery", c.activeRunCount())
+	}
+}
+
+func TestScheduledFunctionAddsCleanupFinalizerBeforeRegistration(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Status.Phase = v1alpha1.RunScheduled
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod"}
+
+	if _, err := c.reconcileScheduled(t.Context(), run); err != nil {
+		t.Fatalf("reconcileScheduled: %v", err)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if !slices.Contains(updated.Finalizers, v1alpha1.RunRegistrationCleanupFinalizer) {
+		t.Fatalf("finalizers = %v, want registration cleanup finalizer", updated.Finalizers)
+	}
+	if updated.Status.Phase != v1alpha1.RunRunning {
+		t.Fatalf("phase = %s, want Running after claim", updated.Status.Phase)
+	}
+}
+
+func TestScheduledSessionAddsCleanupFinalizerBeforeRegistration(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid"},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunScheduled},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod"}
+
+	if _, err := c.reconcileScheduled(t.Context(), run); err != nil {
+		t.Fatalf("reconcileScheduled: %v", err)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if !slices.Contains(updated.Finalizers, v1alpha1.RunRegistrationCleanupFinalizer) {
+		t.Fatalf("finalizers = %v, want registration cleanup finalizer", updated.Finalizers)
+	}
+}
+
+func TestReadyFunctionCancellationUnregistersBeforeTerminalStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
+	run.Status.Phase = v1alpha1.RunReady
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	if len(functionClient.unregisterRequests) != 1 || functionClient.unregisterRequests[0].GetRegistration().GetRegistrationId() != registration.GetRegistrationId() || !functionClient.unregisterRequests[0].GetCancelInFlight() {
+		t.Fatalf("UnregisterFunction requests = %#v, want cancelled registration", functionClient.unregisterRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunCancelled {
+		t.Fatalf("phase = %s, want Cancelled after unregister", updated.Status.Phase)
+	}
+}
+
+func TestDeletingFunctionRemovesCleanupFinalizerAfterUnregister(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Finalizers = []string{v1alpha1.RunRegistrationCleanupFinalizer}
+	now := metav1.Now()
+	run.DeletionTimestamp = &now
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileDeletingRegistration(t.Context(), run); err != nil {
+		t.Fatalf("reconcileDeletingRegistration: %v", err)
+	}
+	if len(functionClient.unregisterRequests) != 1 {
+		t.Fatalf("UnregisterFunction requests = %#v, want one", functionClient.unregisterRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err == nil {
+		t.Fatalf("Run still exists after removing its last finalizer: %#v", updated.Finalizers)
+	}
+}
+
+func TestDeletingFunctionRecoversRegistrationBeforeRemovingFinalizer(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Finalizers = []string{v1alpha1.RunRegistrationCleanupFinalizer}
+	now := metav1.Now()
+	run.DeletionTimestamp = &now
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+
+	if _, err := c.reconcileDeletingRegistration(t.Context(), run); err != nil {
+		t.Fatalf("reconcileDeletingRegistration: %v", err)
+	}
+	if functionClient.registerRequest == nil {
+		t.Fatal("RegisterFunction was not called to recover the opaque registration ID")
+	}
+	if len(functionClient.unregisterRequests) != 1 {
+		t.Fatalf("UnregisterFunction requests = %#v, want one", functionClient.unregisterRequests)
+	}
+}
+
+func TestDeletingFunctionRetainsFinalizerWhenUnregisterFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Finalizers = []string{v1alpha1.RunRegistrationCleanupFinalizer}
+	now := metav1.Now()
+	run.DeletionTimestamp = &now
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{unregisterErr: status.Error(codes.Unavailable, "runtime unavailable")}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	result, err := c.reconcileDeletingRegistration(t.Context(), run)
+	if err == nil || result.RequeueAfter != time.Second {
+		t.Fatalf("reconcileDeletingRegistration = %#v, %v; want error and 1s requeue", result, err)
+	}
+	if c.activeRunCount() != 1 {
+		t.Fatalf("activeRunCount = %d, want 1 while finalizer cleanup is retried", c.activeRunCount())
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get Run with retained finalizer: %v", err)
+	}
+	if !slices.Contains(updated.Finalizers, v1alpha1.RunRegistrationCleanupFinalizer) {
+		t.Fatalf("finalizers = %v, want registration cleanup finalizer retained", updated.Finalizers)
+	}
+}
+
+func TestDeletingSessionClosesBeforeRemovingFinalizer(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	now := metav1.Now()
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "session", Namespace: "default", UID: "session-uid", Finalizers: []string{v1alpha1.RunRegistrationCleanupFinalizer}, DeletionTimestamp: &now},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunReady, AssignedPod: "runtime-pod", AssignedPodUID: "runtime-pod-uid"},
+	}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", sessionCli: sessionClient}
+	ar := newActiveRun(run, time.Now())
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileDeletingRegistration(t.Context(), run); err != nil {
+		t.Fatalf("reconcileDeletingRegistration: %v", err)
+	}
+	if len(sessionClient.closeRequests) != 1 || sessionClient.closeRequests[0].GetIdentity().GetRunUid() != string(run.UID) {
+		t.Fatalf("CloseSession requests = %#v, want one for the deleting Session", sessionClient.closeRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err == nil {
+		t.Fatalf("Run still exists after removing its last finalizer: %#v", updated.Finalizers)
+	}
+}
+
+func TestReadyFunctionTotalTimeoutUnregistersBeforeTimeoutStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	totalTimeout := metav1.Duration{Duration: time.Second}
+	run := functionLifecycleTestRun()
+	run.Spec.Timeout = &totalTimeout
+	run.Status.Phase = v1alpha1.RunReady
+	run.Status.StartTime = &metav1.Time{Time: time.Now().Add(-2 * time.Second)}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration: registration,
+		State:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := c.buildActiveRun(run)
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	if len(functionClient.unregisterRequests) != 1 {
+		t.Fatalf("UnregisterFunction requests = %#v, want one", functionClient.unregisterRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunTimeout || updated.Status.Message != "timeout after 1s" {
+		t.Fatalf("status = %#v, want Timeout after total timeout", updated.Status)
+	}
+}
+
+func TestReadyFunctionIdleTimeoutUnregistersBeforeTimeoutStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	idleTimeout := int32(1)
+	run := functionLifecycleTestRun()
+	run.Spec.Mode.Function.IdleTimeoutSeconds = &idleTimeout
+	run.Status.Phase = v1alpha1.RunReady
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration:         registration,
+		State:                pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+		LastActivityUnixNano: time.Now().Add(-2 * time.Second).UnixNano(),
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := c.buildActiveRun(run)
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileReadyFunction(t.Context(), run); err != nil {
+		t.Fatalf("reconcileReadyFunction: %v", err)
+	}
+	if len(functionClient.unregisterRequests) != 1 {
+		t.Fatalf("UnregisterFunction requests = %#v, want one", functionClient.unregisterRequests)
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Phase != v1alpha1.RunTimeout || updated.Status.Message != "function idle timeout exceeded" {
+		t.Fatalf("status = %#v, want idle Timeout", updated.Status)
+	}
+}
+
+func TestFunctionRegistrationFailureResetsLocalHandleForRetry(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Spec.RetryPolicy = &v1alpha1.RetryPolicy{MaxAttempts: 2}
+	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "registration-1"}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{status: &pb.FunctionStatusResponse{
+		Registration: registration,
+		State:        pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_FAILED,
+		FatalError:   "registration failed",
+	}}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := c.buildActiveRun(run)
+	ar.finishFunctionRegistration(registration, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	if _, err := c.reconcileFunctionRegistration(t.Context(), ar); err != nil {
+		t.Fatalf("reconcileFunctionRegistration: %v", err)
+	}
+	if ar.functionRegistrationRef() != nil {
+		t.Fatal("failed registration handle was retained instead of reset for retry")
+	}
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get updated Run: %v", err)
+	}
+	if updated.Status.Attempt != 2 {
+		t.Fatalf("attempt = %d, want 2", updated.Status.Attempt)
+	}
+	condition := meta.FindStatusCondition(updated.Status.Conditions, runstatus.ConditionRunning)
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		t.Fatalf("Running condition = %#v, want retry backoff", condition)
+	}
+}
+
+func functionLifecycleTestRun() *v1alpha1.Run {
+	inline := "def invoke(event):\n    return event\n"
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "function", Namespace: "default", UID: "function-uid"},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "python",
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "handler.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "handler.invoke"}},
+		},
+		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning, AssignedPod: "runtime-pod", AssignedPodUID: "runtime-pod-uid", StartTime: &metav1.Time{Time: time.Now()}},
+	}
+}
+
 func TestApplySessionReadyUsesCachedRun(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
@@ -2214,6 +2637,46 @@ type fakeSessionRuntimeClient struct {
 	closeRequests   []*pb.CloseSessionRequest
 	closeErr        error
 	registerCalled  chan struct{}
+}
+
+type fakeFunctionRuntimeClient struct {
+	pb.FunctionRuntimeClient
+	registerRequest    *pb.RegisterFunctionRequest
+	registerErr        error
+	status             *pb.FunctionStatusResponse
+	statusErr          error
+	registerCalled     chan struct{}
+	unregisterRequests []*pb.UnregisterFunctionRequest
+	unregisterErr      error
+}
+
+func (f *fakeFunctionRuntimeClient) RegisterFunction(_ context.Context, request *pb.RegisterFunctionRequest, _ ...grpc.CallOption) (*pb.RegisterFunctionResponse, error) {
+	f.registerRequest = request
+	if f.registerCalled != nil {
+		close(f.registerCalled)
+	}
+	if f.registerErr != nil {
+		return nil, f.registerErr
+	}
+	return &pb.RegisterFunctionResponse{Registration: &pb.FunctionRegistration{RunUid: request.RunUid, RegistrationId: "registration-1"}, State: pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY}, nil
+}
+
+func (f *fakeFunctionRuntimeClient) FunctionStatus(context.Context, *pb.FunctionStatusRequest, ...grpc.CallOption) (*pb.FunctionStatusResponse, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.status != nil {
+		return f.status, nil
+	}
+	return &pb.FunctionStatusResponse{State: pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY}, nil
+}
+
+func (f *fakeFunctionRuntimeClient) UnregisterFunction(_ context.Context, request *pb.UnregisterFunctionRequest, _ ...grpc.CallOption) (*pb.UnregisterFunctionResponse, error) {
+	f.unregisterRequests = append(f.unregisterRequests, request)
+	if f.unregisterErr != nil {
+		return nil, f.unregisterErr
+	}
+	return &pb.UnregisterFunctionResponse{Registration: request.Registration}, nil
 }
 
 func (f *fakeSessionRuntimeClient) RegisterSession(_ context.Context, request *pb.RegisterSessionRequest, _ ...grpc.CallOption) (*pb.SessionStatus, error) {

@@ -24,6 +24,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -124,6 +125,7 @@ type Controller struct {
 
 	runtimeCli        pb.RuntimeClient
 	sessionCli        pb.SessionRuntimeClient
+	functionCli       pb.FunctionRuntimeClient
 	SessionOperations *SessionOperationQueue
 	rleg              rlegpkg.RunLifecycleEventGenerator
 	Recorder          record.EventRecorder
@@ -154,6 +156,7 @@ func (c *Controller) Start(ctx context.Context) error {
 	}
 	c.runtimeCli = pb.NewRuntimeClient(conn)
 	c.sessionCli = pb.NewSessionRuntimeClient(conn)
+	c.functionCli = pb.NewFunctionRuntimeClient(conn)
 	go func() { <-ctx.Done(); conn.Close() }()
 
 	c.rleg = rlegpkg.NewGenericRLEG(&statusAdapter{cli: c.runtimeCli}, rlegpkg.DefaultRelistInterval)
@@ -232,8 +235,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !run.DeletionTimestamp.IsZero() {
-		c.releaseActiveRun(ctx, c.buildActiveRun(&run))
-		return ctrl.Result{}, nil
+		return c.reconcileDeletingRegistration(ctx, &run)
 	}
 
 	switch run.Status.Phase {
@@ -259,6 +261,11 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	}
 	if run.Spec.HasImmediateTermination() {
 		return c.applyTerminal(ctx, c.buildActiveRun(run), v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
+	}
+	if (run.Spec.Mode.Session != nil || run.Spec.Mode.Function != nil) && controllerutil.AddFinalizer(run, v1alpha1.RunRegistrationCleanupFinalizer) {
+		if err := c.Update(ctx, run); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add registration cleanup finalizer: %w", err)
+		}
 	}
 	ar := newActiveRun(run, time.Now())
 	if !c.tryClaimActiveRun(ar) {
@@ -286,7 +293,7 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	klog.Infof("Claimed run %s", run.Name)
 	c.recordActiveRuns(run.Spec.Runtime)
 
-	if run.Spec.Mode.Session != nil {
+	if run.Spec.Mode.Session != nil || run.Spec.Mode.Function != nil {
 		return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
 	}
 	if err := prepareSource(ar); err != nil {
@@ -424,6 +431,9 @@ func (c *Controller) reconcileRunning(ctx context.Context, run *v1alpha1.Run) (c
 	if run.Spec.Mode.Session != nil {
 		return c.reconcileRunningSession(ctx, run)
 	}
+	if run.Spec.Mode.Function != nil {
+		return c.reconcileRunningFunction(ctx, run)
+	}
 	uid := string(run.UID)
 	val, exists := c.activeRuns.Load(uid)
 	if !exists {
@@ -471,9 +481,16 @@ func (c *Controller) reconcileRunningSession(ctx context.Context, run *v1alpha1.
 // reconcileReady handles the long-lived Session Run reservation. Task Runs
 // never enter Ready.
 func (c *Controller) reconcileReady(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
-	if run.Spec.Mode.Session == nil {
-		return ctrl.Result{}, nil
+	if run.Spec.Mode.Session != nil {
+		return c.reconcileReadySession(ctx, run)
 	}
+	if run.Spec.Mode.Function != nil {
+		return c.reconcileReadyFunction(ctx, run)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (c *Controller) reconcileReadySession(ctx context.Context, run *v1alpha1.Run) (ctrl.Result, error) {
 	uid := string(run.UID)
 	value, exists := c.activeRuns.Load(uid)
 	if !exists {
@@ -774,7 +791,9 @@ func (c *Controller) scheduleRetry(ctx context.Context, ar *activeRun, curAttemp
 	// task before its next Running reconciliation so that Status can distinguish
 	// a new attempt (NotFound) from the previous attempt's terminal result.
 	if run.Spec.Mode.Session == nil {
-		c.releaseExecution(ctx, string(run.UID))
+		if err := c.forgetTaskExecution(ctx, string(run.UID)); err != nil {
+			c.Log.Error(err, "failed to forget Runtime execution before retry", "run", client.ObjectKeyFromObject(run))
+		}
 	}
 	runRetries.WithLabelValues(run.Spec.Runtime, reason).Inc()
 	c.recordEvent(run, corev1.EventTypeWarning, "RunFailedRetrying",
@@ -827,12 +846,15 @@ func (c *Controller) applyTerminalWithOutput(
 // ===========================================================================
 
 func (c *Controller) cleanup(ctx context.Context, ar *activeRun, phase v1alpha1.RunPhase) {
-	c.releaseActiveRun(ctx, ar)
+	c.bestEffortReleaseRuntimeServerState(ctx, ar)
+	c.releaseLocalRunState(ctx, ar)
 	runDuration.WithLabelValues(ar.run.Spec.Runtime).Observe(time.Since(ar.start).Seconds())
 	runsCompleted.WithLabelValues(ar.run.Spec.Runtime, string(phase)).Inc()
 }
 
-func (c *Controller) releaseActiveRun(ctx context.Context, ar *activeRun) {
+// releaseLocalRunState releases only runtimed-owned bookkeeping and files. It
+// deliberately never calls the Runtime Server.
+func (c *Controller) releaseLocalRunState(ctx context.Context, ar *activeRun) {
 	if ar == nil || ar.run == nil || ar.run.UID == "" {
 		return
 	}
@@ -843,11 +865,6 @@ func (c *Controller) releaseActiveRun(ctx context.Context, ar *activeRun) {
 	}
 	c.removeActiveRunClaim(uid)
 	c.recordActiveRuns(run.Spec.Runtime)
-	if run.Spec.Mode.Session != nil {
-		c.closeActiveSession(ctx, ar)
-	} else {
-		c.releaseExecution(ctx, uid)
-	}
 	if err := cleanupRunFiles(ar); err != nil {
 		c.Log.Error(err, "failed to clean Run files", "run", client.ObjectKeyFromObject(run))
 	}
@@ -857,16 +874,42 @@ func (c *Controller) cleanupDeletedRun(ctx context.Context, key types.Namespaced
 	c.activeRuns.Range(func(_, value any) bool {
 		ar := value.(*activeRun)
 		if ar.run.Namespace == key.Namespace && ar.run.Name == key.Name {
-			c.releaseActiveRun(ctx, ar)
+			c.bestEffortReleaseRuntimeServerState(ctx, ar)
+			c.releaseLocalRunState(ctx, ar)
 			return false
 		}
 		return true
 	})
 }
 
-func (c *Controller) releaseExecution(ctx context.Context, uid string) {
+// bestEffortReleaseRuntimeServerState performs terminal cleanup when no
+// Kubernetes finalizer is available to drive retries.
+func (c *Controller) bestEffortReleaseRuntimeServerState(ctx context.Context, ar *activeRun) {
+	if err := c.releaseRuntimeServerState(ctx, ar); err != nil {
+		c.Log.Error(err, "failed to release Runtime execution", "run", client.ObjectKeyFromObject(ar.run))
+	}
+}
+
+// releaseRuntimeServerState removes a Run's state from its Runtime Server. It
+// returns an error so a Kubernetes finalizer can block deletion until remote
+// state is actually gone.
+func (c *Controller) releaseRuntimeServerState(ctx context.Context, ar *activeRun) error {
+	if ar == nil || ar.run == nil {
+		return nil
+	}
+	switch {
+	case ar.run.Spec.Mode.Session != nil:
+		return c.ensureActiveSessionClosed(ctx, ar)
+	case ar.run.Spec.Mode.Function != nil:
+		return c.ensureActiveFunctionClosed(ctx, ar)
+	default:
+		return c.forgetTaskExecution(ctx, string(ar.run.UID))
+	}
+}
+
+func (c *Controller) forgetTaskExecution(ctx context.Context, uid string) error {
 	if c.runtimeCli == nil || uid == "" {
-		return
+		return nil
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, executionCleanupTimeout)
 	defer cancel()
@@ -874,12 +917,11 @@ func (c *Controller) releaseExecution(ctx context.Context, uid string) {
 	for {
 		_, err := c.runtimeCli.Forget(cleanupCtx, &pb.ForgetRequest{Id: uid})
 		if err == nil || status.Code(err) == codes.NotFound || status.Code(err) == codes.Unimplemented {
-			return
+			return nil
 		}
 		select {
 		case <-cleanupCtx.Done():
-			c.Log.Error(err, "failed to forget terminal runtime execution", "runUID", uid)
-			return
+			return fmt.Errorf("forget Runtime execution: %w", err)
 		case <-time.After(executionCleanupRetry):
 		}
 	}
@@ -908,7 +950,9 @@ func (c *Controller) startExecutionAsync(ar *activeRun) {
 		uid := string(ar.run.UID)
 		if val, ok := c.activeRuns.Load(uid); !ok || val != ar {
 			ar.finishExecutionStart(nil)
-			c.releaseExecution(ctx, uid)
+			if err := c.forgetTaskExecution(ctx, uid); err != nil {
+				c.Log.Error(err, "failed to forget Runtime execution after stale start", "runUID", uid)
+			}
 			return
 		}
 		ar.finishExecutionStart(nil)

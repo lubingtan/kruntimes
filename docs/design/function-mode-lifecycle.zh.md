@@ -177,19 +177,23 @@ ambiguity 由后面的 invoke contract 定义。
 
 ## Cleanup 与 Finalization
 
-注册 function 前，runtimed 增加 `kruntimes.io/function-cleanup` finalizer。Function Run 进入
-deleting 后，即使正常 execution creation 已停止，仍需 reconcile：
+在注册长生命周期 Run 前，runtimed 会增加共享的
+`kruntimes.io/registration-cleanup` finalizer。Function 和 Session Run 都持有不应在
+其 Run object 删除后继续存在的 opaque、Pod-local Runtime Server state，因此使用相同的
+Kubernetes deletion protocol。Function Run 进入 deleting 后，即使正常 execution creation
+已停止，仍需 reconcile：
 
 1. 停止接受新 invokes；
 2. 等待或取消有界的 in-flight invokes；
 3. 幂等调用 `UnregisterFunction`；
 4. 删除 function-local workspace 和 retained invocation state；
 5. 释放 active capacity entry；
-6. 移除 finalizer。
+6. 移除共享 finalizer。
 
 如果 assigned Pod 已不存在，stale-recovery controller 可在确认 Pod-local registration 不可能
 继续 serving 后移除 finalizer。PersistentWorkspace 和 ArtifactStore cleanup 仍由已有
-controllers 与 policies 负责；function finalizer 不得隐式删除 shared persistent data。
+controllers 与 policies 负责；registration-cleanup finalizer 不得隐式删除 shared persistent
+data。
 
 Cancellation 保留 Run object 并记录 terminal status。Deletion 是独立的 user request，使用
 finalizer path。两种操作在 controller 和 runtimed restart 后都必须保持幂等。
@@ -228,8 +232,9 @@ Pod。请求处理规则：
 
 - UID 或 current-object 不匹配：`404 Not Found`；
 - Run 已知但 not ready、recovering 或 terminating：`503 Service Unavailable`；
-- local owner：调用本地 Runtime Server；
-- remote owner：最多 proxy 一次到 owning Pod gateway port；
+- local owner：解析私有 registration reference 后调用本地 Runtime Server；
+- remote owner：将相同的 `FunctionRuntime.InvokeFunction` request 最多 proxy 一次到 owning Pod 的
+  runtimed port；
 - owner stale 或 unreachable：返回 `503 Service Unavailable` 并 enqueue recovery；
 - 达到 local concurrency limit：`429 Too Many Requests`。
 
@@ -261,7 +266,7 @@ namespaces。
 第一版 HTTPS request 明确保持有界：
 
 ```http
-POST /v1/namespaces/{namespace}/runs/{name}/{uid}/invoke
+POST /v1/namespaces/{namespace}/runtimes/{runtime}/functions/{uid}:invoke
 Authorization: Bearer <kubernetes-token>
 Content-Type: application/json
 X-Kruntime-Invocation-ID: <caller-generated-id>

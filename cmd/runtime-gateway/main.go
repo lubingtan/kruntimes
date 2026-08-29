@@ -100,6 +100,7 @@ func main() {
 			gateway.AuthorizationCacheOptions{Capacity: authorizationCacheCapacity, TTL: authorizationCacheTTL},
 		),
 		Dialer:                gateway.GRPCDialer{},
+		FunctionDialer:        gateway.GRPCDialer{},
 		HTTPAddress:           httpAddr,
 		HTTPSAddress:          httpsAddr,
 		TLSCertificateFile:    tlsCertificateFile,
