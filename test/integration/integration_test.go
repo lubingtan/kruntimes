@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,11 +44,12 @@ import (
 )
 
 var (
-	testEnv   *envtest.Environment
-	k8sClient client.Client
-	testMgr   ctrl.Manager
-	mgrCtx    context.Context
-	mgrCancel context.CancelFunc
+	testEnv         *envtest.Environment
+	k8sClient       client.Client
+	testMgr         ctrl.Manager
+	mgrCtx          context.Context
+	mgrCancel       context.CancelFunc
+	functionRuntime = newIntegrationFunctionRuntime()
 )
 
 func TestMain(m *testing.M) {
@@ -94,6 +96,14 @@ func TestMain(m *testing.M) {
 		workspaceadmission.ServiceAccountIdentity{},
 		scheme,
 	)
+	functionRuntimeServer := grpc.NewServer()
+	pb.RegisterRuntimeServer(functionRuntimeServer, integrationUnavailableRuntime{})
+	pb.RegisterFunctionRuntimeServer(functionRuntimeServer, functionRuntime)
+	functionRuntimeListener, err := net.Listen("tcp", "localhost:19091")
+	if err != nil {
+		panic("failed to listen for Function Runtime: " + err.Error())
+	}
+	go func() { _ = functionRuntimeServer.Serve(functionRuntimeListener) }()
 
 	if err := (&scheduler.RunReconciler{
 		Client: testMgr.GetClient(),
@@ -101,11 +111,17 @@ func TestMain(m *testing.M) {
 	}).SetupWithManager(testMgr); err != nil {
 		panic("failed to setup scheduler: " + err.Error())
 	}
+	integrationWorkspacePath, err := os.MkdirTemp("", "kruntimes-integration-workspace-")
+	if err != nil {
+		panic("failed to create integration workspace: " + err.Error())
+	}
+	defer os.RemoveAll(integrationWorkspacePath)
 	if err := (&runtimed.Controller{
 		Client:          testMgr.GetClient(),
 		Log:             ctrl.Log.WithName("runtimed"),
 		PodName:         "test-runtimed-pod",
 		RuntimeEndpoint: "localhost:19091",
+		WorkspacePath:   integrationWorkspacePath,
 		Workers:         1,
 	}).SetupWithManager(testMgr); err != nil {
 		panic("failed to setup runtimed: " + err.Error())
@@ -123,11 +139,100 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 
 	mgrCancel()
+	functionRuntimeServer.Stop()
 	if err := testEnv.Stop(); err != nil {
 		panic("failed to stop testenv: " + err.Error())
 	}
 
 	os.Exit(code)
+}
+
+type integrationFunctionRuntime struct {
+	pb.UnimplementedFunctionRuntimeServer
+
+	mu            sync.Mutex
+	registrations map[string]*pb.FunctionRegistration
+	unregisters   map[string]int
+}
+
+// integrationUnavailableRuntime preserves the existing integration contract
+// for one-shot Runs: runtimed can reach a Runtime Server, but execution itself
+// is unavailable and must become a terminal failure. FunctionRuntime is
+// registered on the same test server for the Function lifecycle test below.
+type integrationUnavailableRuntime struct {
+	pb.UnimplementedRuntimeServer
+}
+
+func (integrationUnavailableRuntime) Execute(context.Context, *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
+	return nil, status.Error(codes.Unavailable, "one-shot execution is unavailable in integration tests")
+}
+
+func (integrationUnavailableRuntime) Status(context.Context, *pb.StatusRequest) (*pb.StatusResponse, error) {
+	return nil, status.Error(codes.NotFound, "execution not found")
+}
+
+func (integrationUnavailableRuntime) List(context.Context, *pb.ListRequest) (*pb.ListResponse, error) {
+	return &pb.ListResponse{}, nil
+}
+
+func newIntegrationFunctionRuntime() *integrationFunctionRuntime {
+	return &integrationFunctionRuntime{
+		registrations: make(map[string]*pb.FunctionRegistration),
+		unregisters:   make(map[string]int),
+	}
+}
+
+func (s *integrationFunctionRuntime) RegisterFunction(_ context.Context, request *pb.RegisterFunctionRequest) (*pb.RegisterFunctionResponse, error) {
+	if request.GetRunUid() == "" {
+		return nil, status.Error(codes.InvalidArgument, "run UID is required")
+	}
+	registration := &pb.FunctionRegistration{
+		RunUid:         request.GetRunUid(),
+		RegistrationId: request.GetRunUid() + "-registration",
+	}
+	s.mu.Lock()
+	s.registrations[registration.GetRegistrationId()] = registration
+	s.mu.Unlock()
+	return &pb.RegisterFunctionResponse{Registration: registration, State: pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY}, nil
+}
+
+func (s *integrationFunctionRuntime) FunctionStatus(_ context.Context, request *pb.FunctionStatusRequest) (*pb.FunctionStatusResponse, error) {
+	registration := request.GetRegistration()
+	if registration == nil || registration.GetRegistrationId() == "" {
+		return nil, status.Error(codes.NotFound, "function registration not found")
+	}
+	s.mu.Lock()
+	registered := s.registrations[registration.GetRegistrationId()]
+	s.mu.Unlock()
+	if registered == nil {
+		return nil, status.Error(codes.NotFound, "function registration not found")
+	}
+	return &pb.FunctionStatusResponse{
+		Registration:         registered,
+		State:                pb.FunctionRegistrationState_FUNCTION_REGISTRATION_STATE_READY,
+		LastActivityUnixNano: time.Now().UnixNano(),
+	}, nil
+}
+
+func (s *integrationFunctionRuntime) UnregisterFunction(_ context.Context, request *pb.UnregisterFunctionRequest) (*pb.UnregisterFunctionResponse, error) {
+	registration := request.GetRegistration()
+	if registration == nil || registration.GetRegistrationId() == "" {
+		return nil, status.Error(codes.NotFound, "function registration not found")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.registrations[registration.GetRegistrationId()] == nil {
+		return nil, status.Error(codes.NotFound, "function registration not found")
+	}
+	delete(s.registrations, registration.GetRegistrationId())
+	s.unregisters[registration.GetRunUid()]++
+	return &pb.UnregisterFunctionResponse{Registration: registration}, nil
+}
+
+func (s *integrationFunctionRuntime) unregisterCount(runUID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unregisters[runUID]
 }
 
 func TestRunWorkspaceAdmissionWebhook(t *testing.T) {
@@ -591,7 +696,8 @@ func TestRuntimedClaimAndExecute(t *testing.T) {
 		t.Fatalf("failed to set phase after retries")
 	}
 
-	// Wait for runtimed to pick up and fail (no gRPC runtime on localhost:19091).
+	// Wait for runtimed to pick up and fail because one-shot execution is
+	// deliberately unavailable from the shared integration Runtime Server.
 	var final v1alpha1.Run
 	for i := 0; i < 30; i++ {
 		time.Sleep(200 * time.Millisecond)
@@ -604,6 +710,106 @@ func TestRuntimedClaimAndExecute(t *testing.T) {
 		}
 	}
 	t.Errorf("expected Failed due to no runtime, got phase=%s msg=%s", final.Status.Phase, final.Status.Message)
+}
+
+func TestRuntimedFunctionRegistrationLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	namespace := testNamespace(t, "function-lifecycle-")
+
+	newFunctionRun := func(name string) *v1alpha1.Run {
+		t.Helper()
+		run := &v1alpha1.Run{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name},
+			Spec: v1alpha1.RunSpec{
+				Runtime: "bash",
+				Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+			},
+		}
+		if err := k8sClient.Create(ctx, run); err != nil {
+			t.Fatalf("create Function Run %q: %v", name, err)
+		}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), run); err != nil {
+				return err
+			}
+			run.Status.Phase = v1alpha1.RunScheduled
+			run.Status.AssignedPod = "test-runtimed-pod"
+			run.Status.AssignedPodUID = "test-runtimed-pod-uid"
+			return k8sClient.Status().Update(ctx, run)
+		}); err != nil {
+			t.Fatalf("assign Function Run %q: %v", name, err)
+		}
+		return waitForIntegrationRunPhase(t, ctx, run, v1alpha1.RunReady)
+	}
+
+	t.Run("cancellation unregisters the function", func(t *testing.T) {
+		run := newFunctionRun("cancel")
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), run); err != nil {
+				return err
+			}
+			run.Spec.Termination = &v1alpha1.RunTermination{Mode: v1alpha1.RunTerminationImmediate}
+			return k8sClient.Update(ctx, run)
+		}); err != nil {
+			t.Fatalf("cancel Function Run: %v", err)
+		}
+		cancelled := waitForIntegrationRunPhase(t, ctx, run, v1alpha1.RunCancelled)
+		if got := functionRuntime.unregisterCount(string(cancelled.UID)); got != 1 {
+			t.Fatalf("unregister calls = %d, want 1", got)
+		}
+	})
+
+	t.Run("deletion unregisters the function", func(t *testing.T) {
+		run := newFunctionRun("delete")
+		runUID := string(run.UID)
+		if err := k8sClient.Delete(ctx, run); err != nil {
+			t.Fatalf("delete Function Run: %v", err)
+		}
+		waitForIntegrationRunDeleted(t, ctx, run)
+		if got := functionRuntime.unregisterCount(runUID); got != 1 {
+			t.Fatalf("unregister calls = %d, want 1", got)
+		}
+	})
+}
+
+func waitForIntegrationRunPhase(t *testing.T, ctx context.Context, run *v1alpha1.Run, want v1alpha1.RunPhase) *v1alpha1.Run {
+	t.Helper()
+	current := &v1alpha1.Run{}
+	for {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), current); err != nil {
+			t.Fatalf("get Run %q: %v", run.Name, err)
+		}
+		if current.Status.Phase == want {
+			return current
+		}
+		if current.Status.Phase == v1alpha1.RunFailed || current.Status.Phase == v1alpha1.RunTimeout || current.Status.Phase == v1alpha1.RunCancelled {
+			t.Fatalf("Run %q phase = %s, want %s: %s", run.Name, current.Status.Phase, want, current.Status.Message)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for Run %q phase %s: %v", run.Name, want, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func waitForIntegrationRunDeleted(t *testing.T, ctx context.Context, run *v1alpha1.Run) {
+	t.Helper()
+	for {
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(run), &v1alpha1.Run{})
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("get deleting Run %q: %v", run.Name, err)
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for Run %q deletion: %v", run.Name, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func TestSchedulerKeepsPendingWhenNoMatchingPod(t *testing.T) {

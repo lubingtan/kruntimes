@@ -191,11 +191,15 @@ func (ar *activeRun) consumeSessionRegistrationFailure() *sessionRegistrationFai
 }
 
 func newActiveRun(run *v1alpha1.Run, start time.Time) *activeRun {
+	return newActiveRunWithWorkspace(run, start, workspacePath)
+}
+
+func newActiveRunWithWorkspace(run *v1alpha1.Run, start time.Time, workspaceRoot string) *activeRun {
 	if run == nil {
 		return &activeRun{start: start}
 	}
 
-	workspaceDir := filepath.Join(workspacePath, string(run.UID))
+	workspaceDir := filepath.Join(workspaceRoot, string(run.UID))
 	if run.Spec.Workspace != nil {
 		workspaceDir = persistentWorkspacePath(run.Spec.Workspace.Name)
 	}

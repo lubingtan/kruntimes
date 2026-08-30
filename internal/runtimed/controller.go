@@ -104,6 +104,7 @@ type Controller struct {
 	RuntimeName       string
 	RuntimeNamespace  string
 	RuntimeEndpoint   string
+	WorkspacePath     string
 	GatewayURL        string
 	GatewayCABundle   []byte
 	Workers           int
@@ -267,7 +268,7 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 			return ctrl.Result{}, fmt.Errorf("add registration cleanup finalizer: %w", err)
 		}
 	}
-	ar := newActiveRun(run, time.Now())
+	ar := c.newActiveRun(run, time.Now())
 	if !c.tryClaimActiveRun(ar) {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
@@ -1171,7 +1172,15 @@ func (c *Controller) buildActiveRun(run *v1alpha1.Run) *activeRun {
 	if run.Status.StartTime != nil {
 		start = run.Status.StartTime.Time
 	}
-	return newActiveRun(run, start)
+	return c.newActiveRun(run, start)
+}
+
+func (c *Controller) newActiveRun(run *v1alpha1.Run, start time.Time) *activeRun {
+	workspaceRoot := c.WorkspacePath
+	if workspaceRoot == "" {
+		workspaceRoot = workspacePath
+	}
+	return newActiveRunWithWorkspace(run, start, workspaceRoot)
 }
 
 func podNamespace() string {
