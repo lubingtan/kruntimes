@@ -173,5 +173,5 @@ func (r *StaleRunReaper) handleStaleRun(ctx context.Context, run *v1alpha1.Run, 
 }
 
 func isStaleMonitoredRunPhase(phase v1alpha1.RunPhase) bool {
-	return phase == v1alpha1.RunRunning || phase == v1alpha1.RunReady
+	return phase == v1alpha1.RunRunning || phase == v1alpha1.RunReady || phase == v1alpha1.RunFinalizing
 }

@@ -312,6 +312,9 @@ func TestIsStaleMonitoredRunPhase(t *testing.T) {
 	if !isStaleMonitoredRunPhase(v1alpha1.RunReady) {
 		t.Fatal("Ready Run should be monitored")
 	}
+	if !isStaleMonitoredRunPhase(v1alpha1.RunFinalizing) {
+		t.Fatal("Finalizing Run should be monitored")
+	}
 	if isStaleMonitoredRunPhase(v1alpha1.RunSucceeded) {
 		t.Fatal("terminal Run should not be monitored")
 	}

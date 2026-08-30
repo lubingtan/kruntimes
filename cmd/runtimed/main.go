@@ -281,7 +281,7 @@ func main() {
 	}
 
 	setupLog.Info("starting runtimed", "pod", podName, "runtime", runtimeEndpoint)
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

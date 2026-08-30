@@ -195,6 +195,13 @@ Kubernetes deletion protocol。Function Run 进入 deleting 后，即使正常 e
 controllers 与 policies 负责；registration-cleanup finalizer 不得隐式删除 shared persistent
 data。
 
+正常 Runtime Pod shutdown 时，runtimed 与 controller manager 共享 process signal context，并在
+进程退出前 drain 当前的 `Running`、`Ready` 和 `Finalizing` Run：停止本地 registration、释放本地
+claim，且仅在 Pod-local Runtime Server 确认 cleanup 后移除 registration finalizer。它不自行写入
+terminal status，以免与 stale-recovery controller 竞争；后者观察到 deleting Pod 后，按现有 fenced
+`PodTerminating` retry 或 failure transition 更新状态。SIGKILL、node loss 和 force deletion 会跳过
+这段 best-effort drain，因此 stale recovery 仍是必须具备的 correctness path。
+
 Cancellation 保留 Run object 并记录 terminal status。Deletion 是独立的 user request，使用
 finalizer path。两种操作在 controller 和 runtimed restart 后都必须保持幂等。
 
