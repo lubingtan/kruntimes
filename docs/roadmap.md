@@ -166,8 +166,11 @@ wiring from accumulating avoidable conflicts.
       fencing, one in-flight invocation, bounded output, and unregister drain;
     - [x] Python FunctionRuntime adapter with handler validation, registration
       fencing, one in-flight invocation, bounded output, and unregister drain;
-  - [ ] add bounded invocation outputs/artifact references and structured logs
-    keyed by Run UID and invocation ID;
+  - [ ] add bounded invocation response outputs and structured logs keyed by
+    Run UID and invocation ID;
+  - invocation artifact persistence is deferred beyond v0.x. Function
+    invocations do not create `ArtifactRef` objects; existing task-mode
+    artifact storage and cleanup remain unchanged.
   - [x] implement the function control-plane lifecycle in independently
     reviewable slices:
     - [x] add a deterministic FunctionRuntime registration request builder,
@@ -185,9 +188,9 @@ wiring from accumulating avoidable conflicts.
       local registration, clean only function-local state, and release capacity;
     - [x] recover active function registrations after runtimed restart and
       reconcile stale Runtime Pod assignments with assignment-UID fencing;
-    - [ ] add unit, integration, and E2E coverage for registration, retry,
+    - [x] add unit, integration, and E2E coverage for registration, retry,
       timeout, cancellation, deletion, restart recovery, and stale-pod fencing;
-  - [ ] cover function registration, ready status, local and proxied invoke,
+  - [x] cover function registration, ready status, local and proxied invoke,
     repeated invocation, idle timeout, explicit release, Runtime Pod restart
     recovery, and cleanup.
 - [x] Runtime gateway invoke path: add an optional shared `runtime-gateway`

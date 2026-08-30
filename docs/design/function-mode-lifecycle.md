@@ -1,6 +1,6 @@
 # Function Mode Lifecycle and Invoke Dataplane
 
-Status: **Accepted; implementation in progress**
+Status: **Accepted; implemented**
 
 This document refines the function-mode target in
 [Function Mode and Agent Sandboxes](../function-mode/). It defines the Run
