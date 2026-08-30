@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -145,6 +146,17 @@ func (r *StaleRunReaper) handleStaleRun(ctx context.Context, run *v1alpha1.Run, 
 
 	if err := r.Status().Update(ctx, run); err != nil {
 		return err
+	}
+	// A Session or Function registration is local to the assigned Runtime Pod.
+	// Once that Pod is known to be gone (or terminating), its registration has
+	// disappeared with it. Retaining the cleanup finalizer would make a later
+	// delete wait forever for an Unregister RPC that can no longer be delivered.
+	if run.Status.Phase == v1alpha1.RunFailed &&
+		(reason == runretry.ReasonPodGone || reason == runretry.ReasonPodTerminating) &&
+		controllerutil.RemoveFinalizer(run, v1alpha1.RunRegistrationCleanupFinalizer) {
+		if err := r.Update(ctx, run); err != nil {
+			return fmt.Errorf("remove abandoned registration cleanup finalizer: %w", err)
+		}
 	}
 	if r.Recorder == nil {
 		return nil
