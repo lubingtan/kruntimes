@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -292,8 +294,10 @@ func TestRuntimePeerTargetUsesPassthroughResolver(t *testing.T) {
 }
 
 func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
+	setTestWorkspace(t)
 	run := proxyFunctionRun("function-run", "bash", "pod-a", "pod-a-uid")
-	controller := &Controller{}
+	var logs bytes.Buffer
+	controller := &Controller{PodName: "pod-a", ExecutionLogWriter: &logs}
 	registration := &pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "private-registration"}
 	ar := newActiveRun(run, time.Now())
 	ar.finishFunctionRegistration(registration, nil)
@@ -302,7 +306,13 @@ func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
 		if request.GetRegistration().GetRegistrationId() != "private-registration" || request.GetRegistration().GetRunUid() != string(run.UID) {
 			t.Fatalf("local request registration = %#v", request.GetRegistration())
 		}
-		return &pb.InvokeFunctionResponse{InvocationId: request.GetInvocationId(), Output: request.GetInput()}, nil
+		if err := os.MkdirAll(filepath.Dir(ar.outputPath), 0o755); err != nil {
+			t.Fatalf("create outputs directory: %v", err)
+		}
+		if err := os.WriteFile(ar.outputPath, []byte("from-file=value\n"), 0o600); err != nil {
+			t.Fatalf("write invocation outputs: %v", err)
+		}
+		return &pb.InvokeFunctionResponse{InvocationId: request.GetInvocationId(), Output: request.GetInput(), Outputs: map[string]string{"from-adapter": "value"}}, nil
 	}}
 	reader := newSessionProxyReader(t, run)
 	proxy := newFunctionRuntimeProxy(reader, reader, local, controller, run.Namespace, "bash", "pod-a", "9093")
@@ -312,6 +322,13 @@ func TestFunctionRuntimeProxyResolvesOwnerRegistration(t *testing.T) {
 	}
 	if response.GetInvocationId() != "invoke-1" || string(response.GetOutput()) != `{"ok":true}` {
 		t.Fatalf("response = %#v", response)
+	}
+	if got := response.GetOutputs(); len(got) != 2 || got["from-file"] != "value" || got["from-adapter"] != "value" {
+		t.Fatalf("outputs = %#v, want merged adapter and file values", got)
+	}
+	lines := decodeSessionLogLines(t, logs.String())
+	if len(lines) != 1 || lines[0].InvocationID != "invoke-1" || lines[0].Operation != "function_invoke" || lines[0].Outcome != "succeeded" || lines[0].Stream != "audit" {
+		t.Fatalf("function invocation audit logs = %#v", lines)
 	}
 }
 

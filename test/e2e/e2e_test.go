@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -664,6 +665,17 @@ func waitForRunDeleted(t *testing.T, run *v1alpha1.Run, timeout time.Duration) {
 	}
 }
 
+// deleteRunAndWait removes a Run while its Runtime is still available.  This
+// matters for Session and Function Runs: their registration-cleanup finalizer
+// must successfully release the remote Runtime Server state before deletion.
+func deleteRunAndWait(t *testing.T, run *v1alpha1.Run, timeout time.Duration) {
+	t.Helper()
+	if err := k8sClient.Delete(context.Background(), run); err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("delete Run %s: %v", run.Name, err)
+	}
+	waitForRunDeleted(t, run, timeout)
+}
+
 func taskMode(args ...string) v1alpha1.RunMode {
 	return v1alpha1.RunMode{
 		Task: &v1alpha1.RunTaskMode{Args: args},
@@ -778,8 +790,12 @@ func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
 	runtimeName := fmt.Sprintf("function-gateway-%d", time.Now().UnixNano())
 	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
 
-	inline := `def handler(event):
-    return {"status": "ok", "value": event["value"]}
+	inline := `import os
+
+def handler(event):
+    with open(os.environ["KRUNTIME_OUTPUTS"], "w") as outputs:
+        outputs.write("from-file=" + event["value"] + "\n")
+    return {"status": "ok", "value": event["value"], "outputs": {"source": "python", "value": event["value"]}}
 `
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-gateway-", Namespace: testNamespace},
@@ -802,21 +818,23 @@ func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
 	token := sessionGatewayToken(t, run)
 	response := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"gateway"}`), http.StatusOK)
 	var invocation struct {
-		InvocationID string `json:"invocationId"`
-		Output       []byte `json:"output"`
-		ContentType  string `json:"contentType"`
+		InvocationID string            `json:"invocationId"`
+		Output       []byte            `json:"output"`
+		Outputs      map[string]string `json:"outputs"`
+		ContentType  string            `json:"contentType"`
 	}
 	if err := json.Unmarshal(response, &invocation); err != nil {
 		t.Fatalf("decode Function invocation response: %v", err)
 	}
-	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\"}\n" {
+	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\", \"outputs\": {\"source\": \"python\", \"value\": \"gateway\"}}\n" || !reflect.DeepEqual(invocation.Outputs, map[string]string{"from-file": "gateway", "source": "python", "value": "gateway"}) {
 		t.Fatalf("Function invocation = %#v, want successful JSON response", invocation)
 	}
+	waitForFunctionInvocationLogs(t, run, invocation.InvocationID)
 	secondResponse := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"again"}`), http.StatusOK)
 	if err := json.Unmarshal(secondResponse, &invocation); err != nil {
 		t.Fatalf("decode repeated Function invocation response: %v", err)
 	}
-	if invocation.InvocationID == "" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"again\"}\n" {
+	if invocation.InvocationID == "" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"again\", \"outputs\": {\"source\": \"python\", \"value\": \"again\"}}\n" || !reflect.DeepEqual(invocation.Outputs, map[string]string{"from-file": "again", "source": "python", "value": "again"}) {
 		t.Fatalf("repeated Function invocation = %#v, want successful JSON response", invocation)
 	}
 
@@ -849,6 +867,123 @@ func TestFunctionRunExpiresWhenIdle(t *testing.T) {
 	if condition == nil || condition.Reason != runretry.ReasonTimeout {
 		t.Fatalf("Completed condition = %#v, want Timeout", condition)
 	}
+}
+
+func TestFunctionRunCancellationReleasesRuntimeCapacity(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-cancel-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	inline := `def handler(event):
+    return event
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-cancel-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create Function Run: %v", err)
+	}
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	requestRunCancel(t, run)
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
+	assertCancelledRun(t, run)
+
+	successor := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-cancel-successor-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), successor); err != nil {
+		t.Fatalf("create successor Function Run: %v", err)
+	}
+	waitForRunPhase(t, successor, 30*time.Second, v1alpha1.RunReady)
+	deleteRunAndWait(t, successor, 30*time.Second)
+	deleteRunAndWait(t, run, 30*time.Second)
+}
+
+func TestDeletingFunctionRunReleasesRuntimeCapacity(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-delete-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	inline := `def handler(event):
+    return event
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-delete-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create Function Run: %v", err)
+	}
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	deleteRunAndWait(t, run, 30*time.Second)
+
+	successor := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-delete-successor-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), successor); err != nil {
+		t.Fatalf("create successor Function Run: %v", err)
+	}
+	waitForRunPhase(t, successor, 30*time.Second, v1alpha1.RunReady)
+	deleteRunAndWait(t, successor, 30*time.Second)
+}
+
+func TestFunctionRunExpiresWhenTotalTimeoutReached(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-total-timeout-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	timeout := metav1.Duration{Duration: 5 * time.Second}
+	inline := `def handler(event):
+    return event
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-total-timeout-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Timeout: &timeout,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create Function Run: %v", err)
+	}
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+	waitForRunPhase(t, run, 15*time.Second, v1alpha1.RunTimeout)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || condition.Reason != runretry.ReasonTimeout {
+		t.Fatalf("Completed condition = %#v, want Timeout", condition)
+	}
+
+	successor := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-timeout-successor-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), successor); err != nil {
+		t.Fatalf("create successor Function Run: %v", err)
+	}
+	waitForRunPhase(t, successor, 30*time.Second, v1alpha1.RunReady)
+	deleteRunAndWait(t, successor, 30*time.Second)
+	deleteRunAndWait(t, run, 30*time.Second)
 }
 
 func TestFunctionRunRecoversInvocationAfterRuntimedRestart(t *testing.T) {
@@ -988,6 +1123,46 @@ func TestFunctionRuntimeProxyForwardsToNonOwnerPod(t *testing.T) {
 	if response.GetInvocationId() != "proxied-invoke" || string(response.GetOutput()) != "{\"value\": \"proxied\"}\n" {
 		t.Fatalf("proxied Function invocation = %#v, want non-owner forwarding response", response)
 	}
+}
+
+func TestFunctionRunFailsWhenAssignedRuntimePodIsLost(t *testing.T) {
+	runtimeName := fmt.Sprintf("function-pod-loss-%d", time.Now().UnixNano())
+	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
+	inline := `def handler(event):
+    return event
+`
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-pod-loss-", Namespace: testNamespace},
+		Spec: v1alpha1.RunSpec{
+			Runtime: runtimeName,
+			Source:  &v1alpha1.CodeSource{Inline: &inline, InlinePath: "app.py"},
+			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "app.handler"}},
+		},
+	}
+	if err := k8sClient.Create(t.Context(), run); err != nil {
+		t.Fatalf("create Function Run: %v", err)
+	}
+	waitForRunPhase(t, run, 30*time.Second, v1alpha1.RunReady)
+
+	podName := run.Status.AssignedPod
+	if podName == "" {
+		t.Fatal("Function Run reached Ready without an assigned Runtime Pod")
+	}
+	if err := k8sClient.Delete(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: run.Namespace},
+	}); err != nil {
+		t.Fatalf("delete assigned Runtime Pod %s: %v", podName, err)
+	}
+
+	// A Function registration belongs to this exact Pod. Once that Pod is
+	// gone, the stale assignment must become terminal instead of being served
+	// by a replacement Pod.
+	waitForRunPhase(t, run, 60*time.Second, v1alpha1.RunFailed)
+	condition := findRunCondition(run, runstatus.ConditionCompleted)
+	if condition == nil || (condition.Reason != runretry.ReasonPodGone && condition.Reason != runretry.ReasonPodTerminating) {
+		t.Fatalf("Completed condition = %#v, want PodGone or PodTerminating", condition)
+	}
+	deleteRunAndWait(t, run, 60*time.Second)
 }
 
 func TestSessionRuntimeProxyForwardsToNonOwnerPod(t *testing.T) {
@@ -1681,6 +1856,44 @@ func containsSessionCommandLogs(contents, runUID, message string) bool {
 		}
 	}
 	return stdoutFound && auditFound
+}
+
+func waitForFunctionInvocationLogs(t *testing.T, run *v1alpha1.Run, invocationID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		stream, err := coreClientset.CoreV1().Pods(run.Namespace).GetLogs(run.Status.AssignedPod, &corev1.PodLogOptions{Container: "runtimed"}).Stream(ctx)
+		if err == nil {
+			contents, readErr := io.ReadAll(stream)
+			_ = stream.Close()
+			if readErr == nil && containsFunctionInvocationLogs(string(contents), string(run.UID), invocationID) {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for structured Function invocation logs for Run %s", run.Name)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func containsFunctionInvocationLogs(contents, runUID, invocationID string) bool {
+	for _, raw := range strings.Split(strings.TrimSuffix(contents, "\n"), "\n") {
+		var line struct {
+			RunUID       string `json:"run_uid"`
+			InvocationID string `json:"invocation_id"`
+			Stream       string `json:"stream"`
+			Message      string `json:"message"`
+			Operation    string `json:"operation"`
+			Outcome      string `json:"outcome"`
+		}
+		if json.Unmarshal([]byte(raw), &line) == nil && line.RunUID == runUID && line.InvocationID == invocationID && line.Stream == "audit" && line.Message == "function invocation completed" && line.Operation == "function_invoke" && line.Outcome == "succeeded" {
+			return true
+		}
+	}
+	return false
 }
 
 func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {

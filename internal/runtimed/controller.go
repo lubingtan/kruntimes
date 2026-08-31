@@ -45,6 +45,7 @@ const (
 	defaultHeartbeatInterval = 5 * time.Second
 	executionCleanupTimeout  = 5 * time.Second
 	executionCleanupRetry    = 100 * time.Millisecond
+	shutdownDrainTimeout     = 20 * time.Second
 )
 
 var (
@@ -104,6 +105,7 @@ type Controller struct {
 	RuntimeName       string
 	RuntimeNamespace  string
 	RuntimeEndpoint   string
+	WorkspacePath     string
 	GatewayURL        string
 	GatewayCABundle   []byte
 	Workers           int
@@ -157,7 +159,6 @@ func (c *Controller) Start(ctx context.Context) error {
 	c.runtimeCli = pb.NewRuntimeClient(conn)
 	c.sessionCli = pb.NewSessionRuntimeClient(conn)
 	c.functionCli = pb.NewFunctionRuntimeClient(conn)
-	go func() { <-ctx.Done(); conn.Close() }()
 
 	c.rleg = rlegpkg.NewGenericRLEG(&statusAdapter{cli: c.runtimeCli}, rlegpkg.DefaultRelistInterval)
 	go c.rleg.Start(ctx)
@@ -166,7 +167,103 @@ func (c *Controller) Start(ctx context.Context) error {
 	go c.recoverActiveRuns(ctx)
 
 	klog.Infof("runtimed controller started, pod=%s, runtime=%s, workers=%d", c.PodName, c.RuntimeEndpoint, c.capacity())
+	<-ctx.Done()
+
+	// Controller-runtime cancels this context before the process exits. Drain
+	// Pod-local Runtime Server state while the sidecar is still reachable, so a
+	// normal Runtime Pod deletion does not leave an Unregister/Close finalizer
+	// behind for a dead owner to service. A hard Pod loss cannot run this code;
+	// the stale Run reaper remains the control-plane fallback for that case.
+	drainCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+	defer cancel()
+	c.drainActiveRunsOnShutdown(drainCtx)
+	if err := conn.Close(); err != nil {
+		return fmt.Errorf("close runtime connection: %w", err)
+	}
 	return nil
+}
+
+// drainActiveRunsOnShutdown releases Runtime Server state for every active Run
+// still assigned to this runtimed Pod. It deliberately does not write a
+// terminal status: the stale Run reaper owns the fenced PodTerminating
+// transition and its retry policy. Once remote cleanup succeeds, removing the
+// registration finalizer is safe because no Pod-local registration remains.
+func (c *Controller) drainActiveRunsOnShutdown(ctx context.Context) {
+	for _, ar := range c.activeRunsForShutdown(ctx) {
+		if err := c.releaseRuntimeServerState(ctx, ar); err != nil {
+			c.Log.Error(err, "failed to drain Runtime Server state during shutdown", "run", client.ObjectKeyFromObject(ar.run))
+			continue
+		}
+		c.releaseLocalRunState(ctx, ar)
+		if controllerutil.RemoveFinalizer(ar.run, v1alpha1.RunRegistrationCleanupFinalizer) {
+			if err := c.Update(ctx, ar.run); err != nil {
+				c.Log.Error(err, "remove registration cleanup finalizer after shutdown drain", "run", client.ObjectKeyFromObject(ar.run))
+			}
+		}
+	}
+}
+
+// activeRunsForShutdown reads current Run objects so the shutdown path also
+// covers a Run recovered from an earlier runtimed process. When an in-memory
+// activeRun exists, retain it because it holds the opaque function registration
+// ID needed to unregister without reconstructing it.
+func (c *Controller) activeRunsForShutdown(ctx context.Context) []*activeRun {
+	byUID := make(map[string]*activeRun)
+	reader := c.RunReader
+	if reader == nil {
+		reader = c.Client
+	}
+	if reader != nil {
+		var runs v1alpha1.RunList
+		listOptions := make([]client.ListOption, 0, 1)
+		if c.RuntimeNamespace != "" {
+			listOptions = append(listOptions, client.InNamespace(c.RuntimeNamespace))
+		}
+		if err := reader.List(ctx, &runs, listOptions...); err != nil {
+			c.Log.Error(err, "list active Runs for shutdown drain")
+		} else {
+			for i := range runs.Items {
+				run := &runs.Items[i]
+				if !c.isActiveRunOwnedByThisPod(run) {
+					continue
+				}
+				ar := c.buildActiveRun(run)
+				if value, exists := c.activeRuns.Load(string(run.UID)); exists {
+					ar = value.(*activeRun)
+					ar.run = run.DeepCopy()
+				}
+				byUID[string(run.UID)] = ar
+			}
+		}
+	}
+	c.activeRuns.Range(func(key, value any) bool {
+		uid, ar := key.(string), value.(*activeRun)
+		if _, exists := byUID[uid]; !exists && c.isActiveRunOwnedByThisPod(ar.run) {
+			byUID[uid] = ar
+		}
+		return true
+	})
+
+	runs := make([]*activeRun, 0, len(byUID))
+	for _, ar := range byUID {
+		runs = append(runs, ar)
+	}
+	return runs
+}
+
+func (c *Controller) isActiveRunOwnedByThisPod(run *v1alpha1.Run) bool {
+	if run == nil || run.Status.AssignedPod != c.PodName {
+		return false
+	}
+	if c.RuntimeName != "" && run.Spec.Runtime != c.RuntimeName {
+		return false
+	}
+	switch run.Status.Phase {
+	case v1alpha1.RunRunning, v1alpha1.RunReady, v1alpha1.RunFinalizing:
+		return true
+	default:
+		return false
+	}
 }
 
 // forwardRLEGEvents translates RLEG events to controller-runtime GenericEvents.
@@ -267,7 +364,7 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 			return ctrl.Result{}, fmt.Errorf("add registration cleanup finalizer: %w", err)
 		}
 	}
-	ar := newActiveRun(run, time.Now())
+	ar := c.newActiveRun(run, time.Now())
 	if !c.tryClaimActiveRun(ar) {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
@@ -1171,7 +1268,15 @@ func (c *Controller) buildActiveRun(run *v1alpha1.Run) *activeRun {
 	if run.Status.StartTime != nil {
 		start = run.Status.StartTime.Time
 	}
-	return newActiveRun(run, start)
+	return c.newActiveRun(run, start)
+}
+
+func (c *Controller) newActiveRun(run *v1alpha1.Run, start time.Time) *activeRun {
+	workspaceRoot := c.WorkspacePath
+	if workspaceRoot == "" {
+		workspaceRoot = workspacePath
+	}
+	return newActiveRunWithWorkspace(run, start, workspaceRoot)
 }
 
 func podNamespace() string {

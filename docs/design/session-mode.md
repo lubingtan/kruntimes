@@ -122,6 +122,13 @@ restart, the owner recovers an idempotent local registration before closing it;
 it must not silently remove the finalizer merely because its in-memory handle
 was lost.
 
+On a normal Runtime Pod shutdown, runtimed drains current `Running`, `Ready`,
+and `Finalizing` registrations before exit and removes this finalizer only
+after the Pod-local close or unregister succeeds. It leaves the fenced
+`PodTerminating` status transition to the stale Run reaper, which also monitors
+`Finalizing`; hard Pod loss still relies on that reaper because it bypasses the
+best-effort drain.
+
 ## Completion and Artifact Export
 
 Cancellation and successful sandbox completion use the same monotonic

@@ -5,9 +5,12 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type executionOutput struct {
@@ -24,6 +27,7 @@ type executionLogLine struct {
 	Pod                  string `json:"pod"`
 	Stream               string `json:"stream"`
 	Message              string `json:"message"`
+	InvocationID         string `json:"invocation_id,omitempty"`
 	Operation            string `json:"operation,omitempty"`
 	Outcome              string `json:"outcome,omitempty"`
 	StatusCode           string `json:"status_code,omitempty"`
@@ -82,4 +86,34 @@ func writeExecutionLogLine(writer io.Writer, line executionLogLine) {
 		return
 	}
 	_, _ = writer.Write(append(encoded, '\n'))
+}
+
+func (c *Controller) emitFunctionInvocationAudit(run *v1alpha1.Run, invocationID string, invokeErr error, duration time.Duration) {
+	if run == nil {
+		return
+	}
+	writer := c.ExecutionLogWriter
+	if writer == nil {
+		writer = os.Stdout
+	}
+	line := executionLogLineFor(run, c.PodName, "audit", "function invocation completed")
+	line.InvocationID = invocationID
+	line.Operation = "function_invoke"
+	line.DurationMilliseconds = duration.Milliseconds()
+	if invokeErr == nil {
+		line.Outcome = "succeeded"
+	} else {
+		line.StatusCode = status.Code(invokeErr).String()
+		switch status.Code(invokeErr) {
+		case codes.Canceled:
+			line.Outcome = "cancelled"
+		case codes.DeadlineExceeded:
+			line.Outcome = "timed_out"
+		default:
+			line.Outcome = "failed"
+		}
+	}
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+	writeExecutionLogLine(writer, line)
 }

@@ -90,6 +90,11 @@ protocol。finalizer 会保留 object，直到其 owning runtimed 已停止新�
 `CloseSession` 或 `UnregisterFunction`、释放 local capacity，并只删除 Run-local state。只有清理
 成功后才移除 finalizer；transient close error 会保留 finalizer 并 requeue reconciliation。
 
+正常 Runtime Pod shutdown 时，runtimed 会在退出前 drain 当前的 `Running`、`Ready` 和
+`Finalizing` registration，且仅在 Pod-local close 或 unregister 成功后移除该 finalizer。fenced
+`PodTerminating` status transition 仍由同时监测 `Finalizing` 的 stale Run reaper 负责；hard Pod loss
+会跳过 best-effort drain，因此仍依赖该 reaper。
+
 finalizer 不会删除被引用的 PersistentWorkspace 或 ArtifactStore data；这些 resources 保留各自的
 lifecycle owner。runtimed restart 后，owner 会先恢复幂等的 local registration，再关闭它；不能仅因
 in-memory handle 丢失就静默移除 finalizer。

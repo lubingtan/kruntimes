@@ -1,6 +1,6 @@
 # Function Runtime Server Contract
 
-Status: **Accepted; implementation in progress**
+Status: **Accepted; implemented**
 
 This document defines the internal gRPC contract for function-mode Runs. It
 refines [Function Mode Lifecycle and Invoke Dataplane](../function-mode-lifecycle/)
@@ -257,15 +257,28 @@ allows one in-flight invocation per function Run and does not queue requests.
   only this invocation, not the function Run lifecycle. `FailedPrecondition`
   maps to HTTP 503 for draining, stale, or unready registration.
 
-`outputs` follow the key, count, and value bounds used by `Run.status.outputs`.
+`outputs` follow the key, count, and value bounds used by `Run.status.outputs`,
+but are returned only from this invocation and never appended to `Run.status`.
+Every built-in Runtime receives an invocation-local `KRUNTIME_OUTPUTS` path and
+may write its existing `KEY=VALUE` format there. runtimed clears that file
+before the one allowed in-flight invocation, parses it after a successful
+response, and returns the bounded values in this RPC response.
+
+Runtimes may add documented, compatible output sources. The built-in Python
+adapter recognizes a handler return object with a top-level `outputs` field
+whose value is `map[string]string`; it returns the original object as `output`
+and the field values as response outputs. File and Python-return outputs are
+merged only when their keys are disjoint; a duplicate key or any invalid or
+oversized value fails that invocation rather than silently overwriting data.
 Function invocations do not produce artifact declarations or `ArtifactRef`
 values in v0.x. A future artifact design must define lifecycle, retention, and
 storage boundaries before extending this local protocol.
 
-Runtime logs are structured by Run UID and invocation ID. Adapter-captured
-function output populates the RPC `output` field and is not automatically
-logged. Built-in Bash uses handler stdout as function output and stderr as
-structured logs; neither is written to `Run.status.message`.
+Owner runtimed emits one bounded JSONL audit record per invocation, keyed by
+Run UID and invocation ID, with operation, outcome, gRPC status code, and
+duration. It never logs request bodies, response bodies, or output values.
+Adapter-captured function output populates the RPC `output` field and is not
+automatically logged; neither output form is written to `Run.status.message`.
 
 ## Unregistration
 

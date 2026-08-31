@@ -478,6 +478,23 @@ func TestReadOutputs_Limits(t *testing.T) {
 	}
 }
 
+func TestMergeInvocationOutputs(t *testing.T) {
+	merged, err := mergeInvocationOutputs(
+		map[string]string{"from-adapter": "value"},
+		map[string]string{"from-file": "value"},
+	)
+	if err != nil {
+		t.Fatalf("merge invocation outputs: %v", err)
+	}
+	if len(merged) != 2 || merged["from-adapter"] != "value" || merged["from-file"] != "value" {
+		t.Fatalf("merged outputs = %#v", merged)
+	}
+
+	if _, err := mergeInvocationOutputs(map[string]string{"duplicate": "adapter"}, map[string]string{"duplicate": "file"}); err == nil {
+		t.Fatal("merge invocation outputs succeeded for duplicate key")
+	}
+}
+
 func TestStatusAdapter(t *testing.T) {
 	var _ = (*statusAdapter)(nil)
 }
@@ -1713,6 +1730,107 @@ func functionLifecycleTestRun() *v1alpha1.Run {
 			Mode:    v1alpha1.RunMode{Function: &v1alpha1.RunFunctionMode{Handler: "handler.invoke"}},
 		},
 		Status: v1alpha1.RunStatus{Phase: v1alpha1.RunRunning, AssignedPod: "runtime-pod", AssignedPodUID: "runtime-pod-uid", StartTime: &metav1.Time{Time: time.Now()}},
+	}
+}
+
+func TestShutdownDrainReleasesRegistrationsAndFinalizers(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	function := functionLifecycleTestRun()
+	function.Status.Phase = v1alpha1.RunReady
+	function.Finalizers = []string{v1alpha1.RunRegistrationCleanupFinalizer}
+	session := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "session",
+			Namespace:  "default",
+			UID:        "session-uid",
+			Finalizers: []string{v1alpha1.RunRegistrationCleanupFinalizer},
+		},
+		Spec: v1alpha1.RunSpec{
+			Runtime: "bash",
+			Mode:    v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunFinalizing,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "runtime-pod-uid",
+		},
+	}
+	nonOwner := function.DeepCopy()
+	nonOwner.Name = "other-owner"
+	nonOwner.UID = "other-owner-uid"
+	nonOwner.Status.AssignedPod = "other-pod"
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(function, session, nonOwner).Build()
+	functionClient := &fakeFunctionRuntimeClient{}
+	sessionClient := &fakeSessionRuntimeClient{}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient, sessionCli: sessionClient}
+	functionActive := newActiveRun(function, time.Now())
+	functionActive.finishFunctionRegistration(&pb.FunctionRegistration{RunUid: string(function.UID), RegistrationId: "function-registration"}, nil)
+	c.activeRuns.Store(string(function.UID), functionActive)
+	c.activeRuns.Store(string(session.UID), newActiveRun(session, time.Now()))
+
+	c.drainActiveRunsOnShutdown(t.Context())
+
+	if len(functionClient.unregisterRequests) != 1 || functionClient.unregisterRequests[0].GetRegistration().GetRegistrationId() != "function-registration" {
+		t.Fatalf("UnregisterFunction requests = %#v, want the active function registration", functionClient.unregisterRequests)
+	}
+	if len(sessionClient.closeRequests) != 1 || sessionClient.closeRequests[0].GetIdentity().GetRunUid() != string(session.UID) {
+		t.Fatalf("CloseSession requests = %#v, want the active session", sessionClient.closeRequests)
+	}
+	for _, run := range []*v1alpha1.Run{function, session} {
+		var updated v1alpha1.Run
+		if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+			t.Fatalf("get drained Run %q: %v", run.Name, err)
+		}
+		if slices.Contains(updated.Finalizers, v1alpha1.RunRegistrationCleanupFinalizer) {
+			t.Fatalf("Run %q finalizers = %v, want registration finalizer removed", run.Name, updated.Finalizers)
+		}
+		if updated.Status.Phase != run.Status.Phase {
+			t.Fatalf("Run %q phase = %s, want shutdown drain not to write status %s", run.Name, updated.Status.Phase, run.Status.Phase)
+		}
+	}
+	var untouched v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(nonOwner), &untouched); err != nil {
+		t.Fatalf("get non-owner Run: %v", err)
+	}
+	if !slices.Contains(untouched.Finalizers, v1alpha1.RunRegistrationCleanupFinalizer) {
+		t.Fatalf("non-owner finalizers = %v, want registration finalizer retained", untouched.Finalizers)
+	}
+	if c.activeRunCount() != 0 {
+		t.Fatalf("activeRunCount = %d, want 0 after shutdown drain", c.activeRunCount())
+	}
+}
+
+func TestShutdownDrainRetainsFinalizerWhenRemoteCleanupFails(t *testing.T) {
+	setTestWorkspace(t)
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	run := functionLifecycleTestRun()
+	run.Status.Phase = v1alpha1.RunReady
+	run.Finalizers = []string{v1alpha1.RunRegistrationCleanupFinalizer}
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	functionClient := &fakeFunctionRuntimeClient{unregisterErr: status.Error(codes.Unavailable, "runtime is stopping")}
+	c := &Controller{Client: k8sClient, PodName: "runtime-pod", functionCli: functionClient}
+	ar := newActiveRun(run, time.Now())
+	ar.finishFunctionRegistration(&pb.FunctionRegistration{RunUid: string(run.UID), RegistrationId: "function-registration"}, nil)
+	c.activeRuns.Store(string(run.UID), ar)
+
+	c.drainActiveRunsOnShutdown(t.Context())
+
+	var updated v1alpha1.Run
+	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), &updated); err != nil {
+		t.Fatalf("get Run: %v", err)
+	}
+	if !slices.Contains(updated.Finalizers, v1alpha1.RunRegistrationCleanupFinalizer) {
+		t.Fatalf("finalizers = %v, want registration finalizer retained after failed cleanup", updated.Finalizers)
+	}
+	if c.activeRunCount() != 1 {
+		t.Fatalf("activeRunCount = %d, want 1 when cleanup failed", c.activeRunCount())
 	}
 }
 

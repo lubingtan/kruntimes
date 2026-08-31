@@ -27,7 +27,7 @@ func TestFunctionRegistrationRequest(t *testing.T) {
 		},
 	}
 
-	request, err := functionRegistrationRequest(run, "/workspace/run-uid")
+	request, err := functionRegistrationRequest(run, "/workspace/run-uid", "/workspace/run-uid/outputs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +49,9 @@ func TestFunctionRegistrationRequest(t *testing.T) {
 	if request.Env["FIRST"] != "one" || request.Env["SECOND"] != "two" {
 		t.Fatalf("Env = %#v, want both values", request.Env)
 	}
+	if request.Env["KRUNTIME_OUTPUTS"] != "/workspace/run-uid/outputs" {
+		t.Fatalf("KRUNTIME_OUTPUTS = %q, want invocation outputs path", request.Env["KRUNTIME_OUTPUTS"])
+	}
 	if request.RegistrationDigest == "" {
 		t.Fatal("RegistrationDigest is empty")
 	}
@@ -58,7 +61,7 @@ func TestFunctionRegistrationRequestUsesCurrentAttempt(t *testing.T) {
 	run := functionRegistrationTestRun()
 	run.Status.Attempt = 3
 
-	request, err := functionRegistrationRequest(run, "/workspace/run-uid")
+	request, err := functionRegistrationRequest(run, "/workspace/run-uid", "/workspace/run-uid/outputs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +72,7 @@ func TestFunctionRegistrationRequestUsesCurrentAttempt(t *testing.T) {
 
 func TestFunctionRegistrationDigestIsCanonicalAndExcludesWorkingDirectory(t *testing.T) {
 	run := functionRegistrationTestRun()
-	first, err := functionRegistrationRequest(run, "/workspace/first")
+	first, err := functionRegistrationRequest(run, "/workspace/first", "/workspace/first/outputs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +81,7 @@ func TestFunctionRegistrationDigestIsCanonicalAndExcludesWorkingDirectory(t *tes
 		{Name: "SECOND", Value: "two"},
 		{Name: "FIRST", Value: "one"},
 	}
-	second, err := functionRegistrationRequest(run, "/workspace/second")
+	second, err := functionRegistrationRequest(run, "/workspace/second", "/workspace/second/outputs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +90,7 @@ func TestFunctionRegistrationDigestIsCanonicalAndExcludesWorkingDirectory(t *tes
 	}
 
 	run.Spec.Mode.Function.Handler = "app.other"
-	changedHandler, err := functionRegistrationRequest(run, "/workspace/second")
+	changedHandler, err := functionRegistrationRequest(run, "/workspace/second", "/workspace/second/outputs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,10 +108,12 @@ func TestFunctionRegistrationRequestRejectsIncompleteFunctionRun(t *testing.T) {
 		name       string
 		run        *v1alpha1.Run
 		workingDir string
+		outputPath string
 	}{
-		{name: "missing-run-uid", run: missingUID, workingDir: "/workspace/run"},
+		{name: "missing-run-uid", run: missingUID, workingDir: "/workspace/run", outputPath: "/workspace/run/outputs"},
 		{name: "missing-working-directory", run: functionRegistrationTestRun()},
-		{name: "missing-handler", run: missingHandler, workingDir: "/workspace/run"},
+		{name: "missing-outputs-path", run: functionRegistrationTestRun(), workingDir: "/workspace/run"},
+		{name: "missing-handler", run: missingHandler, workingDir: "/workspace/run", outputPath: "/workspace/run/outputs"},
 		{
 			name: "task-mode",
 			run: &v1alpha1.Run{
@@ -116,11 +121,12 @@ func TestFunctionRegistrationRequestRejectsIncompleteFunctionRun(t *testing.T) {
 				Spec:       v1alpha1.RunSpec{Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}}},
 			},
 			workingDir: "/workspace/run",
+			outputPath: "/workspace/run/outputs",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := functionRegistrationRequest(tt.run, tt.workingDir); err == nil {
+			if _, err := functionRegistrationRequest(tt.run, tt.workingDir, tt.outputPath); err == nil {
 				t.Fatal("functionRegistrationRequest() error = nil")
 			}
 		})

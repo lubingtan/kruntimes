@@ -113,7 +113,7 @@ controller wiring 累积不必要的冲突。
     - [x] 按有界 plugin 和 reason 统计 Filter-plugin 对 Pod 的 rejection；
     - [x] 按有界 stage 统计 stale `Reserve` 和 conflicting `Bind` 操作；
     - [x] 按有界 event source 统计 requested Pending Run wakeups；
-- [ ] Function-mode Runs：定义 mutually exclusive 的
+- [x] Function-mode Runs：定义 mutually exclusive 的
   `Run.spec.mode.task` 和 `Run.spec.mode.function` 语义，让 function Run 可以 reserve
   预热 Runtime Pod，向 runtimed/runtime-server 注册 callable function，保持 ready 状态
   以支持多次低延迟 invocation，并在删除或 idle timeout 时释放 reservation。
@@ -144,8 +144,10 @@ controller wiring 累积不必要的冲突。
       in-flight invocation、有界输出和 unregister drain；
     - [x] Python FunctionRuntime adapter：handler validation、registration fencing、单个
       in-flight invocation、有界输出和 unregister drain；
-  - [ ] 增加有界 invocation outputs/artifact references，以及以 Run UID 和 invocation ID
-    为 key 的 structured logs；
+  - [x] 增加有界 invocation response outputs，以及以 Run UID 和 invocation ID 为 key 的
+    structured logs；
+  - invocation artifact persistence 推迟到 v0.x 之后。function invocation 不创建
+    `ArtifactRef`；现有 task-mode artifact storage 和 cleanup 保持不变。
   - [x] 以可独立 review 的分片实现 function control-plane lifecycle：
     - [x] 增加 deterministic FunctionRuntime registration request builder，
       包含 immutable-input digest coverage；
@@ -161,9 +163,9 @@ controller wiring 累积不必要的冲突。
       只清理 function-local state，并释放 capacity；
     - [x] 在 runtimed restart 后恢复 active function registration，并使用 assignment-UID
       fencing reconcile stale Runtime Pod assignment；
-    - [ ] 增加 registration、retry、timeout、cancellation、deletion、restart recovery 和
+    - [x] 增加 registration、retry、timeout、cancellation、deletion、restart recovery 和
       stale-pod fencing 的 unit、integration 和 E2E coverage；
-  - [ ] 覆盖 function registration、ready status、local/proxied invoke、多次 invocation、
+  - [x] 覆盖 function registration、ready status、local/proxied invoke、多次 invocation、
     idle timeout、explicit release、Runtime Pod restart recovery 和 cleanup。
 - [x] Runtime gateway invoke path：在 Helm chart 中增加可选的共享 `runtime-gateway`
   Deployment 和 ClusterIP Service。gateway 暴露稳定的 HTTP Run endpoint，解析目标 Run，并调用

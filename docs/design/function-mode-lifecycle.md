@@ -1,6 +1,6 @@
 # Function Mode Lifecycle and Invoke Dataplane
 
-Status: **Accepted; implementation in progress**
+Status: **Accepted; implemented**
 
 This document refines the function-mode target in
 [Function Mode and Agent Sandboxes](../function-mode/). It defines the Run
@@ -223,6 +223,16 @@ the finalizer after confirming that the Pod-local registration cannot still be
 serving. PersistentWorkspace and ArtifactStore cleanup remain owned by their
 existing controllers and policies; the registration-cleanup finalizer must not delete
 shared persistent data implicitly.
+
+On a normal Runtime Pod shutdown, runtimed shares the process signal context
+with its controller manager and drains its current `Running`, `Ready`, and
+`Finalizing` Runs before the process exits. It stops the local registration,
+releases its local claim, and removes the registration finalizer only after the
+Pod-local Runtime Server confirms cleanup. It does not race the stale-recovery
+controller by writing a terminal status itself; that controller observes the
+deleting Pod and applies the existing fenced `PodTerminating` retry or failure
+transition. SIGKILL, node loss, and force deletion bypass this best-effort
+drain, so stale recovery remains the required correctness path.
 
 Cancellation keeps the Run object and records a terminal status. Deletion is a
 separate user request and uses the finalizer path. Both operations are

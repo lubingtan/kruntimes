@@ -82,6 +82,34 @@ func TestStaleRunReaperHonorsRetryableReasons(t *testing.T) {
 	assertFailedTerminalConditions(t, &updated, runretry.ReasonPodGone)
 }
 
+func TestStaleRunReaperRemovesRegistrationFinalizerWhenAssignedPodIsGone(t *testing.T) {
+	reaper, c, run := newStaleReaperTest(t, &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "run-a",
+			Namespace:  "default",
+			Finalizers: []string{v1alpha1.RunRegistrationCleanupFinalizer},
+		},
+		Status: v1alpha1.RunStatus{
+			Phase:       v1alpha1.RunReady,
+			AssignedPod: "missing-pod",
+		},
+	})
+
+	if err := reaper.handleStaleRun(context.Background(), run, runretry.ReasonPodGone, "assigned pod was deleted"); err != nil {
+		t.Fatalf("handle stale run: %v", err)
+	}
+
+	updated := getRun(t, c, run)
+	if updated.Status.Phase != v1alpha1.RunFailed {
+		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
+	}
+	for _, finalizer := range updated.Finalizers {
+		if finalizer == v1alpha1.RunRegistrationCleanupFinalizer {
+			t.Fatalf("finalizers = %v, want abandoned registration finalizer removed", updated.Finalizers)
+		}
+	}
+}
+
 func TestStaleRunReaperDoesNotRetryWhenAttemptsExhausted(t *testing.T) {
 	reaper, c, run := newStaleReaperTest(t, &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "run-a", Namespace: "default"},
@@ -283,6 +311,9 @@ func TestIsStaleMonitoredRunPhase(t *testing.T) {
 	}
 	if !isStaleMonitoredRunPhase(v1alpha1.RunReady) {
 		t.Fatal("Ready Run should be monitored")
+	}
+	if !isStaleMonitoredRunPhase(v1alpha1.RunFinalizing) {
+		t.Fatal("Finalizing Run should be monitored")
 	}
 	if isStaleMonitoredRunPhase(v1alpha1.RunSucceeded) {
 		t.Fatal("terminal Run should not be monitored")
