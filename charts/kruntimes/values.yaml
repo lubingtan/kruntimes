@@ -128,6 +128,53 @@ gateway:
       cpu: 500m
       memory: 256Mi
 
+dashboard:
+  enabled: false
+  image: ghcr.io/kruntimes/dashboard
+  imagePullPolicy: IfNotPresent
+  replicas: 2
+  bindAddress: ":8443"
+  servicePort: 443
+  containerPort: 8443
+  tls:
+    # Certificate sources are mutually exclusive. With selfSigned enabled, the
+    # chart generates this Secret (or preserves it across upgrades). To mount
+    # an existing Secret, set selfSigned=false, certManager.enabled=false, and
+    # secretName to that Secret. cert-manager writes the same target Secret.
+    secretName: ""
+    certificateKey: tls.crt
+    privateKeyKey: tls.key
+    selfSigned: true
+    certManager:
+      enabled: false
+      issuerRef:
+        name: ""
+        kind: Issuer
+        group: cert-manager.io
+  podAnnotations: {}
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  priorityClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 runtimed:
   image: ghcr.io/kruntimes/runtimed
   session:

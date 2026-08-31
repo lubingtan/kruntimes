@@ -34,11 +34,16 @@ def main() -> int:
         "controller.image=repo/controller@sha256:abc",
         "--set",
         "runtimed.image=repo/runtimed:dev",
+        "--set",
+        "dashboard.enabled=true",
+        "--set",
+        "dashboard.image=repo/dashboard:dev",
     )
     expected_platform_overrides = [
         "image: example.com:5000/ns/scheduler:dev",
         "image: repo/controller@sha256:abc",
         "--default-daemon-image=repo/runtimed:dev",
+        "image: repo/dashboard:dev",
     ]
     for expected in expected_platform_overrides:
         if expected not in platform_overrides:

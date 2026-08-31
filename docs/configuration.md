@@ -25,6 +25,48 @@ helm template kruntimes ./charts/kruntimes --namespace kruntimes-system
 Contributor-only Make variables and chart validation commands are documented in
 the [Development Guide](development.md) and [Testing Guide](testing.md).
 
+## Dashboard TLS
+
+The Dashboard is opt-in and exposes HTTPS only. Enable its chart component
+with the default chart-generated certificate for local or explicitly trusted
+deployments:
+
+```yaml
+dashboard:
+  enabled: true
+```
+
+To mount an existing TLS Secret, select that source explicitly:
+
+```yaml
+dashboard:
+  enabled: true
+  tls:
+    selfSigned: false
+    secretName: dashboard-tls
+```
+
+To have cert-manager issue the certificate, disable chart generation and
+reference an existing Issuer or ClusterIssuer. The issuer may itself be a
+self-signed cert-manager issuer.
+
+```yaml
+dashboard:
+  enabled: true
+  tls:
+    selfSigned: false
+    secretName: dashboard-tls
+    certManager:
+      enabled: true
+      issuerRef:
+        name: platform-ca
+        kind: ClusterIssuer
+```
+
+`selfSigned`, an existing Secret, and `certManager.enabled` are mutually
+exclusive choices. The Service is always `ClusterIP`; configure ingress or
+other external exposure separately.
+
 ## Runtime Capacity
 
 Runtime capacity is declared on the Runtime CRD:

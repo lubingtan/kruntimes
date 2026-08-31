@@ -83,6 +83,15 @@ the operator choose one certificate source:
 The selected source writes the same mounted TLS Secret. The chart rejects
 ambiguous combinations rather than silently choosing a certificate source.
 
+The Helm values make that selection explicit: `dashboard.tls.selfSigned` is
+the default and causes the chart to create the TLS Secret; to mount an
+operator-provided Secret, set `selfSigned: false`, leave
+`certManager.enabled: false`, and set `secretName`; to use cert-manager, set
+`selfSigned: false` and `certManager.enabled: true` with an existing
+`issuerRef`. cert-manager may write either the default Dashboard TLS Secret or
+the `secretName` specified by the operator. An existing self-signed Issuer is
+therefore supported without a separate dashboard-specific mode.
+
 The backend has no ambient read authority for user requests. It may use its
 ServiceAccount only to discover the in-cluster API endpoint and CA. For each
 request it copies only that transport configuration, clears the mounted

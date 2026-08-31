@@ -27,6 +27,45 @@ helm template kruntimes ./charts/kruntimes --namespace kruntimes-system
 仅贡献者使用的 Make variables 和 chart validation commands 见
 [Development Guide](development.md) 和 [Testing Guide](testing.md)。
 
+## Dashboard TLS
+
+Dashboard 是 opt-in 组件，并且只暴露 HTTPS。对于本地开发或明确受信任的部署，以下配置会启用
+chart 生成的默认 certificate：
+
+```yaml
+dashboard:
+  enabled: true
+```
+
+要挂载已有 TLS Secret，需要显式选择该来源：
+
+```yaml
+dashboard:
+  enabled: true
+  tls:
+    selfSigned: false
+    secretName: dashboard-tls
+```
+
+要由 cert-manager 签发 certificate，关闭 chart 生成并引用已有 Issuer 或 ClusterIssuer。该
+issuer 本身可以是 cert-manager 的 self-signed issuer。
+
+```yaml
+dashboard:
+  enabled: true
+  tls:
+    selfSigned: false
+    secretName: dashboard-tls
+    certManager:
+      enabled: true
+      issuerRef:
+        name: platform-ca
+        kind: ClusterIssuer
+```
+
+`selfSigned`、已有 Secret 和 `certManager.enabled` 是互斥选择。Service 始终为 `ClusterIP`；
+ingress 或其它对外暴露需要单独配置。
+
 ## Runtime Capacity
 
 Runtime capacity 在 Runtime CRD 中声明：

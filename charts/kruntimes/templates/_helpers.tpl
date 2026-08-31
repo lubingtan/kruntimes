@@ -159,6 +159,52 @@ app.kubernetes.io/component: runtime-gateway
 app: kruntimes-runtime-gateway
 {{- end }}
 
+{{- define "kruntimes.dashboard.name" -}}
+{{- printf "%s-dashboard" ((include "kruntimes.fullname" .) | trunc 54 | trimSuffix "-") -}}
+{{- end }}
+
+{{- define "kruntimes.dashboard.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "kruntimes.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: dashboard
+{{- end }}
+
+{{- define "kruntimes.dashboard.labels" -}}
+{{ include "kruntimes.labels" . }}
+app.kubernetes.io/component: dashboard
+app: kruntimes-dashboard
+{{- end }}
+
+{{- define "kruntimes.dashboard.tlsSecretName" -}}
+{{- default (printf "%s-tls" (include "kruntimes.dashboard.name" .)) .Values.dashboard.tls.secretName -}}
+{{- end }}
+
+{{- define "kruntimes.dashboard.validateTLS" -}}
+{{- if not .Values.dashboard.tls.certificateKey -}}{{- fail "dashboard.tls.certificateKey is required" -}}{{- end -}}
+{{- if not .Values.dashboard.tls.privateKeyKey -}}{{- fail "dashboard.tls.privateKeyKey is required" -}}{{- end -}}
+{{- if and .Values.dashboard.tls.selfSigned .Values.dashboard.tls.certManager.enabled -}}{{- fail "dashboard.tls.selfSigned and dashboard.tls.certManager.enabled are mutually exclusive" -}}{{- end -}}
+{{- if and (not .Values.dashboard.tls.selfSigned) (not .Values.dashboard.tls.certManager.enabled) (not .Values.dashboard.tls.secretName) -}}{{- fail "dashboard.tls.secretName is required when using an existing TLS Secret" -}}{{- end -}}
+{{- if and .Values.dashboard.tls.certManager.enabled (not .Values.dashboard.tls.certManager.issuerRef.name) -}}{{- fail "dashboard.tls.certManager.issuerRef.name is required when dashboard.tls.certManager.enabled is true" -}}{{- end -}}
+{{- end }}
+
+{{- define "kruntimes.dashboard.ensureTLSCertificates" -}}
+{{- if not (hasKey .Values "_dashboardCertificates") -}}
+{{- $secretName := include "kruntimes.dashboard.tlsSecretName" . -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- if $existing -}}
+{{- if not (hasKey $existing.data .Values.dashboard.tls.certificateKey) -}}{{- fail (printf "dashboard TLS Secret %q must contain certificate key %q" $secretName .Values.dashboard.tls.certificateKey) -}}{{- end -}}
+{{- if not (hasKey $existing.data .Values.dashboard.tls.privateKeyKey) -}}{{- fail (printf "dashboard TLS Secret %q must contain private key key %q" $secretName .Values.dashboard.tls.privateKeyKey) -}}{{- end -}}
+{{- $_ := set .Values "_dashboardCertificates" (dict "tlsCert" (index $existing.data .Values.dashboard.tls.certificateKey | b64dec) "tlsKey" (index $existing.data .Values.dashboard.tls.privateKeyKey | b64dec)) -}}
+{{- else -}}
+{{- $name := include "kruntimes.dashboard.name" . -}}
+{{- $dns := list $name (printf "%s.%s" $name .Release.Namespace) (printf "%s.%s.svc" $name .Release.Namespace) (printf "%s.%s.svc.cluster.local" $name .Release.Namespace) -}}
+{{- $ca := genCA (printf "%s-ca" $name) 3650 -}}
+{{- $certificate := genSignedCert $name nil $dns 365 $ca -}}
+{{- $_ := set .Values "_dashboardCertificates" (dict "tlsCert" $certificate.Cert "tlsKey" $certificate.Key) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "kruntimes.image" -}}
 {{- $root := index . 0 -}}
 {{- $image := index . 1 -}}

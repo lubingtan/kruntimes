@@ -73,6 +73,13 @@ dashboard.enabled 为 false。这样在不增加不需要该组件的安装面�
 所选 source 都写入同一个挂载的 TLS Secret。chart 必须拒绝 ambiguous combination，而不能
 静默选择 certificate source。
 
+Helm values 将该选择明确化：默认 `dashboard.tls.selfSigned` 会让 chart 创建 TLS Secret；要
+挂载 operator 已提供的 Secret，设置 `selfSigned: false`，保持
+`certManager.enabled: false`，并设置 `secretName`；要使用 cert-manager，则设置
+`selfSigned: false` 和 `certManager.enabled: true`，同时引用已经存在的 `issuerRef`。
+cert-manager 可以写入默认 Dashboard TLS Secret，也可以写入 operator 设置的 `secretName`。
+因此，使用已有 self-signed Issuer 时不需要额外的 dashboard 专用 mode。
+
 backend 不拥有代表用户读取资源的 ambient authority。它只能使用自身的 ServiceAccount 来发现
 in-cluster API endpoint 和 CA。每个 request 只复制其中的 transport 配置、清空挂载的
 credential 及 credential file，并安装 caller bearer token。当该 token 缺失、无效或无权限时，
