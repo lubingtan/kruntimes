@@ -473,8 +473,8 @@ wiring from accumulating avoidable conflicts.
   - [x] review and define the v0.x Kubernetes bearer-token login model,
     request-scoped Kubernetes clients, and the local-only kubeconfig proxy
     boundary;
-  - add a dashboard backend with read-only Kubernetes API access;
-  - implement Run list/detail APIs with namespace-aware RBAC;
+  - [x] add a dashboard backend with read-only Kubernetes API access;
+  - [x] implement Run list/detail APIs with namespace-aware RBAC;
   - proxy Run log tail/follow through a backend-controlled path;
   - add read-only frontend views for namespace selection, Run lists, Run
     details, conditions, outputs, artifact references, and logs;

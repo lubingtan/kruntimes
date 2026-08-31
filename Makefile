@@ -3,6 +3,7 @@ IMG_SCHEDULER ?= kruntimes-scheduler:latest
 IMG_CONTROLLER ?= kruntimes-controller:latest
 IMG_RUNTIMED ?= kruntimes-runtimed:latest
 IMG_GATEWAY ?= kruntimes-gateway:latest
+IMG_DASHBOARD ?= kruntimes-dashboard:latest
 IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:latest
 IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:latest
 IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:latest
@@ -244,6 +245,7 @@ build: generate proto ## Build all binaries.
 	go build -o bin/runtimed ./cmd/runtimed
 	go build -o bin/controller ./cmd/controller
 	go build -o bin/runtime-gateway ./cmd/runtime-gateway
+	go build -o bin/dashboard ./cmd/dashboard
 	go build -o bin/krt ./cmd/krt
 	go build -o bin/bash-runtime ./runtimes/bash/cmd
 
@@ -278,7 +280,7 @@ run-runtimed: generate manifests proto ## Run runtimed locally (requires kubecon
 ##@ Docker
 
 .PHONY: docker-build
-docker-build: docker-build-scheduler docker-build-controller docker-build-runtimed docker-build-gateway docker-build-bash-runtime docker-build-python-runtime ## Build all Docker images.
+docker-build: docker-build-scheduler docker-build-controller docker-build-runtimed docker-build-gateway docker-build-dashboard docker-build-bash-runtime docker-build-python-runtime ## Build all Docker images.
 
 .PHONY: docker-build-scheduler
 docker-build-scheduler: generate ## Build scheduler Docker image.
@@ -295,6 +297,10 @@ docker-build-runtimed: generate proto ## Build runtimed Docker image.
 .PHONY: docker-build-gateway
 docker-build-gateway: generate proto ## Build Runtime gateway Docker image.
 	$(CONTAINER_TOOL) build -t $(IMG_GATEWAY) -f Dockerfile.gateway .
+
+.PHONY: docker-build-dashboard
+docker-build-dashboard: generate ## Build Dashboard Docker image.
+	$(CONTAINER_TOOL) build -t $(IMG_DASHBOARD) -f Dockerfile.dashboard .
 
 .PHONY: docker-build-bash-runtime
 docker-build-bash-runtime: proto ## Build bash-runtime Docker image.
@@ -317,6 +323,7 @@ docker-push: ## Push Docker images.
 	$(CONTAINER_TOOL) push $(IMG_CONTROLLER)
 	$(CONTAINER_TOOL) push $(IMG_RUNTIMED)
 	$(CONTAINER_TOOL) push $(IMG_GATEWAY)
+	$(CONTAINER_TOOL) push $(IMG_DASHBOARD)
 	$(CONTAINER_TOOL) push $(IMG_BASH_RUNTIME)
 	$(CONTAINER_TOOL) push $(IMG_PYTHON_RUNTIME)
 

@@ -140,6 +140,7 @@ Published container images are expected under:
 - `ghcr.io/<owner>/scheduler:<version>`
 - `ghcr.io/<owner>/controller:<version>`
 - `ghcr.io/<owner>/runtimed:<version>`
+- `ghcr.io/<owner>/dashboard:<version>`
 - `ghcr.io/<owner>/bash-runtime:<version>`
 - `ghcr.io/<owner>/python-runtime:<version>`
 
