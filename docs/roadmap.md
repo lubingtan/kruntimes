@@ -166,7 +166,7 @@ wiring from accumulating avoidable conflicts.
       fencing, one in-flight invocation, bounded output, and unregister drain;
     - [x] Python FunctionRuntime adapter with handler validation, registration
       fencing, one in-flight invocation, bounded output, and unregister drain;
-  - [ ] add bounded invocation response outputs and structured logs keyed by
+  - [x] add bounded invocation response outputs and structured logs keyed by
     Run UID and invocation ID;
   - invocation artifact persistence is deferred beyond v0.x. Function
     invocations do not create `ArtifactRef` objects; existing task-mode

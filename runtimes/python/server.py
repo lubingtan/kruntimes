@@ -28,6 +28,10 @@ MAX_FUNCTION_INVOKE_TIMEOUT_SECONDS = 5 * 60
 DEFAULT_FUNCTION_DRAIN_TIMEOUT_SECONDS = 30
 MAX_FUNCTION_DRAIN_TIMEOUT_SECONDS = 5 * 60
 HANDLER_COMPONENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MAX_OUTPUT_KEYS = 64
+MAX_OUTPUT_KEY_BYTES = 128
+MAX_OUTPUT_VALUE_BYTES = 8 * 1024
+MAX_OUTPUTS_BYTES = 64 * 1024
 
 FUNCTION_HANDLER_SCRIPT = """
 import contextlib
@@ -316,7 +320,7 @@ class PythonRuntime(
 
         context.add_callback(invocation.cancel)
         try:
-            output = self._invoke_function(
+            output, outputs = self._invoke_function(
                 entry,
                 invocation,
                 input_payload,
@@ -331,6 +335,7 @@ class PythonRuntime(
             invocation_id=request.invocation_id or self._new_function_id("inv_"),
             output=output,
             content_type="application/json",
+            outputs=outputs,
         )
 
     def UnregisterFunction(self, request, context):
@@ -1020,7 +1025,59 @@ class PythonRuntime(
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
                 "function response exceeds the configured output limit",
             )
-        return stdout.snapshot().encode("utf-8")
+        output = stdout.snapshot()
+        try:
+            result = json.loads(output)
+        except ValueError:
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                "function handler returned invalid JSON",
+            )
+        return output.encode("utf-8"), self._function_return_outputs(result, context)
+
+    @staticmethod
+    def _function_return_outputs(result, context):
+        if not isinstance(result, dict) or "outputs" not in result:
+            return {}
+        outputs = result["outputs"]
+        if not isinstance(outputs, dict):
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                "function return outputs must be an object of string values",
+            )
+        if len(outputs) > MAX_OUTPUT_KEYS:
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"function return outputs exceed {MAX_OUTPUT_KEYS} keys",
+            )
+        total_bytes = 0
+        normalized = {}
+        for key, value in outputs.items():
+            if not isinstance(key, str) or not key or not isinstance(value, str):
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    "function return outputs must use non-empty string keys and string values",
+                )
+            key_bytes = len(key.encode("utf-8"))
+            value_bytes = len(value.encode("utf-8"))
+            if key_bytes > MAX_OUTPUT_KEY_BYTES:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"function return output key {key!r} exceeds {MAX_OUTPUT_KEY_BYTES} bytes",
+                )
+            if value_bytes > MAX_OUTPUT_VALUE_BYTES:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"function return output value for {key!r} exceeds {MAX_OUTPUT_VALUE_BYTES} bytes",
+                )
+            total_bytes += key_bytes + value_bytes
+            if total_bytes > MAX_OUTPUTS_BYTES:
+                context.abort(
+                    grpc.StatusCode.INTERNAL,
+                    f"function return outputs exceed {MAX_OUTPUTS_BYTES} bytes",
+                )
+            normalized[key] = value
+        return normalized
 
     @staticmethod
     def _read_function_stream(buffer, stream):

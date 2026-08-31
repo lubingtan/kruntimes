@@ -113,3 +113,39 @@ func readOutputs(path string) (map[string]string, error) {
 	}
 	return outputs, nil
 }
+
+// mergeInvocationOutputs combines independent invocation output sources. The
+// file parser retains its established last-line-wins behavior within one file;
+// distinct sources, however, must not silently overwrite each other.
+func mergeInvocationOutputs(sources ...map[string]string) (map[string]string, error) {
+	merged := make(map[string]string)
+	totalBytes := 0
+	for _, source := range sources {
+		for key, value := range source {
+			if key == "" || !utf8.ValidString(key) || !utf8.ValidString(value) {
+				return nil, fmt.Errorf("invocation output keys must be non-empty and all output strings must be valid UTF-8")
+			}
+			if len(key) > artifact.MaxOutputKeyBytes {
+				return nil, &outputsTooLargeError{message: fmt.Sprintf("invocation output key %q exceeds %d bytes", key, artifact.MaxOutputKeyBytes)}
+			}
+			if len(value) > artifact.MaxOutputValueBytes {
+				return nil, &outputsTooLargeError{message: fmt.Sprintf("invocation output value for %q exceeds %d bytes", key, artifact.MaxOutputValueBytes)}
+			}
+			if _, exists := merged[key]; exists {
+				return nil, fmt.Errorf("invocation output %q was returned by more than one source", key)
+			}
+			if len(merged) >= artifact.MaxOutputKeys {
+				return nil, &outputsTooLargeError{message: fmt.Sprintf("invocation outputs exceed %d keys", artifact.MaxOutputKeys)}
+			}
+			totalBytes += len(key) + len(value)
+			if totalBytes > artifact.MaxOutputsBytes {
+				return nil, &outputsTooLargeError{message: fmt.Sprintf("invocation outputs exceed %d bytes", artifact.MaxOutputsBytes)}
+			}
+			merged[key] = value
+		}
+	}
+	if len(merged) == 0 {
+		return nil, nil
+	}
+	return merged, nil
+}

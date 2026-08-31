@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -789,8 +790,12 @@ func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
 	runtimeName := fmt.Sprintf("function-gateway-%d", time.Now().UnixNano())
 	ensureRuntimeWithRunsCapacity(t, runtimeName, pythonRuntimeImage(), 9092, 1)
 
-	inline := `def handler(event):
-    return {"status": "ok", "value": event["value"]}
+	inline := `import os
+
+def handler(event):
+    with open(os.environ["KRUNTIME_OUTPUTS"], "w") as outputs:
+        outputs.write("from-file=" + event["value"] + "\n")
+    return {"status": "ok", "value": event["value"], "outputs": {"source": "python", "value": event["value"]}}
 `
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-function-gateway-", Namespace: testNamespace},
@@ -813,21 +818,23 @@ func TestFunctionGatewayInvokesAuthorizedFunction(t *testing.T) {
 	token := sessionGatewayToken(t, run)
 	response := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"gateway"}`), http.StatusOK)
 	var invocation struct {
-		InvocationID string `json:"invocationId"`
-		Output       []byte `json:"output"`
-		ContentType  string `json:"contentType"`
+		InvocationID string            `json:"invocationId"`
+		Output       []byte            `json:"output"`
+		Outputs      map[string]string `json:"outputs"`
+		ContentType  string            `json:"contentType"`
 	}
 	if err := json.Unmarshal(response, &invocation); err != nil {
 		t.Fatalf("decode Function invocation response: %v", err)
 	}
-	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\"}\n" {
+	if invocation.InvocationID == "" || invocation.ContentType != "application/json" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"gateway\", \"outputs\": {\"source\": \"python\", \"value\": \"gateway\"}}\n" || !reflect.DeepEqual(invocation.Outputs, map[string]string{"from-file": "gateway", "source": "python", "value": "gateway"}) {
 		t.Fatalf("Function invocation = %#v, want successful JSON response", invocation)
 	}
+	waitForFunctionInvocationLogs(t, run, invocation.InvocationID)
 	secondResponse := waitForGatewayResponse(t, http.MethodPost, baseURL, token, []byte(`{"value":"again"}`), http.StatusOK)
 	if err := json.Unmarshal(secondResponse, &invocation); err != nil {
 		t.Fatalf("decode repeated Function invocation response: %v", err)
 	}
-	if invocation.InvocationID == "" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"again\"}\n" {
+	if invocation.InvocationID == "" || string(invocation.Output) != "{\"status\": \"ok\", \"value\": \"again\", \"outputs\": {\"source\": \"python\", \"value\": \"again\"}}\n" || !reflect.DeepEqual(invocation.Outputs, map[string]string{"from-file": "again", "source": "python", "value": "again"}) {
 		t.Fatalf("repeated Function invocation = %#v, want successful JSON response", invocation)
 	}
 
@@ -1849,6 +1856,44 @@ func containsSessionCommandLogs(contents, runUID, message string) bool {
 		}
 	}
 	return stdoutFound && auditFound
+}
+
+func waitForFunctionInvocationLogs(t *testing.T, run *v1alpha1.Run, invocationID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		stream, err := coreClientset.CoreV1().Pods(run.Namespace).GetLogs(run.Status.AssignedPod, &corev1.PodLogOptions{Container: "runtimed"}).Stream(ctx)
+		if err == nil {
+			contents, readErr := io.ReadAll(stream)
+			_ = stream.Close()
+			if readErr == nil && containsFunctionInvocationLogs(string(contents), string(run.UID), invocationID) {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for structured Function invocation logs for Run %s", run.Name)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func containsFunctionInvocationLogs(contents, runUID, invocationID string) bool {
+	for _, raw := range strings.Split(strings.TrimSuffix(contents, "\n"), "\n") {
+		var line struct {
+			RunUID       string `json:"run_uid"`
+			InvocationID string `json:"invocation_id"`
+			Stream       string `json:"stream"`
+			Message      string `json:"message"`
+			Operation    string `json:"operation"`
+			Outcome      string `json:"outcome"`
+		}
+		if json.Unmarshal([]byte(raw), &line) == nil && line.RunUID == runUID && line.InvocationID == invocationID && line.Stream == "audit" && line.Message == "function invocation completed" && line.Operation == "function_invoke" && line.Outcome == "succeeded" {
+			return true
+		}
+	}
+	return false
 }
 
 func sessionGatewayToken(t *testing.T, run *v1alpha1.Run) string {

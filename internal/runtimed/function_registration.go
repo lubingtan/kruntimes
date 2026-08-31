@@ -8,6 +8,7 @@ import (
 
 	pb "github.com/kruntimes/kruntimes/api/runtime/v1"
 	"github.com/kruntimes/kruntimes/api/v1alpha1"
+	"github.com/kruntimes/kruntimes/internal/artifact"
 	runretry "github.com/kruntimes/kruntimes/internal/retry"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -16,12 +17,15 @@ import (
 // request for the current function Run attempt. The digest deliberately omits
 // workingDir because that path may change when the same immutable Run input is
 // assigned to another Runtime Pod.
-func functionRegistrationRequest(run *v1alpha1.Run, workingDir string) (*pb.RegisterFunctionRequest, error) {
+func functionRegistrationRequest(run *v1alpha1.Run, workingDir, outputPath string) (*pb.RegisterFunctionRequest, error) {
 	if run == nil || run.UID == "" {
 		return nil, fmt.Errorf("function registration requires a Run UID")
 	}
 	if workingDir == "" {
 		return nil, fmt.Errorf("function registration requires a working directory")
+	}
+	if outputPath == "" {
+		return nil, fmt.Errorf("function registration requires an invocation outputs path")
 	}
 	function := run.Spec.Mode.Function
 	if function == nil {
@@ -40,12 +44,17 @@ func functionRegistrationRequest(run *v1alpha1.Run, workingDir string) (*pb.Regi
 	if function.IdleTimeoutSeconds != nil {
 		idleTimeoutSeconds = int64(*function.IdleTimeoutSeconds)
 	}
+	env := functionRegistrationEnv(run.Spec.Env)
+	// A Function Run admits one invocation at a time, so this Run-local path is
+	// an invocation-local handoff. It is reset by the owner runtimed before each
+	// invocation and is never controlled by user-provided environment values.
+	env[artifact.OutputsEnv] = outputPath
 	return &pb.RegisterFunctionRequest{
 		RunUid:              string(run.UID),
 		RegistrationAttempt: runretry.CurrentAttempt(run.Status.Attempt),
 		WorkingDir:          workingDir,
 		Handler:             function.Handler,
-		Env:                 functionRegistrationEnv(run.Spec.Env),
+		Env:                 env,
 		IdleTimeoutSeconds:  idleTimeoutSeconds,
 		RegistrationDigest:  digest,
 	}, nil
@@ -81,6 +90,9 @@ func functionRegistrationDigest(run *v1alpha1.Run) (string, error) {
 func functionRegistrationEnv(env []corev1.EnvVar) map[string]string {
 	values := make(map[string]string, len(env))
 	for _, variable := range env {
+		if variable.Name == artifact.OutputsEnv {
+			continue
+		}
 		values[variable.Name] = variable.Value
 	}
 	return values

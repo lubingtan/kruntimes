@@ -416,6 +416,43 @@ def handler(event):
         )
         self.assertEqual(null_response.output, b"null\n")
 
+    def test_function_runtime_returns_outputs_from_handler_object(self):
+        wd = self._prepare_inline("""
+def handler(event):
+    return {"result": event["value"], "outputs": {"name": "demo", "region": "us-east"}}
+""", filename="app.py")
+        registration = self._register_function(wd)
+
+        response = self.function_stub.InvokeFunction(
+            runtime_pb2.InvokeFunctionRequest(
+                registration=registration,
+                content_type="application/json",
+                input=b'{"value":"ok"}',
+            )
+        )
+        self.assertEqual(
+            response.output,
+            b'{"result": "ok", "outputs": {"name": "demo", "region": "us-east"}}\n',
+        )
+        self.assertEqual(dict(response.outputs), {"name": "demo", "region": "us-east"})
+
+    def test_function_runtime_rejects_non_string_return_outputs(self):
+        wd = self._prepare_inline("""
+def handler(event):
+    return {"outputs": {"count": 1}}
+""", filename="app.py")
+        registration = self._register_function(wd)
+
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self.function_stub.InvokeFunction(
+                runtime_pb2.InvokeFunctionRequest(
+                    registration=registration,
+                    content_type="application/json",
+                    input=b'{}',
+                )
+            )
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INTERNAL)
+
     def test_function_runtime_accepts_one_mebibyte_input(self):
         wd = self._prepare_inline("""
 def handler(event):

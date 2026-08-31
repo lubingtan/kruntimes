@@ -230,13 +230,22 @@ in-flight invocation，并且不排队。
   不影响 function Run 生命周期。draining、stale 或未就绪注册的 `FailedPrecondition` 映射为
   HTTP 503。
 
-`outputs` 使用与 `Run.status.outputs` 相同的 key、数量和 value 限制。v0.x 的 function
-invocation 不生成 artifact declaration 或 `ArtifactRef`。未来需要先定义 lifecycle、retention 和
-storage boundary，才能扩展这个 local protocol。
+`outputs` 使用与 `Run.status.outputs` 相同的 key、数量和 value 限制，但它们只从本次
+invocation 返回，绝不追加到 `Run.status`。每个内置 Runtime 都会获得一个 invocation-local
+`KRUNTIME_OUTPUTS` 路径，并可写入已有的 `KEY=VALUE` 格式。runtimed 会在唯一允许的
+in-flight invocation 前清空该文件，在成功响应后解析，并将有界值填入本 RPC response。
 
-runtime logs 以 Run UID 和 invocation ID 为 key 进行结构化记录。adapter 捕获的 function output
-写入 RPC 的 `output` field，而不会自动记录为日志。内置 Bash 将 handler stdout 作为 function
-output，将 stderr 作为结构化日志；两者都不写入 `Run.status.message`。
+Runtime 可以增加已文档化且兼容的 output source。内置 Python adapter 识别 handler return object
+顶层的 `outputs` field：它必须是 `map[string]string`；原始 object 仍完整地作为 `output` 返回，
+该 field 的值作为 response outputs。file 与 Python-return outputs 仅在 key 完全不重复时才合并；
+duplicate key、invalid value 或超过限制都会使本次 invocation 失败，而不会静默覆盖数据。v0.x 的
+function invocation 不生成 artifact declaration 或 `ArtifactRef`。未来需要先定义 lifecycle、
+retention 和 storage boundary，才能扩展这个 local protocol。
+
+owner runtimed 对每个 invocation 输出一条有界 JSONL audit record，以 Run UID 和 invocation ID
+为 key，并包含 operation、outcome、gRPC status code 和 duration。它绝不记录 request body、response
+body 或 output value。adapter 捕获的 function output 写入 RPC 的 `output` field，而不会自动记录为
+日志；两种 output 都不写入 `Run.status.message`。
 
 ## 注销
 

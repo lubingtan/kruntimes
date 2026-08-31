@@ -139,7 +139,7 @@ func (c *Controller) registerFunction(ctx context.Context, ar *activeRun) (*pb.F
 	if c.functionCli == nil {
 		return nil, fmt.Errorf("FunctionRuntime client is not configured")
 	}
-	request, err := functionRegistrationRequest(ar.run, ar.workDir)
+	request, err := functionRegistrationRequest(ar.run, ar.workDir, ar.outputPath)
 	if err != nil {
 		return nil, err
 	}

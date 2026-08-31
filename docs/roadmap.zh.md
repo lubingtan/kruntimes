@@ -144,7 +144,7 @@ controller wiring 累积不必要的冲突。
       in-flight invocation、有界输出和 unregister drain；
     - [x] Python FunctionRuntime adapter：handler validation、registration fencing、单个
       in-flight invocation、有界输出和 unregister drain；
-  - [ ] 增加有界 invocation response outputs，以及以 Run UID 和 invocation ID 为 key 的
+  - [x] 增加有界 invocation response outputs，以及以 Run UID 和 invocation ID 为 key 的
     structured logs；
   - invocation artifact persistence 推迟到 v0.x 之后。function invocation 不创建
     `ArtifactRef`；现有 task-mode artifact storage 和 cleanup 保持不变。

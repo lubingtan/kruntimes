@@ -478,6 +478,23 @@ func TestReadOutputs_Limits(t *testing.T) {
 	}
 }
 
+func TestMergeInvocationOutputs(t *testing.T) {
+	merged, err := mergeInvocationOutputs(
+		map[string]string{"from-adapter": "value"},
+		map[string]string{"from-file": "value"},
+	)
+	if err != nil {
+		t.Fatalf("merge invocation outputs: %v", err)
+	}
+	if len(merged) != 2 || merged["from-adapter"] != "value" || merged["from-file"] != "value" {
+		t.Fatalf("merged outputs = %#v", merged)
+	}
+
+	if _, err := mergeInvocationOutputs(map[string]string{"duplicate": "adapter"}, map[string]string{"duplicate": "file"}); err == nil {
+		t.Fatal("merge invocation outputs succeeded for duplicate key")
+	}
+}
+
 func TestStatusAdapter(t *testing.T) {
 	var _ = (*statusAdapter)(nil)
 }
