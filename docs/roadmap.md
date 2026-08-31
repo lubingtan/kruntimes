@@ -475,7 +475,7 @@ wiring from accumulating avoidable conflicts.
     boundary;
   - [x] add a dashboard backend with read-only Kubernetes API access;
   - [x] implement Run list/detail APIs with namespace-aware RBAC;
-  - proxy Run log tail/follow through a backend-controlled path;
+  - [x] proxy Run log tail/follow through a backend-controlled path;
   - add read-only frontend views for namespace selection, Run lists, Run
     details, conditions, outputs, artifact references, and logs;
   - add optional Helm installation support and E2E smoke coverage.

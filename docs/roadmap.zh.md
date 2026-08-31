@@ -397,7 +397,7 @@ controller wiring 累积不必要的冲突。
     clients，以及 local-only kubeconfig proxy 边界；
   - [x] 增加 dashboard backend，提供只读 Kubernetes API access；
   - [x] 实现 Run list/detail APIs，并遵守 namespace-aware RBAC；
-  - 通过 backend-controlled 路径代理 Run log tail/follow；
+  - [x] 通过 backend-controlled 路径代理 Run log tail/follow；
   - 增加只读 frontend views，覆盖 namespace selection、Run lists、Run details、
     conditions、outputs、artifact references 和 logs；
   - 增加可选 Helm installation support 和 E2E smoke coverage。

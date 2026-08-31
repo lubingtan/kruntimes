@@ -1,9 +1,12 @@
 package dashboard
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -21,12 +24,21 @@ import (
 const (
 	defaultRunListLimit int64 = 50
 	maxRunListLimit     int64 = 200
+	defaultLogTailLines int64 = 100
+	maxLogTailLines     int64 = 500
+	maxLogBytes         int64 = 1 << 20
 )
 
 // RequestClientProvider resolves a Kubernetes client for one HTTP request.
 // RequestClientFactory is the production implementation.
 type RequestClientProvider interface {
 	ClientForRequest(*http.Request) (client.Client, error)
+}
+
+// PodLogReader exposes the narrowly-scoped Kubernetes log operation required
+// by the Dashboard. RequestClientFactory is the production implementation.
+type PodLogReader interface {
+	ReadPodLogs(context.Context, *http.Request, string, string, corev1.PodLogOptions) (io.ReadCloser, error)
 }
 
 // Server exposes the Dashboard's internal, read-only HTTP API.
@@ -73,6 +85,50 @@ type runDetailResponse struct {
 	ArtifactRefs []v1alpha1.ArtifactRef `json:"artifactRefs,omitempty"`
 }
 
+type runLogResponse struct {
+	Items []runLogEntry `json:"items"`
+}
+
+// runLogEntry is the safe portion of one structured runtimed log record.
+type runLogEntry struct {
+	Stream               string `json:"stream"`
+	Message              string `json:"message"`
+	InvocationID         string `json:"invocationId,omitempty"`
+	Operation            string `json:"operation,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	StatusCode           string `json:"statusCode,omitempty"`
+	ExitCode             *int32 `json:"exitCode,omitempty"`
+	TimedOut             bool   `json:"timedOut,omitempty"`
+	DurationMilliseconds int64  `json:"durationMilliseconds,omitempty"`
+}
+
+type runtimedLogRecord struct {
+	RunUID               string `json:"run_uid"`
+	Stream               string `json:"stream"`
+	Message              string `json:"message"`
+	InvocationID         string `json:"invocation_id,omitempty"`
+	Operation            string `json:"operation,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	StatusCode           string `json:"status_code,omitempty"`
+	ExitCode             *int32 `json:"exit_code,omitempty"`
+	TimedOut             bool   `json:"timed_out,omitempty"`
+	DurationMilliseconds int64  `json:"duration_milliseconds,omitempty"`
+}
+
+func (record runtimedLogRecord) entry() runLogEntry {
+	return runLogEntry{
+		Stream:               record.Stream,
+		Message:              record.Message,
+		InvocationID:         record.InvocationID,
+		Operation:            record.Operation,
+		Outcome:              record.Outcome,
+		StatusCode:           record.StatusCode,
+		ExitCode:             record.ExitCode,
+		TimedOut:             record.TimedOut,
+		DurationMilliseconds: record.DurationMilliseconds,
+	}
+}
+
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		s.writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
@@ -90,6 +146,7 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /api/namespaces", s.withRequestClient(s.listNamespaces))
 	mux.HandleFunc("GET /api/namespaces/{namespace}/runs", s.withRequestClient(s.listRuns))
 	mux.HandleFunc("GET /api/namespaces/{namespace}/runs/{name}", s.withRequestClient(s.getRun))
+	mux.HandleFunc("GET /api/namespaces/{namespace}/runs/{name}/logs", s.withRequestClient(s.getRunLogs))
 	mux.HandleFunc("GET /", func(writer http.ResponseWriter, _ *http.Request) {
 		s.writeError(writer, http.StatusNotFound, "endpoint not found")
 	})
@@ -183,6 +240,119 @@ func (s *Server) getRun(writer http.ResponseWriter, request *http.Request, kuber
 		Outputs:      copyStringMap(run.Status.Outputs),
 		ArtifactRefs: append([]v1alpha1.ArtifactRef(nil), run.Status.ArtifactRefs...),
 	})
+}
+
+func (s *Server) getRunLogs(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
+	tailLines, follow, err := parseLogOptions(request)
+	if err != nil {
+		s.writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	logReader, ok := s.Clients.(PodLogReader)
+	if !ok {
+		s.writeError(writer, http.StatusServiceUnavailable, "dashboard Pod log reader is not configured")
+		return
+	}
+	run := &v1alpha1.Run{}
+	if err := kubernetesClient.Get(request.Context(), client.ObjectKey{Namespace: request.PathValue("namespace"), Name: request.PathValue("name")}, run); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	if run.Status.AssignedPod == "" {
+		s.writeError(writer, http.StatusConflict, "Run has not been assigned to a Runtime Pod")
+		return
+	}
+	stream, err := logReader.ReadPodLogs(request.Context(), request, run.Namespace, run.Status.AssignedPod, corev1.PodLogOptions{
+		Container:  "runtimed",
+		Follow:     follow,
+		TailLines:  pointerTo(maxLogTailLines),
+		LimitBytes: pointerTo(maxLogBytes),
+	})
+	if err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	defer stream.Close()
+	if follow {
+		s.streamRunLogs(writer, stream, string(run.UID))
+		return
+	}
+	entries, err := readRunLogs(stream, string(run.UID), tailLines)
+	if err != nil {
+		s.writeError(writer, http.StatusInternalServerError, "dashboard log request failed")
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, runLogResponse{Items: entries})
+}
+
+func parseLogOptions(request *http.Request) (int64, bool, error) {
+	query := request.URL.Query()
+	tailLines := defaultLogTailLines
+	if rawTail := query.Get("tail"); rawTail != "" {
+		parsed, err := strconv.ParseInt(rawTail, 10, 64)
+		if err != nil || parsed < 1 || parsed > maxLogTailLines {
+			return 0, false, fmt.Errorf("tail must be between 1 and %d", maxLogTailLines)
+		}
+		tailLines = parsed
+	}
+	follow := false
+	if rawFollow := query.Get("follow"); rawFollow != "" {
+		parsed, err := strconv.ParseBool(rawFollow)
+		if err != nil {
+			return 0, false, errors.New("follow must be true or false")
+		}
+		follow = parsed
+	}
+	return tailLines, follow, nil
+}
+
+func readRunLogs(reader io.Reader, runUID string, tailLines int64) ([]runLogEntry, error) {
+	entries := make([]runLogEntry, 0, tailLines)
+	if err := scanRunLogs(reader, runUID, func(entry runLogEntry) error {
+		entries = append(entries, entry)
+		if int64(len(entries)) > tailLines {
+			copy(entries, entries[len(entries)-int(tailLines):])
+			entries = entries[:tailLines]
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (s *Server) streamRunLogs(writer http.ResponseWriter, reader io.Reader, runUID string) {
+	writer.Header().Set("Content-Type", "application/x-ndjson")
+	writer.WriteHeader(http.StatusOK)
+	flusher, _ := writer.(http.Flusher)
+	_ = scanRunLogs(reader, runUID, func(entry runLogEntry) error {
+		if err := json.NewEncoder(writer).Encode(entry); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	})
+}
+
+func scanRunLogs(reader io.Reader, runUID string, handle func(runLogEntry) error) error {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), int(maxLogBytes))
+	for scanner.Scan() {
+		var record runtimedLogRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil || record.RunUID != runUID {
+			continue
+		}
+		if err := handle(record.entry()); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func pointerTo[T any](value T) *T {
+	return &value
 }
 
 func summaryForRun(run *v1alpha1.Run) runSummary {

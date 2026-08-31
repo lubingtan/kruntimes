@@ -1,10 +1,13 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,12 +24,29 @@ import (
 )
 
 type staticRequestClients struct {
-	client client.Client
-	err    error
+	client     client.Client
+	err        error
+	logs       string
+	logsErr    error
+	logRequest struct {
+		namespace string
+		pod       string
+		options   corev1.PodLogOptions
+	}
 }
 
 func (s staticRequestClients) ClientForRequest(*http.Request) (client.Client, error) {
 	return s.client, s.err
+}
+
+func (s *staticRequestClients) ReadPodLogs(_ context.Context, _ *http.Request, namespace, pod string, options corev1.PodLogOptions) (io.ReadCloser, error) {
+	s.logRequest.namespace = namespace
+	s.logRequest.pod = pod
+	s.logRequest.options = options
+	if s.logsErr != nil {
+		return nil, s.logsErr
+	}
+	return io.NopCloser(strings.NewReader(s.logs)), nil
 }
 
 func TestServerListsNamespacesAndRuns(t *testing.T) {
@@ -153,6 +173,74 @@ func TestServerRoutesMethodsAndMissingEndpoints(t *testing.T) {
 	}
 }
 
+func TestServerGetsFilteredRunLogs(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
+	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, now)
+	clients := &staticRequestClients{logs: strings.Join([]string{
+		`{"run_uid":"other","stream":"stdout","message":"ignore"}`,
+		`{"run_uid":"logs-uid","stream":"stdout","message":"first"}`,
+		`{"run_uid":"logs-uid","stream":"stderr","message":"second"}`,
+		`{"run_uid":"logs-uid","stream":"audit","message":"finished","invocation_id":"invoke-1","duration_milliseconds":12}`,
+	}, "\n")}
+	server := dashboardTestServerWithClients(t, clients, run)
+
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs?tail=2", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("get logs status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body runLogResponse
+	decodeDashboardResponse(t, response, &body)
+	if len(body.Items) != 2 || body.Items[0].Message != "second" || body.Items[1].InvocationID != "invoke-1" || body.Items[1].DurationMilliseconds != 12 {
+		t.Fatalf("log entries = %#v", body.Items)
+	}
+	if clients.logRequest.namespace != "team-a" || clients.logRequest.pod != "runtime-pod" || clients.logRequest.options.Container != "runtimed" || clients.logRequest.options.Follow || clients.logRequest.options.TailLines == nil || *clients.logRequest.options.TailLines != maxLogTailLines {
+		t.Fatalf("Pod log request = %#v", clients.logRequest)
+	}
+}
+
+func TestServerStreamsFilteredRunLogs(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
+	run := dashboardRun("follow", "team-a", "python", v1alpha1.RunRunning, now)
+	clients := &staticRequestClients{logs: strings.Join([]string{
+		`{"run_uid":"other","stream":"stdout","message":"ignore"}`,
+		`{"run_uid":"follow-uid","stream":"stdout","message":"followed"}`,
+	}, "\n")}
+	server := dashboardTestServerWithClients(t, clients, run)
+
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/follow/logs?follow=true", nil)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("follow status/content type = %d/%q", response.Code, response.Header().Get("Content-Type"))
+	}
+	var entry runLogEntry
+	if err := json.Unmarshal(response.Body.Bytes(), &entry); err != nil || entry.Message != "followed" {
+		t.Fatalf("follow entry = %q, %v", response.Body.String(), err)
+	}
+	if !clients.logRequest.options.Follow {
+		t.Fatal("follow Pod log request must set Follow")
+	}
+}
+
+func TestServerRejectsInvalidLogRequests(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
+	unassigned := dashboardRun("unassigned", "team-a", "python", v1alpha1.RunPending, now)
+	unassigned.Status.AssignedPod = ""
+	server := dashboardTestServer(t, unassigned)
+	for _, path := range []string{
+		"/api/namespaces/team-a/runs/unassigned/logs?tail=0",
+		"/api/namespaces/team-a/runs/unassigned/logs?tail=501",
+		"/api/namespaces/team-a/runs/unassigned/logs?follow=maybe",
+	} {
+		response := requestDashboard(t, server, http.MethodGet, path, nil)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want %d", path, response.Code, http.StatusBadRequest)
+		}
+	}
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/unassigned/logs", nil)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("unassigned logs status = %d, want %d", response.Code, http.StatusConflict)
+	}
+}
+
 func dashboardTestServer(t *testing.T, objects ...client.Object) *Server {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -162,7 +250,22 @@ func dashboardTestServer(t *testing.T, objects ...client.Object) *Server {
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add kruntimes scheme: %v", err)
 	}
-	return &Server{Clients: staticRequestClients{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()}}
+	return dashboardTestServerWithClients(t, &staticRequestClients{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()})
+}
+
+func dashboardTestServerWithClients(t *testing.T, clients *staticRequestClients, objects ...client.Object) *Server {
+	t.Helper()
+	if clients.client == nil {
+		scheme := runtime.NewScheme()
+		if err := corev1.AddToScheme(scheme); err != nil {
+			t.Fatalf("add core scheme: %v", err)
+		}
+		if err := v1alpha1.AddToScheme(scheme); err != nil {
+			t.Fatalf("add kruntimes scheme: %v", err)
+		}
+		clients.client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	}
+	return &Server{Clients: clients}
 }
 
 func dashboardRun(name, namespace, runtimeName string, phase v1alpha1.RunPhase, now metav1.Time) *v1alpha1.Run {

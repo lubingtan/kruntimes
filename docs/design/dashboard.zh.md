@@ -230,6 +230,12 @@ GET /api/namespaces/{namespace}/runs/{name}
 GET /api/namespaces/{namespace}/runs/{name}/logs?tail=&follow=
 ```
 
+日志 endpoint 只会通过 request-scoped Kubernetes client 读取 assigned Pod 的 `runtimed`
+container，并丢弃 `run_uid` 不匹配该 Run immutable UID 的记录。`tail` 最多返回 500 条记录；
+每个 request 最多读取 500 条最近 container lines 和 1 MiB。普通 tail response 为 JSON；当
+`follow=true` 时，endpoint 会返回过滤后的 newline-delimited JSON records，直到 caller 断开或
+Kubernetes log stream 关闭。它绝不会变成 browser-visible Pod proxy。
+
 Run list endpoint 应尽量支持 server-side pagination 和过滤：
 
 - phase；

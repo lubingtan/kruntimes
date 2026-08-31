@@ -262,6 +262,14 @@ GET /api/namespaces/{namespace}/runs/{name}
 GET /api/namespaces/{namespace}/runs/{name}/logs?tail=&follow=
 ```
 
+The log endpoint reads only the assigned Pod's `runtimed` container through the
+request-scoped Kubernetes client and discards records whose `run_uid` does not
+match the Run's immutable UID. `tail` is bounded to 500 returned records; the
+backend reads at most 500 recent container lines and 1 MiB per request. A
+normal tail response is JSON. With `follow=true`, the endpoint returns filtered
+newline-delimited JSON records until the caller disconnects or the Kubernetes
+log stream closes. It never turns into a browser-visible Pod proxy.
+
 The Run list endpoint should support server-side pagination and filter fields
 where practical:
 
