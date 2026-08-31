@@ -1,6 +1,6 @@
 # Dashboard
 
-本文描述 v0.x 的目标设计，当前尚未实现。
+本文描述已接受的 v0.x 设计，当前尚未实现。
 
 kruntimes 应该提供一个小型只读 dashboard，帮助开发者和运维人员理解当前有哪些任务在运行、
 哪些任务卡住了，以及如何找到 logs 和 artifacts，而不需要在多个 `kubectl` 和 `krt`
@@ -55,6 +55,29 @@ dashboard 应该包含两个组件：
 | Dashboard backend | 访问 Kubernetes API，执行所选 auth/RBAC 模型，读取 kruntimes CRDs，并在允许时代理 logs/artifacts 访问。 |
 | Dashboard frontend | 只读 Web UI，展示 namespace、Run list、Run detail、logs 和 artifact metadata。 |
 
+### v0.x 决策
+
+dashboard 作为主 kruntimes chart 的 opt-in 组件发布，默认
+dashboard.enabled 为 false。这样在不增加不需要该组件的安装面时，仍保持统一的升级和 RBAC
+边界。
+
+生产环境的 dashboard 仅允许 HTTPS。Service 保持 ClusterIP，且 bearer-token login 页面绝不能
+暴露在 plaintext HTTP 上。chart 允许 operator 选择一种 certificate source：
+
+- 已存在的 TLS Secret，通常包含 dashboard 用户信任的 certificate；
+- chart 生成的 self-signed certificate，适用于本地开发和已显式信任该 certificate 的私有部署；
+  或
+- 使用已有 Issuer 或 ClusterIssuer 的 cert-manager Certificate；所选 issuer 本身也可以是
+  cert-manager self-signed issuer。
+
+所选 source 都写入同一个挂载的 TLS Secret。chart 必须拒绝 ambiguous combination，而不能
+静默选择 certificate source。
+
+backend 不拥有代表用户读取资源的 ambient authority。它只能使用自身的 ServiceAccount 来发现
+in-cluster API endpoint 和 CA。每个 request 只复制其中的 transport 配置、清空挂载的
+credential 及 credential file，并安装 caller bearer token。当该 token 缺失、无效或无权限时，
+backend 不得回退为 ServiceAccount。
+
 第一版应读取以下数据源：
 
 - 通过 Kubernetes API 读取 `Run` objects；
@@ -88,6 +111,12 @@ v0.x 预期路径是：
 结构化 runtimed logs 应继续以 Run UID 作为 key，这样即使 Runtime Pods 同时处理多个 Runs，
 dashboard 也能展示正确的 logs。
 
+v0.x 中，backend 通过 request-scoped client 读取 assigned Pod 的 runtimed container log
+subresource，并只返回 run_uid 与请求 immutable Run UID 匹配的 structured records。它不创建
+browser-visible port-forward，也不把 Runtime Pods 直接暴露给 browser。因此 caller 需要有读取
+Run、assigned Pod 以及 get Pod log subresource 的权限。artifact references 作为 Run metadata
+展示；artifact download 不属于第一阶段 Dashboard。
+
 ## 安全模型
 
 dashboard 默认必须是只读的。
@@ -104,11 +133,10 @@ dashboard 默认必须是只读的。
   自己维护 policy；
 - 初始 UI 可以 best-effort 列出 namespaces。若 token 没有 list Namespace objects 的权限，
   UI 必须允许用户输入 namespace name，并展示 API 的正常 authorization 结果；
-- logs 访问需要同一个 token 能够读取 Run 及其 assigned Pod、创建 `krt logs` 所使用的 Pod
-  `portforward` subresource，并在 runtimed log fallback 需要时读取 `log` subresource；
-- artifacts 访问需要 Run read permission；当 dashboard 通过 runtimed 的 artifact endpoint
-  访问时，还需要读取 assigned Pod 并创建其 `portforward` subresource 的权限。直接访问
-  artifact-store 时也需要选定 backend 所定义的权限；
+- logs 访问需要同一个 token 能够读取 Run 和 assigned Pod，并读取 Pod 的 `log`
+  subresource。v0.x 只返回 `runtimed` container 的 structured records；
+- v0.x 只将 artifact references 作为 Run metadata 展示，不下载或代理 artifact content。
+  将来的 artifact-download 设计必须单独定义 authorization 与 external-store 边界；
 - 默认隐藏 secrets、service account tokens、environment variables 和 raw pod specs，
   除非未来明确增加 privileged operator view。
 
@@ -116,17 +144,19 @@ dashboard 默认必须是只读的。
 dashboard 外部 mint 或 exchange bearer token，但 v0.x 不定义 external-auth header protocol、
 impersonation model 或 custom identity provider。
 
-本地开发中，`krt` 可以 port-forward dashboard，并通过 local-only proxy 提供当前 kubeconfig
-credential。这个 convenience path 不是生产 authentication mode，并且不能让浏览器在本地会话结束
-后保留 kubeconfig credential 或 token。
+本地开发中，`krt dashboard` 启动 loopback-only proxy 并 port-forward dashboard Service。
+proxy 获取当前 kubeconfig credential，只将其注入被转发的请求；browser 永远不会得到该
+credential。它只能绑定 127.0.0.1 或显式选择的 loopback address、必须拒绝 non-loopback
+bind、不持久化或记录 credential，并在命令退出时关闭 port-forward。这不是生产 authentication
+mode。
 
 ### 创建 Dashboard 登录 Token
 
 operator 应在每个允许 dashboard 用户查看的 namespace 中，为最小权限的 *viewer*
 ServiceAccount 创建短期 token。该 ServiceAccount 是登录 token 所代表的用户身份，与 dashboard
 Deployment 自身使用的 ServiceAccount 不同。以下示例授予单个 namespace 的只读 Run、Runtime、
-Workflow、日志和 artifact 访问，不授予 Secrets 或 workload mutation verb；通过 runtimed
-读取日志和下载 artifact 所需的 `pods/portforward` `create` subresource permission 是唯一例外：
+Workflow 和日志访问，不授予 Secrets、workload mutation verb、port-forwarding 或 artifact
+download：
 
 ```yaml
 apiVersion: v1
@@ -150,9 +180,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["pods/portforward"]
-    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

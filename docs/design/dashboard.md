@@ -1,6 +1,6 @@
 # Dashboard
 
-This document describes a target v0.x design. It is not implemented yet.
+This document describes the accepted v0.x design. It is not implemented yet.
 
 kruntimes should provide a small read-only dashboard for developers and
 operators who need to understand what is running, what is stuck, and where to
@@ -63,6 +63,33 @@ The dashboard should have two components:
 | Dashboard backend | Talks to the Kubernetes API, enforces the selected auth/RBAC model, reads kruntimes CRDs, and proxies log/artifact access when allowed. |
 | Dashboard frontend | Read-only web UI that renders namespace, Run list, Run detail, logs, and artifact metadata. |
 
+### v0.x Decisions
+
+The dashboard ships as an opt-in component of the main kruntimes chart, with
+dashboard.enabled false by default. This preserves one upgrade and RBAC
+boundary without adding a component to installations that do not need it.
+
+Production dashboard traffic is HTTPS-only. The Service remains ClusterIP, and
+a bearer-token login page is never exposed over plaintext HTTP. The chart lets
+the operator choose one certificate source:
+
+- an existing TLS Secret, normally for a certificate trusted by dashboard
+  users;
+- a chart-generated self-signed certificate, suitable for local development
+  and explicitly trusted private deployments; or
+- a cert-manager Certificate using an existing Issuer or ClusterIssuer. The
+  selected issuer may itself be a cert-manager self-signed issuer.
+
+The selected source writes the same mounted TLS Secret. The chart rejects
+ambiguous combinations rather than silently choosing a certificate source.
+
+The backend has no ambient read authority for user requests. It may use its
+ServiceAccount only to discover the in-cluster API endpoint and CA. For each
+request it copies only that transport configuration, clears the mounted
+credential and credential file, and installs the caller bearer token. It must
+not fall back to its ServiceAccount if that token is absent, invalid, or
+unauthorized.
+
 The first version should read the following sources:
 
 - `Run` objects through the Kubernetes API;
@@ -98,6 +125,14 @@ same: users need permission to read the Run and to access runtime logs.
 Structured runtimed logs should remain keyed by Run UID so the dashboard can
 show the correct logs even when Runtime Pods handle multiple Runs.
 
+For v0.x, the backend reads the assigned Pod's runtimed container log
+subresource through that request-scoped client and returns only structured
+records whose run_uid matches the requested immutable Run UID. It does not
+create a browser-visible port-forward or expose Runtime Pods directly. The
+caller therefore needs permission to read the Run and assigned Pod and get the
+Pod log subresource. Artifact references are shown as Run metadata; artifact
+downloads are outside the first Dashboard slice.
+
 ## Security Model
 
 The dashboard must be read-only by default.
@@ -118,13 +153,12 @@ The proposed v0.x production model is Kubernetes bearer-token login:
 - the initial UI may offer a best-effort namespace list. If the token cannot
   list Namespace objects, the UI must let the user enter a namespace name and
   show the API's normal authorization result;
-- log access needs the same token to read the Run and its assigned Pod, create
-  the Pod `portforward` subresource used by `krt logs`, and read the `log`
-  subresource when runtimed log fallback is needed;
-- artifact access requires the Run read permission and, when the dashboard
-  reaches runtimed's artifact endpoint, permission to read the assigned Pod and
-  create its `portforward` subresource. Direct artifact-store access also
-  requires the permission defined by the selected backend;
+- log access needs the same token to read the Run and its assigned Pod and read
+  the Pod `log` subresource. v0.x returns structured records from the
+  `runtimed` container only;
+- v0.x shows artifact references as Run metadata but does not download or proxy
+  artifact content. A future artifact-download design must define its
+  authorization and external-store boundary separately;
 - secrets, service account tokens, environment variables, and raw pod specs are
   hidden unless a future privileged operator view explicitly exposes them.
 
@@ -133,10 +167,13 @@ Cluster identity integrations may mint or exchange the bearer token outside the
 dashboard, but v0.x does not define an external-auth header protocol,
 impersonation model, or a custom identity provider.
 
-For local development, `krt` can port-forward the dashboard and supply the
-current kubeconfig credential to a local-only proxy. That convenience path is
-not a production authentication mode and must not make the browser retain the
-kubeconfig credential or token after the local session ends.
+For local development, `krt dashboard` starts a loopback-only proxy and
+port-forwards the dashboard Service. The proxy obtains the current kubeconfig
+credential and injects it only into forwarded requests; the browser never
+receives the credential. It must bind only to 127.0.0.1 or another explicitly
+chosen loopback address, reject non-loopback binds, not persist or log the
+credential, and close the port-forward when the command exits. This is not a
+production authentication mode.
 
 ### Creating a Dashboard Login Token
 
@@ -145,9 +182,8 @@ ServiceAccount in each namespace that a dashboard user may inspect. This is the
 identity represented by the login token; it is distinct from the ServiceAccount
 used by the dashboard Deployment itself. The following example grants one
 namespace read-only Run, Runtime, Workflow, and log access; it does not grant
-access to Secrets or workload mutation verbs. It grants only the
-`pods/portforward` `create` subresource permission required to read logs and
-download artifacts through runtimed:
+access to Secrets, workload mutation verbs, port-forwarding, or artifact
+downloads:
 
 ```yaml
 apiVersion: v1
@@ -171,9 +207,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  - apiGroups: [""]
-    resources: ["pods/portforward"]
-    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
