@@ -131,7 +131,7 @@ wiring from accumulating avoidable conflicts.
     - [x] count stale `Reserve` and conflicting `Bind` operations by bounded
       stage;
     - [x] count requested Pending Run wakeups by bounded event source;
-- [ ] Function-mode Runs: define mutually exclusive
+- [x] Function-mode Runs: define mutually exclusive
   `Run.spec.mode.task` and `Run.spec.mode.function` semantics so a function Run
   can reserve a pre-warmed Runtime Pod, register a callable function with
   runtimed/runtime-server, stay ready for repeated low-latency invocations, and

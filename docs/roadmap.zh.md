@@ -113,7 +113,7 @@ controller wiring 累积不必要的冲突。
     - [x] 按有界 plugin 和 reason 统计 Filter-plugin 对 Pod 的 rejection；
     - [x] 按有界 stage 统计 stale `Reserve` 和 conflicting `Bind` 操作；
     - [x] 按有界 event source 统计 requested Pending Run wakeups；
-- [ ] Function-mode Runs：定义 mutually exclusive 的
+- [x] Function-mode Runs：定义 mutually exclusive 的
   `Run.spec.mode.task` 和 `Run.spec.mode.function` 语义，让 function Run 可以 reserve
   预热 Runtime Pod，向 runtimed/runtime-server 注册 callable function，保持 ready 状态
   以支持多次低延迟 invocation，并在删除或 idle timeout 时释放 reservation。
