@@ -359,6 +359,9 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 	if run.Spec.HasImmediateTermination() {
 		return c.applyTerminal(ctx, c.buildActiveRun(run), v1alpha1.RunCancelled, runretry.ReasonCancelled, "cancelled by user")
 	}
+	if !c.runtimeServerReady(ctx) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if (run.Spec.Mode.Session != nil || run.Spec.Mode.Function != nil) && controllerutil.AddFinalizer(run, v1alpha1.RunRegistrationCleanupFinalizer) {
 		if err := c.Update(ctx, run); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add registration cleanup finalizer: %w", err)
@@ -397,6 +400,34 @@ func (c *Controller) reconcileScheduled(ctx context.Context, run *v1alpha1.Run) 
 		return c.applyFailure(ctx, ar, runretry.ReasonPrepareSource, fmt.Sprintf("prepare source: %v", err))
 	}
 	return ctrl.Result{RequeueAfter: activeRunRequeueAfter(ar)}, nil
+}
+
+// runtimeServerReady gates the Scheduled-to-Running transition on the local
+// Runtime Server. runtimed can start before its colocated Runtime Server has
+// bound its port; claiming a Run in that interval turns an ordinary startup
+// delay into an unrecoverable missing execution.
+func (c *Controller) runtimeServerReady(ctx context.Context) bool {
+	if c.runtimeCli == nil {
+		// Unit-level reconcilers may intentionally omit a Runtime client. The
+		// production controller always configures one during Start.
+		return true
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	response, err := c.runtimeCli.Health(healthCtx, &pb.HealthRequest{})
+	if err != nil {
+		c.Log.Info("waiting for local Runtime Server health", "error", err)
+		return false
+	}
+	if response == nil || !response.GetHealthy() {
+		message := ""
+		if response != nil {
+			message = response.GetMessage()
+		}
+		c.Log.Info("waiting for healthy local Runtime Server", "message", message)
+		return false
+	}
+	return true
 }
 
 func (c *Controller) heartbeat(ctx context.Context) {

@@ -171,6 +171,13 @@ func main() {
 		setupLog.Error(err, "unable to register runtime readiness check")
 		os.Exit(1)
 	}
+	if err := mgr.AddReadyzCheck(
+		"runtime-proxy",
+		healthcheck.TCPListener(statusAddr, 2*time.Second),
+	); err != nil {
+		setupLog.Error(err, "unable to register runtime proxy readiness check")
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -246,7 +253,11 @@ func main() {
 		Recorder:            mgr.GetEventRecorderFor("runtimed"),
 	}
 
-	// Start gRPC proxies for logs, artifacts, and long-lived Runtime requests.
+	// Bind the gRPC proxy before the manager can claim a Run. A Session/Function
+	// Run becomes Ready after its local registration, so starting this server in
+	// the background would otherwise expose a short window where Gateway routes
+	// a ready Run to an unbound :9093 endpoint.
+	proxyReady := make(chan error, 1)
 	go func() {
 		if err := runtimed.StartRuntimeProxyServer(
 			ctx,
@@ -260,10 +271,15 @@ func main() {
 			runtimeNamespace,
 			runtimeName,
 			podName,
+			proxyReady,
 		); err != nil {
 			klog.Errorf("Status proxy: %v", err)
 		}
 	}()
+	if err := <-proxyReady; err != nil {
+		setupLog.Error(err, "unable to start runtime proxy")
+		os.Exit(1)
+	}
 
 	if err := runtimedCtrl.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Runtimed")

@@ -3,6 +3,7 @@ package healthcheck
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -52,6 +53,28 @@ func TestRuntime(t *testing.T) {
 				t.Fatalf("check error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestTCPListener(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	if err := TCPListener(listener.Addr().String(), time.Second)(httptest.NewRequest("GET", "/readyz", nil)); err != nil {
+		t.Fatalf("listener readiness check: %v", err)
+	}
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := TCPListener(":"+port, time.Second)(httptest.NewRequest("GET", "/readyz", nil)); err != nil {
+		t.Fatalf("wildcard listener readiness check: %v", err)
+	}
+	if err := TCPListener("127.0.0.1:1", 10*time.Millisecond)(httptest.NewRequest("GET", "/readyz", nil)); err == nil {
+		t.Fatal("closed listener readiness check succeeded")
 	}
 }
 

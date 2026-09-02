@@ -611,6 +611,28 @@ func TestReconcileScheduledRespectsLocalCapacity(t *testing.T) {
 	}
 }
 
+func TestReconcileScheduledWaitsForLocalRuntimeHealth(t *testing.T) {
+	run := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "waiting", UID: "waiting-uid"},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunScheduled},
+	}
+	c := &Controller{runtimeCli: &fakeRuntimeClient{healthErr: status.Error(codes.Unavailable, "starting")}}
+
+	result, err := c.reconcileScheduled(t.Context(), run)
+	if err != nil {
+		t.Fatalf("reconcileScheduled: %v", err)
+	}
+	if result.RequeueAfter != time.Second {
+		t.Fatalf("RequeueAfter = %s, want %s", result.RequeueAfter, time.Second)
+	}
+	if run.Status.Phase != v1alpha1.RunScheduled {
+		t.Fatalf("phase = %s, want Scheduled", run.Status.Phase)
+	}
+	if c.activeRunCount() != 0 {
+		t.Fatalf("activeRunCount = %d, want 0", c.activeRunCount())
+	}
+}
+
 func TestTryClaimActiveRunKeepsSessionExclusive(t *testing.T) {
 	newRun := func(uid string, session bool) *activeRun {
 		run := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{UID: types.UID(uid)}}
@@ -2736,6 +2758,8 @@ func TestReconcileNotFoundRunReleasesActiveRunByName(t *testing.T) {
 
 type fakeRuntimeClient struct {
 	pb.RuntimeClient
+	health         *pb.HealthResponse
+	healthErr      error
 	status         *pb.StatusResponse
 	statusErr      error
 	list           *pb.ListResponse
@@ -2862,5 +2886,11 @@ func (f *fakeRuntimeClient) Forget(_ context.Context, req *pb.ForgetRequest, _ .
 }
 
 func (f *fakeRuntimeClient) Health(context.Context, *pb.HealthRequest, ...grpc.CallOption) (*pb.HealthResponse, error) {
+	if f.healthErr != nil {
+		return nil, f.healthErr
+	}
+	if f.health != nil {
+		return f.health, nil
+	}
 	return &pb.HealthResponse{Healthy: true}, nil
 }

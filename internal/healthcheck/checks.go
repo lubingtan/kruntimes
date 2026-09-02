@@ -3,6 +3,7 @@ package healthcheck
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -54,5 +55,33 @@ func Runtime(runtimeClient runtimeHealthClient, timeout time.Duration) healthz.C
 			return fmt.Errorf("runtime unhealthy: %s", resp.GetMessage())
 		}
 		return nil
+	}
+}
+
+// TCPListener checks that a local TCP listener is accepting connections.
+// Runtime Pod readiness uses this for the runtimed proxy that backs the
+// Runtime Service, so Kubernetes does not publish an endpoint before Gateway
+// traffic can be accepted.
+func TCPListener(address string, timeout time.Duration) healthz.Checker {
+	return func(req *http.Request) error {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return fmt.Errorf("parse TCP listener address %s: %w", address, err)
+		}
+		if host == "" {
+			address = net.JoinHostPort("127.0.0.1", port)
+		}
+		ctx := req.Context()
+		cancel := func() {}
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+		}
+		defer cancel()
+
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
+		if err != nil {
+			return fmt.Errorf("dial TCP listener %s: %w", address, err)
+		}
+		return conn.Close()
 	}
 }

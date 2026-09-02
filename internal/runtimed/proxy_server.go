@@ -29,15 +29,26 @@ func StartRuntimeProxyServer(
 	runtimeNamespace,
 	runtimeName,
 	podName string,
+	listenerReady chan<- error,
 ) error {
+	notifyReady := func(err error) {
+		if listenerReady == nil {
+			return
+		}
+		listenerReady <- err
+		listenerReady = nil
+	}
 	_, statusPort, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("parse runtimed proxy address %q: %w", addr, err)
+		err = fmt.Errorf("parse runtimed proxy address %q: %w", addr, err)
+		notifyReady(err)
+		return err
 	}
 	conn, err := grpc.NewClient(runtimeEndpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
+		notifyReady(err)
 		return err
 	}
 	defer conn.Close()
@@ -78,8 +89,10 @@ func StartRuntimeProxyServer(
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
+		notifyReady(err)
 		return err
 	}
+	notifyReady(nil)
 	klog.Infof("Runtime proxy server listening on %s", addr)
 	return srv.Serve(lis)
 }
