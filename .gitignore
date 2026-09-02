@@ -36,6 +36,9 @@ tmp/
 site/.hugo_build.lock
 site/public/
 __pycache__/
+node_modules/
+*.tsbuildinfo
+dashboard/backend/assets/
 .python-version
 /krt
 /controller

@@ -27,9 +27,9 @@ the [Development Guide](development.md) and [Testing Guide](testing.md).
 
 ## Dashboard TLS
 
-The Dashboard is opt-in and exposes HTTPS only. Enable its chart component
-with the default chart-generated certificate for local or explicitly trusted
-deployments:
+The Dashboard is an opt-in component of the `kruntimes` chart and exposes
+HTTPS only. Enable it with the default chart-generated certificate for local or
+explicitly trusted deployments:
 
 ```yaml
 dashboard:
@@ -66,6 +66,25 @@ dashboard:
 `selfSigned`, an existing Secret, and `certManager.enabled` are mutually
 exclusive choices. The Service is always `ClusterIP`; configure ingress or
 other external exposure separately.
+
+### Public resource lists
+
+When the Dashboard is enabled, namespace, Run, Runtime, and WorkflowRun
+*lists* are available without a token by default. This is controlled by
+`dashboard.publicRead.enabled`; set it to `false` to require a bearer token for
+every API request:
+
+```yaml
+dashboard:
+  publicRead:
+    enabled: false
+```
+
+The chart grants the Dashboard ServiceAccount only `get`/`list` on
+`namespaces`, `runs`, `runtimes`, and `workflowruns`. Their details require the
+caller's bearer token. Log requests use the public-read client only to resolve
+the Run's assigned Pod; the caller token needs `get` on `pods/log`, but does
+not need `runs` permission merely to read logs.
 
 ## Runtime Capacity
 

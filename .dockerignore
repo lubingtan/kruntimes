@@ -15,3 +15,6 @@ Thumbs.db
 # Docker
 Dockerfile*
 .dockerignore
+node_modules/
+**/node_modules/
+dashboard/frontend/node_modules/

@@ -18,6 +18,10 @@ import (
 
 var ErrMissingBearerToken = errors.New("dashboard request requires a Kubernetes bearer token")
 
+// SessionCookieName is deliberately host-only: it cannot be set by a sibling
+// subdomain. It is only ever sent over the Dashboard's HTTPS endpoint.
+const SessionCookieName = "__Host-kruntimes-dashboard-token"
+
 // RequestClientFactory creates Kubernetes clients that act only as the
 // credential supplied with one Dashboard request. The base configuration
 // contributes transport details such as the in-cluster API endpoint and CA; it
@@ -103,10 +107,16 @@ func bearerToken(request *http.Request) (string, error) {
 		return "", ErrMissingBearerToken
 	}
 	parts := strings.Fields(request.Header.Get("Authorization"))
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-		return "", ErrMissingBearerToken
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && parts[1] != "" {
+		return parts[1], nil
 	}
-	return parts[1], nil
+	// The frontend exchanges the pasted credential for an HttpOnly session
+	// cookie. Keeping the token out of JavaScript means a page refresh does not
+	// lose the session and an XSS bug cannot read the Kubernetes credential.
+	if cookie, err := request.Cookie(SessionCookieName); err == nil && cookie.Value != "" {
+		return cookie.Value, nil
+	}
+	return "", ErrMissingBearerToken
 }
 
 func (f *RequestClientFactory) configForToken(token string) *rest.Config {

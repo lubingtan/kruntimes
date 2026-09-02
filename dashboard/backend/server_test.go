@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -85,7 +87,7 @@ func TestServerListsNamespacesAndRuns(t *testing.T) {
 	}
 }
 
-func TestServerGetsSafeRunDetail(t *testing.T) {
+func TestServerGetsAuthorizedRunDetail(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
 	run := dashboardRun("detail", "team-a", "python", v1alpha1.RunReady, now)
 	run.Spec.Env = []corev1.EnvVar{{Name: "SECRET", Value: "must-not-leak"}}
@@ -100,8 +102,11 @@ func TestServerGetsSafeRunDetail(t *testing.T) {
 	}
 	var body map[string]json.RawMessage
 	decodeDashboardResponse(t, response, &body)
-	if _, exists := body["spec"]; exists {
-		t.Fatalf("Dashboard Run detail must not expose Run spec: %s", response.Body.String())
+	if _, exists := body["spec"]; !exists {
+		t.Fatalf("Dashboard Run detail must expose Run spec to its authorized caller: %s", response.Body.String())
+	}
+	if _, exists := body["status"]; !exists {
+		t.Fatalf("Dashboard Run detail must expose Run status to its authorized caller: %s", response.Body.String())
 	}
 	var outputs map[string]string
 	if err := json.Unmarshal(body["outputs"], &outputs); err != nil {
@@ -130,6 +135,94 @@ func TestServerRejectsMissingTokenAndMapsKubernetesErrors(t *testing.T) {
 	response = requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs", nil)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("forbidden status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestServerPublicReadOnlyPermitsLists(t *testing.T) {
+	scheme := dashboardScheme(t)
+	publicClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}},
+		dashboardRun("example", "team-a", "python", v1alpha1.RunPending, metav1.Now()),
+		&v1alpha1.Runtime{ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "team-a"}},
+		&v1alpha1.WorkflowRun{ObjectMeta: metav1.ObjectMeta{Name: "workflow", Namespace: "team-a"}},
+	).Build()
+	server := &Server{Clients: staticRequestClients{err: apierrors.NewForbidden(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "runs"}, "example", errors.New("caller cannot list Runs"))}, PublicReadClient: publicClient}
+	for _, path := range []string{"/api/namespaces", "/api/namespaces/team-a/runs", "/api/namespaces/team-a/runtimes", "/api/namespaces/team-a/workflowruns"} {
+		response := requestDashboard(t, server, http.MethodGet, path, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("public %s status = %d, body = %s", path, response.Code, response.Body.String())
+		}
+	}
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/example", nil)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("public detail status = %d, want forbidden", response.Code)
+	}
+}
+
+func TestServerUsesPublicRunLookupForCallerAuthorizedLogs(t *testing.T) {
+	scheme := dashboardScheme(t)
+	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, metav1.Now())
+	publicClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
+	callerClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	clients := &staticRequestClients{client: callerClient, logs: `{"run_uid":"logs-uid","stream":"stdout","message":"visible"}`}
+	server := dashboardTestServerWithClients(t, clients)
+	server.PublicReadClient = publicClient
+
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("get logs with no Run access status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body runLogResponse
+	decodeDashboardResponse(t, response, &body)
+	if len(body.Items) != 1 || body.Items[0].Message != "visible" {
+		t.Fatalf("log entries = %#v", body.Items)
+	}
+	if clients.logRequest.pod != "runtime-pod" {
+		t.Fatalf("Pod log request = %#v", clients.logRequest)
+	}
+}
+
+func TestServerListsRuntimeTopologyAndWorkflowRuns(t *testing.T) {
+	now := metav1.Now()
+	runtimeObject := &v1alpha1.Runtime{
+		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "team-a"},
+		Spec: v1alpha1.RuntimeSpec{Replicas: 1, Capacity: &v1alpha1.RuntimeCapacity{Resources: corev1.ResourceList{
+			v1alpha1.RuntimeResourceRuns: resource.MustParse("2"),
+		}}},
+		Status: v1alpha1.RuntimeStatus{ReadyReplicas: 1},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "python-0", Namespace: "team-a", Labels: map[string]string{"runtime": "python"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}, {Type: v1alpha1.RuntimePodRuntimedReadyCondition, Status: corev1.ConditionTrue}}}}
+	idlePod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "python-1", Namespace: "team-a", Labels: map[string]string{"runtime": "python"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	run := dashboardRun("owned", "team-a", "python", v1alpha1.RunRunning, now)
+	run.Status.AssignedPod = "python-0"
+	workflowRun := &v1alpha1.WorkflowRun{ObjectMeta: metav1.ObjectMeta{Name: "workflow", Namespace: "team-a", UID: "workflow-uid", CreationTimestamp: now}, Spec: v1alpha1.WorkflowRunSpec{Jobs: map[string]v1alpha1.JobSpec{"build": {}}}, Status: v1alpha1.WorkflowRunStatus{Phase: v1alpha1.WorkflowRunning, Jobs: map[string]v1alpha1.JobStatus{"build": {Phase: v1alpha1.JobRunning}}}}
+	server := dashboardTestServer(t, runtimeObject, pod, idlePod, run, workflowRun)
+
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runtimes", nil)
+	var runtimes runtimeListResponse
+	decodeDashboardResponse(t, response, &runtimes)
+	if response.Code != http.StatusOK || len(runtimes.Items) != 1 || !runtimes.Items[0].Healthy || runtimes.Items[0].RunCount != 1 || runtimes.Items[0].Capacity["runs"] != "2" {
+		t.Fatalf("runtime list = %#v, status = %d", runtimes, response.Code)
+	}
+
+	response = requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runtimes/python", nil)
+	var runtimeDetail runtimeDetailResponse
+	decodeDashboardResponse(t, response, &runtimeDetail)
+	if response.Code != http.StatusOK || len(runtimeDetail.Pods) != 2 || !runtimeDetail.Pods[0].RuntimedReady || len(runtimeDetail.Pods[0].Runs) != 1 || runtimeDetail.Pods[1].Runs == nil {
+		t.Fatalf("runtime detail = %#v, status = %d", runtimeDetail, response.Code)
+	}
+
+	response = requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/workflowruns", nil)
+	var workflowRuns workflowRunListResponse
+	decodeDashboardResponse(t, response, &workflowRuns)
+	if response.Code != http.StatusOK || len(workflowRuns.Items) != 1 || workflowRuns.Items[0].JobCount != 1 {
+		t.Fatalf("workflow list = %#v, status = %d", workflowRuns, response.Code)
+	}
+	response = requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/workflowruns/workflow", nil)
+	var workflowDetail workflowRunDetailResponse
+	decodeDashboardResponse(t, response, &workflowDetail)
+	if response.Code != http.StatusOK || workflowDetail.Status.Jobs["build"].Phase != v1alpha1.JobRunning {
+		t.Fatalf("workflow detail = %#v, status = %d", workflowDetail, response.Code)
 	}
 }
 
@@ -173,6 +266,58 @@ func TestServerRoutesMethodsAndMissingEndpoints(t *testing.T) {
 	}
 }
 
+func TestServerCreatesAndClearsHTTPSessionCookie(t *testing.T) {
+	server := dashboardTestServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(`{"token":"caller-token"}`))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("create session status = %d, body = %s", response.Code, response.Body.String())
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != SessionCookieName || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("session cookie = %#v", cookies)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	request.AddCookie(cookies[0])
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	var session sessionResponse
+	decodeDashboardResponse(t, response, &session)
+	if !session.Authenticated {
+		t.Fatalf("session = %#v, want authenticated", session)
+	}
+	response = requestDashboard(t, server, http.MethodGet, "/api/session", nil)
+	decodeDashboardResponse(t, response, &session)
+	if session.Authenticated {
+		t.Fatalf("session = %#v, want unauthenticated", session)
+	}
+	response = requestDashboard(t, server, http.MethodDelete, "/api/session", nil)
+	if response.Code != http.StatusNoContent || response.Result().Cookies()[0].MaxAge >= 0 {
+		t.Fatalf("clear session response = %d, cookies = %#v", response.Code, response.Result().Cookies())
+	}
+}
+
+func TestServerServesFilesystemFrontend(t *testing.T) {
+	server := dashboardTestServer(t)
+	response := requestDashboard(t, server, http.MethodGet, "/", nil)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("frontend status/content type = %d/%q", response.Code, response.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(response.Body.String(), "id=\"root\"") || !strings.Contains(response.Header().Get("Content-Security-Policy"), "default-src 'self'") {
+		t.Fatalf("frontend response is missing expected content or CSP: %q", response.Body.String())
+	}
+
+	response = requestDashboard(t, server, http.MethodGet, "/assets/dashboard.js", nil)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/javascript; charset=utf-8" || !strings.Contains(response.Body.String(), "createRoot") {
+		t.Fatalf("frontend script status/content = %d/%q/%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
+	}
+	response = requestDashboard(t, server, http.MethodGet, "/namespaces/team-a/runs/example", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "id=\"root\"") {
+		t.Fatalf("deep-link frontend status/body = %d/%q", response.Code, response.Body.String())
+	}
+}
+
 func TestServerGetsFilteredRunLogs(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
 	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, now)
@@ -195,6 +340,17 @@ func TestServerGetsFilteredRunLogs(t *testing.T) {
 	}
 	if clients.logRequest.namespace != "team-a" || clients.logRequest.pod != "runtime-pod" || clients.logRequest.options.Container != "runtimed" || clients.logRequest.options.Follow || clients.logRequest.options.TailLines == nil || *clients.logRequest.options.TailLines != maxLogTailLines {
 		t.Fatalf("Pod log request = %#v", clients.logRequest)
+	}
+}
+
+func TestServerExplainsPodLogAuthorizationFailure(t *testing.T) {
+	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, metav1.Now())
+	clients := &staticRequestClients{logsErr: apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "runtime-pod", errors.New("cannot get pod logs"))}
+	server := dashboardTestServerWithClients(t, clients, run)
+
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs", nil)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "get permission on pods/log") {
+		t.Fatalf("log authorization response = %d/%s", response.Code, response.Body.String())
 	}
 }
 
@@ -243,6 +399,25 @@ func TestServerRejectsInvalidLogRequests(t *testing.T) {
 
 func dashboardTestServer(t *testing.T, objects ...client.Object) *Server {
 	t.Helper()
+	scheme := dashboardScheme(t)
+	return dashboardTestServerWithClients(t, &staticRequestClients{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()})
+}
+
+func dashboardTestServerWithClients(t *testing.T, clients *staticRequestClients, objects ...client.Object) *Server {
+	t.Helper()
+	if clients.client == nil {
+		scheme := dashboardScheme(t)
+		clients.client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	}
+	return &Server{Clients: clients, Assets: fstest.MapFS{
+		"index.html":    &fstest.MapFile{Data: []byte("<div id=\"root\"></div>")},
+		"dashboard.js":  &fstest.MapFile{Data: []byte("createRoot(document.getElementById('root'))")},
+		"dashboard.css": &fstest.MapFile{Data: []byte("body { margin: 0; }")},
+	}}
+}
+
+func dashboardScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
@@ -250,22 +425,7 @@ func dashboardTestServer(t *testing.T, objects ...client.Object) *Server {
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add kruntimes scheme: %v", err)
 	}
-	return dashboardTestServerWithClients(t, &staticRequestClients{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()})
-}
-
-func dashboardTestServerWithClients(t *testing.T, clients *staticRequestClients, objects ...client.Object) *Server {
-	t.Helper()
-	if clients.client == nil {
-		scheme := runtime.NewScheme()
-		if err := corev1.AddToScheme(scheme); err != nil {
-			t.Fatalf("add core scheme: %v", err)
-		}
-		if err := v1alpha1.AddToScheme(scheme); err != nil {
-			t.Fatalf("add kruntimes scheme: %v", err)
-		}
-		clients.client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-	}
-	return &Server{Clients: clients}
+	return scheme
 }
 
 func dashboardRun(name, namespace, runtimeName string, phase v1alpha1.RunPhase, now metav1.Time) *v1alpha1.Run {

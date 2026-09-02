@@ -80,3 +80,15 @@ func TestBearerToken(t *testing.T) {
 		})
 	}
 }
+
+func TestBearerTokenAcceptsHTTPSessionCookie(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "https://dashboard.example", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "cookie-token"})
+	got, err := bearerToken(request)
+	if err != nil || got != "cookie-token" {
+		t.Fatalf("bearerToken() = %q, %v", got, err)
+	}
+}

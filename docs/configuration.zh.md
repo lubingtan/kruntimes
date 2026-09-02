@@ -29,8 +29,8 @@ helm template kruntimes ./charts/kruntimes --namespace kruntimes-system
 
 ## Dashboard TLS
 
-Dashboard 是 opt-in 组件，并且只暴露 HTTPS。对于本地开发或明确受信任的部署，以下配置会启用
-chart 生成的默认 certificate：
+Dashboard 是 `kruntimes` chart 的 opt-in 组件，并且只暴露 HTTPS。对于本地开发或明确受信任的
+部署，以下配置会启用 chart 生成的默认 certificate：
 
 ```yaml
 dashboard:
@@ -65,6 +65,22 @@ dashboard:
 
 `selfSigned`、已有 Secret 和 `certManager.enabled` 是互斥选择。Service 始终为 `ClusterIP`；
 ingress 或其它对外暴露需要单独配置。
+
+### 公开资源列表
+
+启用 Dashboard 时，namespace、Run、Runtime 和 WorkflowRun **列表**默认无需 token 即可查看。
+该行为由 `dashboard.publicRead.enabled` 控制；设置为 `false` 后，所有 API 请求都需要 bearer token：
+
+```yaml
+dashboard:
+  publicRead:
+    enabled: false
+```
+
+chart 只给 Dashboard ServiceAccount 授予 `namespaces`、`runs`、`runtimes` 和 `workflowruns` 的
+`get`/`list` 权限。它们的详情仍必须使用 caller 的 bearer token。日志请求只会用 public-read
+client 定位 Run 对应的 assigned Pod；caller token 需要 `pods/log` 的 `get`，但仅读取日志时不需要
+`runs` 权限。
 
 ## Runtime Capacity
 

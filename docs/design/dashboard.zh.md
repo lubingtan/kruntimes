@@ -1,6 +1,6 @@
 # Dashboard
 
-本文描述已接受的 v0.x 设计，当前尚未实现。
+本文描述已接受的 v0.x 设计以及已实现的初始 Dashboard 功能。
 
 kruntimes 应该提供一个小型只读 dashboard，帮助开发者和运维人员理解当前有哪些任务在运行、
 哪些任务卡住了，以及如何找到 logs 和 artifacts，而不需要在多个 `kubectl` 和 `krt`
@@ -18,7 +18,8 @@ CRD、Pod、conditions、logs 和 artifact references 中的 Kubernetes-native �
 - 保持 Kubernetes RBAC 和 namespace 边界。
 - 为 Pending、Scheduled、Running、Succeeded、Failed、Cancelled 和 TimedOut Runs
   提供面向运维的视图。
-- 为后续 WorkflowRun、Workflow、Action 和 PersistentWorkspace 视图预留空间。
+- 浏览 Runtime pool、其 Pod health/capacity 以及分配给它的 Runs。
+- 浏览 WorkflowRun、其 job DAG 和 step 到 Run 的链接。
 
 ## 非目标
 
@@ -57,9 +58,9 @@ dashboard 应该包含两个组件：
 
 ### v0.x 决策
 
-dashboard 作为主 kruntimes chart 的 opt-in 组件发布，默认
-dashboard.enabled 为 false。这样在不增加不需要该组件的安装面时，仍保持统一的升级和 RBAC
-边界。
+dashboard 是 `kruntimes` chart 的 opt-in 组件，默认 `dashboard.enabled: false`。其
+Deployment、ServiceAccount、Service 和 TLS resources 与控制面一起由同一个 Helm release 安装。
+这样在不增加不需要该组件的安装面时，仍保持统一的升级和 RBAC 边界。
 
 生产环境的 dashboard 仅允许 HTTPS。Service 保持 ClusterIP，且 bearer-token login 页面绝不能
 暴露在 plaintext HTTP 上。chart 允许 operator 选择一种 certificate source：
@@ -80,10 +81,11 @@ Helm values 将该选择明确化：默认 `dashboard.tls.selfSigned` 会让 cha
 cert-manager 可以写入默认 Dashboard TLS Secret，也可以写入 operator 设置的 `secretName`。
 因此，使用已有 self-signed Issuer 时不需要额外的 dashboard 专用 mode。
 
-backend 不拥有代表用户读取资源的 ambient authority。它只能使用自身的 ServiceAccount 来发现
-in-cluster API endpoint 和 CA。每个 request 只复制其中的 transport 配置、清空挂载的
-credential 及 credential file，并安装 caller bearer token。当该 token 缺失、无效或无权限时，
-backend 不得回退为 ServiceAccount。
+backend 不拥有代表用户读取受保护资源的 ambient authority。它只复制 in-cluster transport
+配置、清空挂载的 credential，并安装 caller bearer token。chart 默认启用极窄的 public-read：
+Dashboard ServiceAccount 只能 get/list Namespaces、Runs、Runtimes 和 WorkflowRuns，且无 token
+时 API 只暴露它们的 summary。operator 可以通过 `dashboard.publicRead.enabled=false` 禁用它。
+资源详情仍由 caller 授权。
 
 第一版应读取以下数据源：
 
@@ -93,12 +95,8 @@ backend 不得回退为 ServiceAccount。
 - 通过 backend-controlled 路径访问 runtimed log/status endpoints；
 - 读取 `Run.status.outputs` 和 `Run.status.artifactRefs`。
 
-后续版本可以增加：
-
-- `WorkflowRun`、`Workflow` 和 `Action` list/detail pages；
-- PersistentWorkspace detail pages；
-- runtime pool capacity 和 health views；
-- 基于 Prometheus 或其他 metrics backend 的 metrics panels。
+后续版本可以增加 PersistentWorkspace detail pages 以及基于 Prometheus 或其它 metrics backend
+的 metrics panels。
 
 ## 日志访问
 
@@ -107,22 +105,37 @@ Dashboard backend 不能把 Runtime Pods 直接暴露给浏览器。
 v0.x 预期路径是：
 
 1. 用户打开某个 Run 的 logs。
-2. Backend 读取该 Run 以及它 assigned 的 Runtime Pod。
-3. Backend 使用配置好的 Kubernetes auth/RBAC 模型校验请求。
-4. Backend 通过与 `krt logs` 概念上相同的边界访问 runtimed，并 stream 或返回请求的
-   log tail。
+2. 极窄的 public-read client 只读取 Run 来定位其 assigned Runtime Pod。
+3. 用户 token 授权 Pod `log` subresource 请求。
+4. Backend stream 或返回请求的 log tail。
 
 具体 transport 可以演进。它可以使用 Kubernetes port-forwarding、internal service 或
-专用 log proxy，但边界应该保持不变：用户需要有读取 Run 以及访问 runtime logs 的权限。
+专用 log proxy，但边界应该保持不变：用户需要有访问 runtime logs 的权限，而极窄的
+ServiceAccount 只负责 Run 到 Pod 的定位。
 
 结构化 runtimed logs 应继续以 Run UID 作为 key，这样即使 Runtime Pods 同时处理多个 Runs，
 dashboard 也能展示正确的 logs。
 
-v0.x 中，backend 通过 request-scoped client 读取 assigned Pod 的 runtimed container log
-subresource，并只返回 run_uid 与请求 immutable Run UID 匹配的 structured records。它不创建
-browser-visible port-forward，也不把 Runtime Pods 直接暴露给 browser。因此 caller 需要有读取
-Run、assigned Pod 以及 get Pod log subresource 的权限。artifact references 作为 Run metadata
-展示；artifact download 不属于第一阶段 Dashboard。
+v0.x 中，backend 用 public-read client 定位 assigned Pod，再通过 request-scoped caller client
+读取该 Pod 的 runtimed container log subresource，并只返回 run_uid 与请求 immutable Run UID
+匹配的 structured records。它不创建 browser-visible port-forward，也不把 Runtime Pods 直接暴露给
+browser。因此 caller 需要 Pod `log` subresource 的 `get`，但仅读取日志时不需要 Run 或 Pod 的
+读取权限。artifact references 作为 Run metadata 展示；artifact download 不属于第一阶段 Dashboard。
+
+### 计划项：统一的 Run Log Authorization
+
+当前的 `pods/log` authorization 是 Kubernetes 实现层权限，而不是期望暴露给用户的 Run-log
+capability；它也和 `krt logs` 不一致，后者当前的主路径需要 Run access 与 Pod port-forward
+access。后续工作将把共享 Runtime Gateway 作为 Dashboard 和 `krt` 唯一的 Run-log API。
+
+Gateway 已经通过 `TokenReview` 认证 caller bearer token，并以
+`SubjectAccessReview` 对精确的 Run 做授权。计划中的 log endpoint 会复用这个 `get runs`
+decision，在服务端推导 assigned Pod 和 immutable Run UID，以 Gateway ServiceAccount 的
+`pods/log` permission 仅读取 `runtimed` container，并只返回匹配该 UID 的有界 structured
+records。它不接受 caller 选择 Pod 或 container。这是普通 Gateway HTTP endpoint，不是
+Kubernetes aggregation API server。
+
+在完成该迁移前，Dashboard log access 仍要求 caller 具有 `get pods/log` permission。
 
 ## 安全模型
 
@@ -130,18 +143,15 @@ dashboard 默认必须是只读的。
 
 建议的 v0.x 生产模型是 Kubernetes bearer-token login：
 
-- 用户将 Kubernetes bearer token 输入 dashboard。浏览器仅在内存中保存 token，并只通过
-  dashboard 的 HTTPS origin 使用 `Authorization: Bearer` header 发送；不得写入
-  localStorage、sessionStorage、cookie 或磁盘。backend 不创建 dashboard 专用 identity 或
-  session，也不得持久化或记录该 token，包括 HTTP access logs；
+- 用户通过 HTTPS 将 Kubernetes bearer token 输入 Dashboard。backend 以 host-only 的
+  `HttpOnly`、`Secure`、`SameSite=Strict` session cookie 返回 token，时限八小时。JavaScript
+  永远不读取或写入 token，且 token 不会写入 localStorage、sessionStorage 或 logs；
 - backend 使用该 bearer token、in-cluster API server 地址和 cluster CA 创建 request-scoped
-  Kubernetes client。它绝不使用 dashboard ServiceAccount 代表用户读取资源；
-- namespace 可见性和读取权限由 Kubernetes API authorization 决定，而不是 dashboard
-  自己维护 policy；
-- 初始 UI 可以 best-effort 列出 namespaces。若 token 没有 list Namespace objects 的权限，
-  UI 必须允许用户输入 namespace name，并展示 API 的正常 authorization 结果；
-- logs 访问需要同一个 token 能够读取 Run 和 assigned Pod，并读取 Pod 的 `log`
-  subresource。v0.x 只返回 `runtimed` container 的 structured records；
+  Kubernetes client，并用它访问受保护页面和 Pod logs；
+- chart 默认以权限极窄的 Dashboard ServiceAccount 提供免 token 的 namespace、Run、Runtime 和
+  WorkflowRun summary。它只有这些资源的 `get`/`list` 权限，并可以显式禁用；
+- Kubernetes API authorization 决定受保护页面的访问。没有 Run 权限的 token 只要具有
+  `pods/log` 的 `get`，仍可读取 logs：ServiceAccount 会在不暴露 Run detail 的前提下定位 Pod；
 - v0.x 只将 artifact references 作为 Run metadata 展示，不下载或代理 artifact content。
   将来的 artifact-download 设计必须单独定义 authorization 与 external-store 边界；
 - 默认隐藏 secrets、service account tokens、environment variables 和 raw pod specs，
@@ -203,8 +213,8 @@ roleRef:
   name: kruntimes-dashboard-viewer
 ```
 
-应用该 manifest 后，生成有时限的 token，并将其粘贴到 dashboard 登录页面。dashboard 只在当前
-浏览器内存 session 中保留该 token：
+应用该 manifest 后，生成有时限的 token，并将其粘贴到 dashboard 登录页面。Dashboard 会将它保存
+在八小时 HTTPS-only HttpOnly session cookie 中：
 
 ```bash
 kubectl apply -f dashboard-viewer.yaml
@@ -221,13 +231,19 @@ bindings，或者在审查其范围后显式授予额外的 cluster-level read a
 dashboard frontend 可以使用随二进制版本演进的内部 HTTP API。v0.x 不应把它文档化为稳定的
 公开 API。
 
-初始 endpoints 可以是：
+已实现 endpoints 为：
 
 ```text
 GET /api/namespaces
 GET /api/namespaces/{namespace}/runs
 GET /api/namespaces/{namespace}/runs/{name}
 GET /api/namespaces/{namespace}/runs/{name}/logs?tail=&follow=
+GET /api/namespaces/{namespace}/runtimes
+GET /api/namespaces/{namespace}/runtimes/{name}
+GET /api/namespaces/{namespace}/workflowruns
+GET /api/namespaces/{namespace}/workflowruns/{name}
+POST /api/session
+DELETE /api/session
 ```
 
 日志 endpoint 只会通过 request-scoped Kubernetes client 读取 assigned Pod 的 `runtimed`
@@ -259,6 +275,12 @@ Run list endpoint 应尽量支持 server-side pagination 和过滤：
 
 在只读授权模型被验证之前，不应加入 mutation buttons。
 
+frontend 使用 React 和 TypeScript，构建为与 Dashboard backend 一同打包到镜像中的静态 assets，并与内部 API 从
+同一 HTTPS origin 提供。source、backend、process entrypoint 和 image definition 都位于顶层
+`dashboard/` 目录。它没有独立 frontend Service、没有 browser-to-Kubernetes connection，并使用
+same-origin Content Security Policy。bearer token 只会保存在 HTTPS-only HttpOnly cookie；刷新可
+恢复 session，Disconnect 会清除它。
+
 ## 实现顺序
 
 1. 增加本文档，并在 roadmap 中保持 TODO 明确。
@@ -267,13 +289,13 @@ Run list endpoint 应尽量支持 server-side pagination 和过滤：
 4. 实现 Run list/detail APIs，并增加 unit tests。
 5. 通过 backend-controlled 路径实现 log tail/follow。
 6. 增加 frontend Run list/detail/log views。
-7. 增加可选 Helm chart value 或独立 dashboard chart。
-8. 增加 E2E smoke coverage：安装 dashboard、创建 Run、列出 Run、打开 detail、读取 logs。
+7. 在 `kruntimes` chart 中增加可选的 `dashboard.enabled` resources。
+8. 在标准 E2E environment 中部署 Dashboard。browser-specific E2E coverage 延后到具备稳定的
+   browser test harness 时再增加。
 9. 在相关 APIs 稳定后增加 WorkflowRun/Workflow/Action/PersistentWorkspace views。
 
 ## 剩余问题
 
-- dashboard 应该放在主 kruntimes chart、独立 chart，还是两者都支持？
 - log access 是否继续使用 port-forward 语义，还是迁移到专用的 cluster-internal log proxy
   service？
 - 当 artifact stores 位于集群外部时，artifact downloads 应如何授权和代理？

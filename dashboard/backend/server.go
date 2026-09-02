@@ -2,14 +2,19 @@ package dashboard
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"path"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -44,6 +49,11 @@ type PodLogReader interface {
 // Server exposes the Dashboard's internal, read-only HTTP API.
 type Server struct {
 	Clients RequestClientProvider
+	// PublicReadClient is intentionally optional. When configured it serves the
+	// safe namespace and Run list endpoints, and resolves a Run's assigned Pod
+	// for logs. Reading logs always still requires the caller's credential.
+	PublicReadClient client.Client
+	Assets           fs.FS
 
 	routesOnce sync.Once
 	routes     http.Handler
@@ -67,6 +77,7 @@ type runSummary struct {
 	Namespace            string            `json:"namespace"`
 	UID                  types.UID         `json:"uid"`
 	Runtime              string            `json:"runtime"`
+	Mode                 string            `json:"mode"`
 	Phase                v1alpha1.RunPhase `json:"phase"`
 	AssignedPod          string            `json:"assignedPod,omitempty"`
 	Attempt              int32             `json:"attempt,omitempty"`
@@ -78,11 +89,69 @@ type runSummary struct {
 
 type runDetailResponse struct {
 	runSummary
+	Spec         v1alpha1.RunSpec       `json:"spec"`
+	Status       v1alpha1.RunStatus     `json:"status"`
 	Message      string                 `json:"message,omitempty"`
 	Endpoint     *v1alpha1.RunEndpoint  `json:"endpoint,omitempty"`
 	Conditions   []metav1.Condition     `json:"conditions,omitempty"`
 	Outputs      map[string]string      `json:"outputs,omitempty"`
 	ArtifactRefs []v1alpha1.ArtifactRef `json:"artifactRefs,omitempty"`
+}
+
+type runtimeSummary struct {
+	Name          string            `json:"name"`
+	Namespace     string            `json:"namespace"`
+	Replicas      int32             `json:"replicas"`
+	ReadyReplicas int32             `json:"readyReplicas"`
+	Capacity      map[string]string `json:"capacity,omitempty"`
+	RunCount      int               `json:"runCount"`
+	Healthy       bool              `json:"healthy"`
+}
+
+type runtimeListResponse struct {
+	Items []runtimeSummary `json:"items"`
+}
+
+type runtimeDetailResponse struct {
+	Runtime runtimeSummary         `json:"runtime"`
+	Spec    v1alpha1.RuntimeSpec   `json:"spec"`
+	Status  v1alpha1.RuntimeStatus `json:"status"`
+	Pods    []runtimePodSummary    `json:"pods"`
+}
+
+type runtimePodSummary struct {
+	Name          string          `json:"name"`
+	Phase         corev1.PodPhase `json:"phase"`
+	Ready         bool            `json:"ready"`
+	RuntimedReady bool            `json:"runtimedReady"`
+	Runs          []runSummary    `json:"runs"`
+}
+
+type workflowRunSummary struct {
+	Name              string                 `json:"name"`
+	Namespace         string                 `json:"namespace"`
+	UID               types.UID              `json:"uid"`
+	Phase             v1alpha1.WorkflowPhase `json:"phase"`
+	JobCount          int                    `json:"jobCount"`
+	CreationTimestamp metav1.Time            `json:"creationTimestamp"`
+}
+
+type workflowRunListResponse struct {
+	Items []workflowRunSummary `json:"items"`
+}
+
+type workflowRunDetailResponse struct {
+	workflowRunSummary
+	Spec   v1alpha1.WorkflowRunSpec   `json:"spec"`
+	Status v1alpha1.WorkflowRunStatus `json:"status"`
+}
+
+type sessionRequest struct {
+	Token string `json:"token"`
+}
+
+type sessionResponse struct {
+	Authenticated bool `json:"authenticated"`
 }
 
 type runLogResponse struct {
@@ -130,7 +199,7 @@ func (record runtimedLogRecord) entry() runLogEntry {
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet {
+	if request.Method != http.MethodGet && !(request.URL.Path == "/api/session" && (request.Method == http.MethodPost || request.Method == http.MethodDelete)) {
 		s.writeError(writer, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -143,14 +212,94 @@ func (s *Server) registerRoutes() {
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET /api/namespaces", s.withRequestClient(s.listNamespaces))
-	mux.HandleFunc("GET /api/namespaces/{namespace}/runs", s.withRequestClient(s.listRuns))
+	mux.HandleFunc("POST /api/session", s.createSession)
+	mux.HandleFunc("GET /api/session", s.getSession)
+	mux.HandleFunc("DELETE /api/session", s.deleteSession)
+	mux.HandleFunc("GET /api/namespaces", s.withReadClient(s.listNamespaces))
+	mux.HandleFunc("GET /api/namespaces/{namespace}/runs", s.withReadClient(s.listRuns))
 	mux.HandleFunc("GET /api/namespaces/{namespace}/runs/{name}", s.withRequestClient(s.getRun))
-	mux.HandleFunc("GET /api/namespaces/{namespace}/runs/{name}/logs", s.withRequestClient(s.getRunLogs))
-	mux.HandleFunc("GET /", func(writer http.ResponseWriter, _ *http.Request) {
-		s.writeError(writer, http.StatusNotFound, "endpoint not found")
-	})
+	mux.HandleFunc("GET /api/namespaces/{namespace}/runs/{name}/logs", s.getRunLogs)
+	mux.HandleFunc("GET /api/namespaces/{namespace}/runtimes", s.withReadClient(s.listRuntimes))
+	mux.HandleFunc("GET /api/namespaces/{namespace}/runtimes/{name}", s.withRequestClient(s.getRuntime))
+	mux.HandleFunc("GET /api/namespaces/{namespace}/workflowruns", s.withReadClient(s.listWorkflowRuns))
+	mux.HandleFunc("GET /api/namespaces/{namespace}/workflowruns/{name}", s.withRequestClient(s.getWorkflowRun))
+	mux.HandleFunc("GET /", s.serveFrontend)
 	s.routes = mux
+}
+
+func (s *Server) getSession(writer http.ResponseWriter, request *http.Request) {
+	_, err := request.Cookie(SessionCookieName)
+	s.writeJSON(writer, http.StatusOK, sessionResponse{Authenticated: err == nil})
+}
+
+func (s *Server) createSession(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, 64<<10)
+	var body sessionRequest
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil || strings.TrimSpace(body.Token) == "" {
+		s.writeError(writer, http.StatusBadRequest, "a Kubernetes bearer token is required")
+		return
+	}
+	http.SetCookie(writer, &http.Cookie{Name: SessionCookieName, Value: strings.TrimSpace(body.Token), Path: "/", MaxAge: 8 * 60 * 60, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	s.writeJSON(writer, http.StatusNoContent, nil)
+}
+
+func (s *Server) deleteSession(writer http.ResponseWriter, _ *http.Request) {
+	http.SetCookie(writer, &http.Cookie{Name: SessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) serveFrontend(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+	requestPath := path.Clean(request.URL.Path)
+	if requestPath == "/" {
+		requestPath = "/assets/index.html"
+	}
+	if strings.HasPrefix(requestPath, "/api/") {
+		s.writeError(writer, http.StatusNotFound, "endpoint not found")
+		return
+	}
+	if !strings.HasPrefix(requestPath, "/assets/") {
+		// Client-side routes are real, bookmarkable pages. Asset paths always
+		// live below /assets, so serving index.html here cannot mask one.
+		requestPath = "/assets/index.html"
+	}
+	if s.Assets == nil {
+		s.writeError(writer, http.StatusInternalServerError, "dashboard assets are not configured")
+		return
+	}
+	assetPath := strings.TrimPrefix(requestPath, "/assets/")
+	asset, err := fs.ReadFile(s.Assets, assetPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			s.writeError(writer, http.StatusNotFound, "page not found")
+			return
+		}
+		s.writeError(writer, http.StatusInternalServerError, "dashboard asset request failed")
+		return
+	}
+	http.ServeContent(writer, request, path.Base(assetPath), time.Time{}, bytes.NewReader(asset))
+}
+
+func (s *Server) withReadClient(handler func(http.ResponseWriter, *http.Request, client.Client)) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		if s.Clients == nil {
+			s.writeError(writer, http.StatusServiceUnavailable, "dashboard Kubernetes client is not configured")
+			return
+		}
+		// These endpoints are intentionally public when PublicReadClient is
+		// configured. Do not switch to a cookie token merely because one exists:
+		// a logs-only token need not have Namespace or Run list permissions.
+		if s.PublicReadClient != nil {
+			handler(writer, request, s.PublicReadClient)
+			return
+		}
+		kubernetesClient, err := s.Clients.ClientForRequest(request)
+		if err == nil {
+			handler(writer, request, kubernetesClient)
+			return
+		}
+		s.writeKubernetesError(writer, err)
+	}
 }
 
 func (s *Server) withRequestClient(handler func(http.ResponseWriter, *http.Request, client.Client)) http.HandlerFunc {
@@ -234,6 +383,8 @@ func (s *Server) getRun(writer http.ResponseWriter, request *http.Request, kuber
 	}
 	s.writeJSON(writer, http.StatusOK, runDetailResponse{
 		runSummary:   summaryForRun(run),
+		Spec:         *run.Spec.DeepCopy(),
+		Status:       *run.Status.DeepCopy(),
 		Message:      run.Status.Message,
 		Endpoint:     run.Status.Endpoint,
 		Conditions:   append([]metav1.Condition(nil), run.Status.Conditions...),
@@ -242,7 +393,146 @@ func (s *Server) getRun(writer http.ResponseWriter, request *http.Request, kuber
 	})
 }
 
-func (s *Server) getRunLogs(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
+func (s *Server) listRuntimes(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
+	var runtimes v1alpha1.RuntimeList
+	if err := kubernetesClient.List(request.Context(), &runtimes, client.InNamespace(request.PathValue("namespace"))); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	var runs v1alpha1.RunList
+	if err := kubernetesClient.List(request.Context(), &runs, client.InNamespace(request.PathValue("namespace"))); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	counts := make(map[string]int)
+	for i := range runs.Items {
+		counts[runs.Items[i].Spec.Runtime]++
+	}
+	items := make([]runtimeSummary, 0, len(runtimes.Items))
+	for i := range runtimes.Items {
+		items = append(items, summaryForRuntime(&runtimes.Items[i], counts[runtimes.Items[i].Name]))
+	}
+	s.writeJSON(writer, http.StatusOK, runtimeListResponse{Items: items})
+}
+
+func (s *Server) getRuntime(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
+	namespace, name := request.PathValue("namespace"), request.PathValue("name")
+	runtimeObject := &v1alpha1.Runtime{}
+	if err := kubernetesClient.Get(request.Context(), client.ObjectKey{Namespace: namespace, Name: name}, runtimeObject); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	var pods corev1.PodList
+	if err := kubernetesClient.List(request.Context(), &pods, client.InNamespace(namespace), client.MatchingLabels{"runtime": name}); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	var runs v1alpha1.RunList
+	if err := kubernetesClient.List(request.Context(), &runs, client.InNamespace(namespace)); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	byPod := make(map[string][]runSummary)
+	runCount := 0
+	for i := range runs.Items {
+		run := &runs.Items[i]
+		if run.Spec.Runtime != name {
+			continue
+		}
+		runCount++
+		if run.Status.AssignedPod != "" {
+			byPod[run.Status.AssignedPod] = append(byPod[run.Status.AssignedPod], summaryForRun(run))
+		}
+	}
+	podItems := make([]runtimePodSummary, 0, len(pods.Items))
+	for i := range pods.Items {
+		podItems = append(podItems, summaryForRuntimePod(&pods.Items[i], byPod[pods.Items[i].Name]))
+	}
+	s.writeJSON(writer, http.StatusOK, runtimeDetailResponse{Runtime: summaryForRuntime(runtimeObject, runCount), Spec: *runtimeObject.Spec.DeepCopy(), Status: *runtimeObject.Status.DeepCopy(), Pods: podItems})
+}
+
+func summaryForRuntime(runtimeObject *v1alpha1.Runtime, runCount int) runtimeSummary {
+	capacity := map[string]string{}
+	if runtimeObject.Spec.Capacity != nil {
+		for name, value := range runtimeObject.Spec.Capacity.Resources {
+			capacity[string(name)] = value.String()
+		}
+	}
+	if len(capacity) == 0 {
+		capacity = nil
+	}
+	return runtimeSummary{Name: runtimeObject.Name, Namespace: runtimeObject.Namespace, Replicas: runtimeObject.Spec.Replicas, ReadyReplicas: runtimeObject.Status.ReadyReplicas, Capacity: capacity, RunCount: runCount, Healthy: runtimeObject.Spec.Replicas > 0 && runtimeObject.Status.ReadyReplicas >= runtimeObject.Spec.Replicas}
+}
+
+func summaryForRuntimePod(pod *corev1.Pod, runs []runSummary) runtimePodSummary {
+	if runs == nil {
+		runs = []runSummary{}
+	}
+	item := runtimePodSummary{Name: pod.Name, Phase: pod.Status.Phase, Runs: runs}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			item.Ready = condition.Status == corev1.ConditionTrue
+		}
+		if condition.Type == v1alpha1.RuntimePodRuntimedReadyCondition {
+			item.RuntimedReady = condition.Status == corev1.ConditionTrue
+		}
+	}
+	return item
+}
+
+func (s *Server) listWorkflowRuns(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
+	var workflowRuns v1alpha1.WorkflowRunList
+	if err := kubernetesClient.List(request.Context(), &workflowRuns, client.InNamespace(request.PathValue("namespace"))); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	items := make([]workflowRunSummary, 0, len(workflowRuns.Items))
+	for i := range workflowRuns.Items {
+		items = append(items, summaryForWorkflowRun(&workflowRuns.Items[i]))
+	}
+	s.writeJSON(writer, http.StatusOK, workflowRunListResponse{Items: items})
+}
+
+func (s *Server) getWorkflowRun(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
+	workflowRun := &v1alpha1.WorkflowRun{}
+	if err := kubernetesClient.Get(request.Context(), client.ObjectKey{Namespace: request.PathValue("namespace"), Name: request.PathValue("name")}, workflowRun); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	s.writeJSON(writer, http.StatusOK, workflowRunDetailResponse{workflowRunSummary: summaryForWorkflowRun(workflowRun), Spec: *workflowRun.Spec.DeepCopy(), Status: *workflowRun.Status.DeepCopy()})
+}
+
+func summaryForWorkflowRun(workflowRun *v1alpha1.WorkflowRun) workflowRunSummary {
+	return workflowRunSummary{Name: workflowRun.Name, Namespace: workflowRun.Namespace, UID: workflowRun.UID, Phase: workflowRun.Status.Phase, JobCount: len(workflowRun.Spec.Jobs), CreationTimestamp: workflowRun.CreationTimestamp}
+}
+
+func (s *Server) getRunLogs(writer http.ResponseWriter, request *http.Request) {
+	if s.Clients == nil {
+		s.writeError(writer, http.StatusServiceUnavailable, "dashboard Kubernetes client is not configured")
+		return
+	}
+	// The token authorizes only the Pod log subresource. It intentionally need
+	// not have Run read permission: the Dashboard's narrow public-read client
+	// resolves the Run to its assigned runtimed Pod.
+	if _, err := s.Clients.ClientForRequest(request); err != nil {
+		s.writeKubernetesError(writer, err)
+		return
+	}
+	var runClient client.Client
+	if s.PublicReadClient != nil {
+		runClient = s.PublicReadClient
+	} else {
+		var err error
+		runClient, err = s.Clients.ClientForRequest(request)
+		if err != nil {
+			s.writeKubernetesError(writer, err)
+			return
+		}
+	}
+	s.getRunLogsForClient(writer, request, runClient)
+}
+
+func (s *Server) getRunLogsForClient(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
 	tailLines, follow, err := parseLogOptions(request)
 	if err != nil {
 		s.writeError(writer, http.StatusBadRequest, err.Error())
@@ -269,6 +559,10 @@ func (s *Server) getRunLogs(writer http.ResponseWriter, request *http.Request, k
 		LimitBytes: pointerTo(maxLogBytes),
 	})
 	if err != nil {
+		if apierrors.IsForbidden(err) {
+			s.writeError(writer, http.StatusForbidden, "Kubernetes authorization denied: logs require get permission on pods/log")
+			return
+		}
 		s.writeKubernetesError(writer, err)
 		return
 	}
@@ -361,6 +655,7 @@ func summaryForRun(run *v1alpha1.Run) runSummary {
 		Namespace:            run.Namespace,
 		UID:                  run.UID,
 		Runtime:              run.Spec.Runtime,
+		Mode:                 runModeName(run.Spec.Mode),
 		Phase:                run.Status.Phase,
 		AssignedPod:          run.Status.AssignedPod,
 		Attempt:              run.Status.Attempt,
@@ -368,6 +663,17 @@ func summaryForRun(run *v1alpha1.Run) runSummary {
 		StartTime:            run.Status.StartTime,
 		CompletionTime:       run.Status.CompletionTime,
 		LastTransitionReason: lastTransitionReason(run.Status.Conditions),
+	}
+}
+
+func runModeName(mode v1alpha1.RunMode) string {
+	switch {
+	case mode.Function != nil:
+		return "Function"
+	case mode.Session != nil:
+		return "Session"
+	default:
+		return "Task"
 	}
 }
 

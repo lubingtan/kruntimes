@@ -1,6 +1,7 @@
 # Dashboard
 
-This document describes the accepted v0.x design. It is not implemented yet.
+This document describes the accepted v0.x design and its implemented initial
+Dashboard surface.
 
 kruntimes should provide a small read-only dashboard for developers and
 operators who need to understand what is running, what is stuck, and where to
@@ -21,8 +22,8 @@ in CRDs, pods, conditions, logs, and artifact references.
 - Preserve Kubernetes RBAC and namespace boundaries.
 - Provide an operator-friendly view for Pending, Scheduled, Running, Succeeded,
   Failed, Cancelled, and TimedOut Runs.
-- Leave room for future WorkflowRun, Workflow, Action, and PersistentWorkspace
-  views after those APIs stabilize.
+- Browse Runtime pools, their Pod health/capacity, and assigned Runs.
+- Browse WorkflowRuns, their job DAG and step-to-Run links.
 
 ## Non-Goals
 
@@ -65,9 +66,11 @@ The dashboard should have two components:
 
 ### v0.x Decisions
 
-The dashboard ships as an opt-in component of the main kruntimes chart, with
-dashboard.enabled false by default. This preserves one upgrade and RBAC
-boundary without adding a component to installations that do not need it.
+The dashboard is an opt-in component of the `kruntimes` chart, with
+`dashboard.enabled: false` by default. Its Deployment, ServiceAccount,
+Service, and TLS resources are installed in the same Helm release as the
+control plane. This preserves one upgrade and RBAC boundary without adding a
+component to installations that do not need it.
 
 Production dashboard traffic is HTTPS-only. The Service remains ClusterIP, and
 a bearer-token login page is never exposed over plaintext HTTP. The chart lets
@@ -92,12 +95,14 @@ operator-provided Secret, set `selfSigned: false`, leave
 the `secretName` specified by the operator. An existing self-signed Issuer is
 therefore supported without a separate dashboard-specific mode.
 
-The backend has no ambient read authority for user requests. It may use its
-ServiceAccount only to discover the in-cluster API endpoint and CA. For each
-request it copies only that transport configuration, clears the mounted
-credential and credential file, and installs the caller bearer token. It must
-not fall back to its ServiceAccount if that token is absent, invalid, or
-unauthorized.
+The backend has no ambient read authority for protected user requests. It
+copies only the in-cluster transport configuration, clears the mounted
+credential and installs the caller bearer token. The chart enables a
+deliberately narrow public-read mode by default: the Dashboard ServiceAccount
+may only get/list Namespaces, Runs, Runtimes, and WorkflowRuns, and the API
+exposes only their summaries without a token. Operators can disable it with
+`dashboard.publicRead.enabled=false`. Resource details and
+Runtime/WorkflowRun pages remain caller-authorized.
 
 The first version should read the following sources:
 
@@ -107,12 +112,7 @@ The first version should read the following sources:
 - runtimed log/status endpoints through a backend-controlled path;
 - `Run.status.outputs` and `Run.status.artifactRefs`.
 
-Future versions can add:
-
-- `WorkflowRun`, `Workflow`, and `Action` list/detail pages;
-- PersistentWorkspace detail pages;
-- runtime pool capacity and health views;
-- metrics panels backed by Prometheus or another metrics backend.
+Future versions can add PersistentWorkspace detail pages and metrics panels.
 
 ## Log Access
 
@@ -121,26 +121,47 @@ The dashboard backend must not expose Runtime Pods directly to browsers.
 For v0.x, the expected path is:
 
 1. The user opens logs for a Run.
-2. The backend reads the Run and its assigned Runtime Pod.
-3. The backend verifies the request using the configured Kubernetes auth/RBAC
-   model.
-4. The backend reaches runtimed using the same conceptual boundary as `krt logs`
-   and streams or returns the requested log tail.
+2. The narrow public-read client reads the Run only to locate its assigned
+   Runtime Pod.
+3. The user token authorizes the Pod `log` subresource request.
+4. The backend streams or returns the requested log tail.
 
 The exact transport can evolve. It may use Kubernetes port-forwarding, an
 internal service, or a dedicated log proxy, but the boundary should stay the
-same: users need permission to read the Run and to access runtime logs.
+same: the user needs access to runtime logs, while the narrow service account
+performs only the Run-to-Pod lookup.
 
 Structured runtimed logs should remain keyed by Run UID so the dashboard can
 show the correct logs even when Runtime Pods handle multiple Runs.
 
-For v0.x, the backend reads the assigned Pod's runtimed container log
-subresource through that request-scoped client and returns only structured
-records whose run_uid matches the requested immutable Run UID. It does not
-create a browser-visible port-forward or expose Runtime Pods directly. The
-caller therefore needs permission to read the Run and assigned Pod and get the
-Pod log subresource. Artifact references are shown as Run metadata; artifact
-downloads are outside the first Dashboard slice.
+For v0.x, the backend uses the public-read client to resolve the assigned Pod,
+then reads that Pod's runtimed container log subresource through the
+request-scoped caller client. It returns only structured records whose
+run_uid matches the requested immutable Run UID. It does not create a
+browser-visible port-forward or expose Runtime Pods directly. The caller
+therefore needs `get` on the Pod `log` subresource, but does not need Run or
+Pod read permission merely to retrieve logs. Artifact references are shown as
+Run metadata; artifact downloads are outside the first Dashboard slice.
+
+### Planned: Unified Run Log Authorization
+
+The current `pods/log` authorization is an implementation-level Kubernetes
+permission, not the desired user-facing Run-log capability. It is also not
+consistent with `krt logs`, whose current primary path requires Run access and
+Pod port-forward access. A follow-up will make the shared Runtime Gateway the
+single Run-log API for Dashboard and `krt`.
+
+The Gateway already authenticates caller bearer tokens with `TokenReview` and
+authorizes access to the exact Run with `SubjectAccessReview`. The planned log
+endpoint will reuse that `get runs` decision, derive the assigned Pod and
+immutable Run UID server-side, read only the `runtimed` container using the
+Gateway ServiceAccount's `pods/log` permission, and return only bounded
+structured records matching that UID. It will not accept caller-selected Pod
+or container values. This is an ordinary Gateway HTTP endpoint, not a
+Kubernetes aggregation API server.
+
+Until that migration is implemented, Dashboard log access continues to require
+the caller's `get pods/log` permission.
 
 ## Security Model
 
@@ -148,23 +169,19 @@ The dashboard must be read-only by default.
 
 The proposed v0.x production model is Kubernetes bearer-token login:
 
-- the user enters a Kubernetes bearer token into the dashboard. The browser
-  holds it in memory only and sends it as an `Authorization: Bearer` header
-  over the dashboard's HTTPS origin; it must not write the token to
-  localStorage, sessionStorage, cookies, or disk. The backend does not create
-  a dashboard-specific identity or session, and must not persist or log the
-  token, including in HTTP access logs;
+- the user enters a Kubernetes bearer token into the Dashboard over HTTPS. The
+  backend returns it in a host-only `HttpOnly`, `Secure`, `SameSite=Strict`
+  session cookie with an eight-hour lifetime. JavaScript never reads or writes
+  the token, and it is never written to localStorage, sessionStorage, or logs;
 - the backend creates a request-scoped Kubernetes client with that bearer token,
-  the in-cluster API server address, and the cluster CA. It never uses the
-  dashboard ServiceAccount to read resources on a user's behalf;
-- Kubernetes API authorization, rather than dashboard-maintained policy,
-  decides namespace visibility and read access;
-- the initial UI may offer a best-effort namespace list. If the token cannot
-  list Namespace objects, the UI must let the user enter a namespace name and
-  show the API's normal authorization result;
-- log access needs the same token to read the Run and its assigned Pod and read
-  the Pod `log` subresource. v0.x returns structured records from the
-  `runtimed` container only;
+  the in-cluster API server address, and the cluster CA. It uses this client
+  for protected pages and Pod log access;
+- the chart's narrowly privileged Dashboard ServiceAccount supplies tokenless
+  namespace, Run, Runtime, and WorkflowRun summaries by default. It has only
+  `get`/`list` on those resources and can be disabled explicitly;
+- Kubernetes API authorization decides protected-page access. A token with no
+  Run permission can still read logs if it has `get` on `pods/log`: the
+  service account resolves the Run-to-Pod mapping without exposing Run detail;
 - v0.x shows artifact references as Run metadata but does not download or proxy
   artifact content. A future artifact-download design must define its
   authorization and external-store boundary separately;
@@ -233,8 +250,8 @@ roleRef:
 ```
 
 Apply the manifest, then mint a bounded token and paste it into the dashboard
-login page. The dashboard keeps the token only for the current in-memory
-browser session:
+login page. The Dashboard keeps it in an eight-hour HTTPS-only HttpOnly session
+cookie:
 
 ```bash
 kubectl apply -f dashboard-viewer.yaml
@@ -253,13 +270,19 @@ cluster-level read access after reviewing its scope.
 The dashboard frontend can use an internal, versioned-for-the-binary HTTP API.
 It should not be documented as a stable public API in v0.x.
 
-Initial endpoints can be:
+Implemented endpoints are:
 
 ```text
 GET /api/namespaces
 GET /api/namespaces/{namespace}/runs
 GET /api/namespaces/{namespace}/runs/{name}
 GET /api/namespaces/{namespace}/runs/{name}/logs?tail=&follow=
+GET /api/namespaces/{namespace}/runtimes
+GET /api/namespaces/{namespace}/runtimes/{name}
+GET /api/namespaces/{namespace}/workflowruns
+GET /api/namespaces/{namespace}/workflowruns/{name}
+POST /api/session
+DELETE /api/session
 ```
 
 The log endpoint reads only the assigned Pod's `runtimed` container through the
@@ -296,6 +319,15 @@ The first version should keep the UI narrow and operational:
 It should not include mutation buttons until the read-only authorization model
 is proven.
 
+The frontend is React and TypeScript, built into static assets packaged beside
+the Dashboard backend in its image and served from the same HTTPS origin as its internal API.
+The source, backend, process entrypoint, and image definition live under the
+top-level `dashboard/` directory. It has no separate frontend Service, no
+browser-to-Kubernetes connection, and a same-origin Content Security Policy.
+The bearer token is never readable by JavaScript: it is stored only in a
+host-only HTTPS HttpOnly session cookie. Reload restores the session and
+Disconnect removes it.
+
 ## Implementation Sequence
 
 1. Add this design document and keep the roadmap explicit.
@@ -305,16 +337,13 @@ is proven.
 4. Implement Run list/detail APIs with unit tests.
 5. Implement log tail/follow through a backend-controlled path.
 6. Add the frontend Run list/detail/log views.
-7. Add an optional Helm chart value or separate dashboard chart.
-8. Add E2E smoke coverage that installs the dashboard, creates a Run, lists it,
-   opens detail, and fetches logs.
-9. Add WorkflowRun/Workflow/Action/PersistentWorkspace views after the
-   corresponding APIs stabilize.
+7. Add the optional `dashboard.enabled` resources to the `kruntimes` chart.
+8. Deploy the Dashboard in the standard E2E environment. Browser-specific E2E
+   coverage is deferred until there is a stable browser test harness.
+9. Add PersistentWorkspace views after their API stabilizes.
 
 ## Remaining Questions
 
-- Should the dashboard ship in the main kruntimes chart, a separate chart, or
-  both?
 - Should log access continue to use port-forward semantics or move to a
   dedicated cluster-internal log proxy service?
 - How should artifact downloads be authorized and proxied when artifact stores

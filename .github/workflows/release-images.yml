@@ -37,7 +37,7 @@ jobs:
           - image: gateway
             dockerfile: Dockerfile.gateway
           - image: dashboard
-            dockerfile: Dockerfile.dashboard
+            dockerfile: dashboard/Dockerfile
           - image: bash-runtime
             dockerfile: Dockerfile.bash-runtime
           - image: python-runtime

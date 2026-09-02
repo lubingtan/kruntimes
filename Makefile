@@ -130,6 +130,7 @@ E2E_IMG_SCHEDULER ?= kruntimes-scheduler:$(E2E_IMAGE_TAG)
 E2E_IMG_CONTROLLER ?= kruntimes-controller:$(E2E_IMAGE_TAG)
 E2E_IMG_RUNTIMED ?= kruntimes-runtimed:$(E2E_IMAGE_TAG)
 E2E_IMG_GATEWAY ?= kruntimes-gateway:$(E2E_IMAGE_TAG)
+E2E_IMG_DASHBOARD ?= kruntimes-dashboard:$(E2E_IMAGE_TAG)
 E2E_IMG_BASH_RUNTIME ?= kruntimes-bash-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_PYTHON_RUNTIME ?= kruntimes-python-runtime:$(E2E_IMAGE_TAG)
 E2E_IMG_DIAGNOSIS_RUNTIME ?= kruntimes-diagnosis-runtime:$(E2E_IMAGE_TAG)
@@ -144,6 +145,7 @@ e2e-setup: IMG_SCHEDULER = $(E2E_IMG_SCHEDULER)
 e2e-setup: IMG_CONTROLLER = $(E2E_IMG_CONTROLLER)
 e2e-setup: IMG_RUNTIMED = $(E2E_IMG_RUNTIMED)
 e2e-setup: IMG_GATEWAY = $(E2E_IMG_GATEWAY)
+e2e-setup: IMG_DASHBOARD = $(E2E_IMG_DASHBOARD)
 e2e-setup: IMG_BASH_RUNTIME = $(E2E_IMG_BASH_RUNTIME)
 e2e-setup: IMG_PYTHON_RUNTIME = $(E2E_IMG_PYTHON_RUNTIME)
 e2e-setup: IMG_DIAGNOSIS_RUNTIME = $(E2E_IMG_DIAGNOSIS_RUNTIME)
@@ -153,6 +155,7 @@ e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind 
 	kind load docker-image $(E2E_IMG_CONTROLLER) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_RUNTIMED) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_GATEWAY) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(E2E_IMG_DASHBOARD) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_BASH_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_PYTHON_RUNTIME) --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(E2E_IMG_DIAGNOSIS_RUNTIME) --name $(KIND_CLUSTER_NAME)
@@ -165,6 +168,8 @@ e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind 
 		--set gateway.enabled=true \
 		--set gateway.image=$(E2E_IMG_GATEWAY) \
 		--set gateway.protocols[0]=http --set gateway.protocols[1]=https \
+		--set dashboard.enabled=true \
+		--set dashboard.image=$(E2E_IMG_DASHBOARD) \
 		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s $(E2E_GATEWAY_HELM_ARGS)
 
 .PHONY: e2e-test
@@ -240,14 +245,18 @@ benchmark-run: ## Run the benchmark against the current Kubernetes context. Pass
 ##@ Build
 
 .PHONY: build
-build: generate proto ## Build all binaries.
+build: generate proto dashboard-ui-build ## Build all binaries.
 	go build -o bin/scheduler ./cmd/scheduler
 	go build -o bin/runtimed ./cmd/runtimed
 	go build -o bin/controller ./cmd/controller
 	go build -o bin/runtime-gateway ./cmd/runtime-gateway
-	go build -o bin/dashboard ./cmd/dashboard
+	go build -o bin/dashboard ./dashboard/cmd
 	go build -o bin/krt ./cmd/krt
 	go build -o bin/bash-runtime ./runtimes/bash/cmd
+
+.PHONY: dashboard-ui-build
+dashboard-ui-build: ## Build the React Dashboard frontend assets.
+	cd dashboard/frontend && npm ci && npm run build
 
 .PHONY: build-scheduler
 build-scheduler: generate ## Build scheduler binary.
@@ -300,7 +309,7 @@ docker-build-gateway: generate proto ## Build Runtime gateway Docker image.
 
 .PHONY: docker-build-dashboard
 docker-build-dashboard: generate ## Build Dashboard Docker image.
-	$(CONTAINER_TOOL) build -t $(IMG_DASHBOARD) -f Dockerfile.dashboard .
+	$(CONTAINER_TOOL) build -t $(IMG_DASHBOARD) -f dashboard/Dockerfile .
 
 .PHONY: docker-build-bash-runtime
 docker-build-bash-runtime: proto ## Build bash-runtime Docker image.

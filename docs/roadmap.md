@@ -474,11 +474,21 @@ wiring from accumulating avoidable conflicts.
     request-scoped Kubernetes clients, and the local-only kubeconfig proxy
     boundary;
   - [x] add a dashboard backend with read-only Kubernetes API access;
-  - [x] implement Run list/detail APIs with namespace-aware RBAC;
+  - [x] implement bookmarkable Run list/detail APIs with namespace-aware RBAC;
   - [x] proxy Run log tail/follow through a backend-controlled path;
-  - add read-only frontend views for namespace selection, Run lists, Run
-    details, conditions, outputs, artifact references, and logs;
-  - add optional Helm installation support and E2E smoke coverage.
+  - [x] add session-cookie login, default narrow public namespace/Run/Runtime/WorkflowRun-list access,
+    logs authorized solely by `pods/log`, and
+    light/dark/system theme selection;
+  - [x] add read-only frontend views for namespace selection, bookmarkable Run
+    lists/details/logs, Runtime pool and Pod views, and WorkflowRun DAG/job/step
+    views;
+  - [x] add optional Helm installation support in the `kruntimes` chart;
+  - [x] deploy the Dashboard in the standard E2E environment.
+  - [ ] unify Dashboard and `krt logs` behind a Runtime Gateway Run-log API:
+    authorize `get` on the exact Run, derive the assigned Pod and Run UID
+    server-side, and remove caller requirements for `pods/log` and Runtime-Pod
+    `pods/portforward`; this remains an ordinary Gateway HTTP API, not a
+    Kubernetes aggregation API server.
 - [ ] Continue supply-chain, security, compatibility, and operational
   hardening as the installation surface stabilizes.
 

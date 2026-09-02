@@ -136,6 +136,11 @@ dashboard:
   bindAddress: ":8443"
   servicePort: 443
   containerPort: 8443
+  publicRead:
+    # When enabled, the Dashboard ServiceAccount may list namespaces, Runs,
+    # Runtimes, and WorkflowRuns without a user token. Details require a caller
+    # Kubernetes bearer token; logs require only pods/log permission.
+    enabled: true
   tls:
     # Certificate sources are mutually exclusive. With selfSigned enabled, the
     # chart generates this Secret (or preserves it across upgrades). To mount

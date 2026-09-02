@@ -396,11 +396,19 @@ controller wiring 累积不必要的冲突。
   - [x] review 并定义 v0.x Kubernetes bearer-token login 模型、request-scoped Kubernetes
     clients，以及 local-only kubeconfig proxy 边界；
   - [x] 增加 dashboard backend，提供只读 Kubernetes API access；
-  - [x] 实现 Run list/detail APIs，并遵守 namespace-aware RBAC；
+  - [x] 实现可 bookmark 的 Run list/detail APIs，并遵守 namespace-aware RBAC；
   - [x] 通过 backend-controlled 路径代理 Run log tail/follow；
-  - 增加只读 frontend views，覆盖 namespace selection、Run lists、Run details、
-    conditions、outputs、artifact references 和 logs；
-  - 增加可选 Helm installation support 和 E2E smoke coverage。
+  - [x] 增加 session-cookie login、默认的窄范围 public namespace/Run/Runtime/WorkflowRun-list access、仅由
+    `pods/log` 授权的 logs，以及
+    light/dark/system theme selection；
+  - [x] 增加只读 frontend views，覆盖 namespace selection、可 bookmark 的 Run
+    lists/details/logs、Runtime pool/Pod views 以及 WorkflowRun DAG/job/step views；
+  - [x] 在 `kruntimes` chart 中增加可选 Helm installation support；
+  - [x] 在标准 E2E environment 中部署 Dashboard。
+  - [ ] 通过 Runtime Gateway Run-log API 统一 Dashboard 和 `krt logs`：对精确 Run
+    授权 `get`，在服务端推导 assigned Pod 和 Run UID，并移除 caller 对 `pods/log` 与
+    Runtime-Pod `pods/portforward` 的要求；该 API 是普通 Gateway HTTP API，不是
+    Kubernetes aggregation API server。
 - [ ] 随着安装面逐步稳定，继续推进供应链、安全、兼容性和运维加固。
 
 ### 迈向 v1.0

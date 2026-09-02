@@ -61,6 +61,7 @@ spec:
             - --bind-address={{ .Values.dashboard.bindAddress }}
             - --tls-certificate-file=/var/run/kruntimes/dashboard-tls/{{ .Values.dashboard.tls.certificateKey }}
             - --tls-private-key-file=/var/run/kruntimes/dashboard-tls/{{ .Values.dashboard.tls.privateKeyKey }}
+            - --public-read={{ .Values.dashboard.publicRead.enabled }}
           ports:
             - containerPort: {{ .Values.dashboard.containerPort }}
               name: https
