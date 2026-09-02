@@ -405,10 +405,15 @@ controller wiring 累积不必要的冲突。
     lists/details/logs、Runtime pool/Pod views 以及 WorkflowRun DAG/job/step views；
   - [x] 在 `kruntimes` chart 中增加可选 Helm installation support；
   - [x] 在标准 E2E environment 中部署 Dashboard。
-  - [ ] 通过 Runtime Gateway Run-log API 统一 Dashboard 和 `krt logs`：对精确 Run
-    授权 `get`，在服务端推导 assigned Pod 和 Run UID，并移除 caller 对 `pods/log` 与
-    Runtime-Pod `pods/portforward` 的要求；该 API 是普通 Gateway HTTP API，不是
-    Kubernetes aggregation API server。
+  - [ ] 通过 [Runtime Gateway Run-log API](design/runtime-gateway-log-api.zh.md) 统一
+    Dashboard 和 `krt logs`：
+    - [ ] 增加 Gateway route、按 UID 过滤的有界 structured records，以及最小权限的
+      Gateway ServiceAccount `get pods/log`；
+    - [ ] 将 Dashboard logs 迁移到 Gateway，并移除其 caller-scoped `pods/log` 路径；
+    - [ ] 将 `krt logs` 迁移到 Gateway，并移除 Runtime-Pod `pods/portforward` 与 direct
+      `pods/log` 路径；
+    - [ ] 通过 E2E 证明 `get runs` 对 logs 已足够且仍然必需。
+    该 API 是普通 Gateway HTTP API，不是 Kubernetes aggregation API server。
 - [ ] 随着安装面逐步稳定，继续推进供应链、安全、兼容性和运维加固。
 
 ### 迈向 v1.0

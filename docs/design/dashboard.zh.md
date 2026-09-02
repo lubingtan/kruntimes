@@ -126,14 +126,9 @@ browser。因此 caller 需要 Pod `log` subresource 的 `get`，但仅读取日
 
 当前的 `pods/log` authorization 是 Kubernetes 实现层权限，而不是期望暴露给用户的 Run-log
 capability；它也和 `krt logs` 不一致，后者当前的主路径需要 Run access 与 Pod port-forward
-access。后续工作将把共享 Runtime Gateway 作为 Dashboard 和 `krt` 唯一的 Run-log API。
-
-Gateway 已经通过 `TokenReview` 认证 caller bearer token，并以
-`SubjectAccessReview` 对精确的 Run 做授权。计划中的 log endpoint 会复用这个 `get runs`
-decision，在服务端推导 assigned Pod 和 immutable Run UID，以 Gateway ServiceAccount 的
-`pods/log` permission 仅读取 `runtimed` container，并只返回匹配该 UID 的有界 structured
-records。它不接受 caller 选择 Pod 或 container。这是普通 Gateway HTTP endpoint，不是
-Kubernetes aggregation API server。
+access。后续工作将把共享 Runtime Gateway 作为 Dashboard 和 `krt` 唯一的 Run-log API。完整的
+endpoint、authorization、bounds、error 和 migration contract 见 [Runtime Gateway Run Log API
+设计](runtime-gateway-log-api.zh.md)。
 
 在完成该迁移前，Dashboard log access 仍要求 caller 具有 `get pods/log` permission。
 

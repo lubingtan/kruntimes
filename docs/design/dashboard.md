@@ -149,16 +149,9 @@ The current `pods/log` authorization is an implementation-level Kubernetes
 permission, not the desired user-facing Run-log capability. It is also not
 consistent with `krt logs`, whose current primary path requires Run access and
 Pod port-forward access. A follow-up will make the shared Runtime Gateway the
-single Run-log API for Dashboard and `krt`.
-
-The Gateway already authenticates caller bearer tokens with `TokenReview` and
-authorizes access to the exact Run with `SubjectAccessReview`. The planned log
-endpoint will reuse that `get runs` decision, derive the assigned Pod and
-immutable Run UID server-side, read only the `runtimed` container using the
-Gateway ServiceAccount's `pods/log` permission, and return only bounded
-structured records matching that UID. It will not accept caller-selected Pod
-or container values. This is an ordinary Gateway HTTP endpoint, not a
-Kubernetes aggregation API server.
+single Run-log API for Dashboard and `krt`. The complete proposed endpoint,
+authorization, bounds, error, and migration contract is in the [Runtime
+Gateway Run Log API design](runtime-gateway-log-api.md).
 
 Until that migration is implemented, Dashboard log access continues to require
 the caller's `get pods/log` permission.

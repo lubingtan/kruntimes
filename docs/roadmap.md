@@ -484,11 +484,17 @@ wiring from accumulating avoidable conflicts.
     views;
   - [x] add optional Helm installation support in the `kruntimes` chart;
   - [x] deploy the Dashboard in the standard E2E environment.
-  - [ ] unify Dashboard and `krt logs` behind a Runtime Gateway Run-log API:
-    authorize `get` on the exact Run, derive the assigned Pod and Run UID
-    server-side, and remove caller requirements for `pods/log` and Runtime-Pod
-    `pods/portforward`; this remains an ordinary Gateway HTTP API, not a
-    Kubernetes aggregation API server.
+  - [ ] unify Dashboard and `krt logs` behind the [Runtime Gateway Run-log
+    API](design/runtime-gateway-log-api.md):
+    - [ ] add the Gateway route, UID-filtered bounded structured records, and
+      least-privilege Gateway ServiceAccount `get pods/log` permission;
+    - [ ] migrate Dashboard logs to the Gateway and remove its caller-scoped
+      `pods/log` path;
+    - [ ] migrate `krt logs` to the Gateway and remove Runtime-Pod
+      `pods/portforward` and direct `pods/log` paths;
+    - [ ] prove in E2E that `get runs` is sufficient for logs and is required.
+    This remains an ordinary Gateway HTTP API, not a Kubernetes aggregation
+    API server.
 - [ ] Continue supply-chain, security, compatibility, and operational
   hardening as the installation surface stabilizes.
 
