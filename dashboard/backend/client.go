@@ -2,16 +2,12 @@
 package dashboard
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -65,33 +61,6 @@ func (f *RequestClientFactory) ClientForRequest(request *http.Request) (client.C
 		return nil, fmt.Errorf("create request-scoped Kubernetes client: %w", err)
 	}
 	return kubernetesClient, nil
-}
-
-// ReadPodLogs reads one caller-authorized Pod log stream. The Dashboard owns
-// the namespace, Pod, container, and bounds passed to this method; callers
-// cannot turn it into a general-purpose Pod proxy.
-func (f *RequestClientFactory) ReadPodLogs(
-	ctx context.Context,
-	request *http.Request,
-	namespace, pod string,
-	options corev1.PodLogOptions,
-) (io.ReadCloser, error) {
-	if f == nil {
-		return nil, errors.New("dashboard request client factory is required")
-	}
-	config, err := f.configForRequest(request)
-	if err != nil {
-		return nil, err
-	}
-	coreClient, err := corev1client.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("create request-scoped core client: %w", err)
-	}
-	stream, err := coreClient.Pods(namespace).GetLogs(pod, &options).Stream(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return stream, nil
 }
 
 func (f *RequestClientFactory) configForRequest(request *http.Request) (*rest.Config, error) {

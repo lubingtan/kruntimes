@@ -1,9 +1,7 @@
 package dashboard
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,19 +38,15 @@ type RequestClientProvider interface {
 	ClientForRequest(*http.Request) (client.Client, error)
 }
 
-// PodLogReader exposes the narrowly-scoped Kubernetes log operation required
-// by the Dashboard. RequestClientFactory is the production implementation.
-type PodLogReader interface {
-	ReadPodLogs(context.Context, *http.Request, string, string, corev1.PodLogOptions) (io.ReadCloser, error)
-}
-
 // Server exposes the Dashboard's internal, read-only HTTP API.
 type Server struct {
 	Clients RequestClientProvider
 	// PublicReadClient is intentionally optional. When configured it serves the
 	// safe namespace and Run list endpoints, and resolves a Run's assigned Pod
-	// for logs. Reading logs always still requires the caller's credential.
+	// for unauthenticated list requests. Reading logs always requires the
+	// caller's credential and goes through Gateway.
 	PublicReadClient client.Client
+	Gateway          RunLogGateway
 	Assets           fs.FS
 
 	routesOnce sync.Once
@@ -152,50 +146,6 @@ type sessionRequest struct {
 
 type sessionResponse struct {
 	Authenticated bool `json:"authenticated"`
-}
-
-type runLogResponse struct {
-	Items []runLogEntry `json:"items"`
-}
-
-// runLogEntry is the safe portion of one structured runtimed log record.
-type runLogEntry struct {
-	Stream               string `json:"stream"`
-	Message              string `json:"message"`
-	InvocationID         string `json:"invocationId,omitempty"`
-	Operation            string `json:"operation,omitempty"`
-	Outcome              string `json:"outcome,omitempty"`
-	StatusCode           string `json:"statusCode,omitempty"`
-	ExitCode             *int32 `json:"exitCode,omitempty"`
-	TimedOut             bool   `json:"timedOut,omitempty"`
-	DurationMilliseconds int64  `json:"durationMilliseconds,omitempty"`
-}
-
-type runtimedLogRecord struct {
-	RunUID               string `json:"run_uid"`
-	Stream               string `json:"stream"`
-	Message              string `json:"message"`
-	InvocationID         string `json:"invocation_id,omitempty"`
-	Operation            string `json:"operation,omitempty"`
-	Outcome              string `json:"outcome,omitempty"`
-	StatusCode           string `json:"status_code,omitempty"`
-	ExitCode             *int32 `json:"exit_code,omitempty"`
-	TimedOut             bool   `json:"timed_out,omitempty"`
-	DurationMilliseconds int64  `json:"duration_milliseconds,omitempty"`
-}
-
-func (record runtimedLogRecord) entry() runLogEntry {
-	return runLogEntry{
-		Stream:               record.Stream,
-		Message:              record.Message,
-		InvocationID:         record.InvocationID,
-		Operation:            record.Operation,
-		Outcome:              record.Outcome,
-		StatusCode:           record.StatusCode,
-		ExitCode:             record.ExitCode,
-		TimedOut:             record.TimedOut,
-		DurationMilliseconds: record.DurationMilliseconds,
-	}
 }
 
 func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -511,36 +461,18 @@ func (s *Server) getRunLogs(writer http.ResponseWriter, request *http.Request) {
 		s.writeError(writer, http.StatusServiceUnavailable, "dashboard Kubernetes client is not configured")
 		return
 	}
-	// The token authorizes only the Pod log subresource. It intentionally need
-	// not have Run read permission: the Dashboard's narrow public-read client
-	// resolves the Run to its assigned runtimed Pod.
-	if _, err := s.Clients.ClientForRequest(request); err != nil {
-		s.writeKubernetesError(writer, err)
+	if s.Gateway == nil {
+		s.writeError(writer, http.StatusServiceUnavailable, "Runtime Gateway log API is not configured")
 		return
 	}
-	var runClient client.Client
-	if s.PublicReadClient != nil {
-		runClient = s.PublicReadClient
-	} else {
-		var err error
-		runClient, err = s.Clients.ClientForRequest(request)
-		if err != nil {
-			s.writeKubernetesError(writer, err)
-			return
-		}
-	}
-	s.getRunLogsForClient(writer, request, runClient)
-}
-
-func (s *Server) getRunLogsForClient(writer http.ResponseWriter, request *http.Request, kubernetesClient client.Client) {
 	tailLines, follow, err := parseLogOptions(request)
 	if err != nil {
 		s.writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	logReader, ok := s.Clients.(PodLogReader)
-	if !ok {
-		s.writeError(writer, http.StatusServiceUnavailable, "dashboard Pod log reader is not configured")
+	kubernetesClient, err := s.Clients.ClientForRequest(request)
+	if err != nil {
+		s.writeKubernetesError(writer, err)
 		return
 	}
 	run := &v1alpha1.Run{}
@@ -548,35 +480,40 @@ func (s *Server) getRunLogsForClient(writer http.ResponseWriter, request *http.R
 		s.writeKubernetesError(writer, err)
 		return
 	}
-	if run.Status.AssignedPod == "" {
-		s.writeError(writer, http.StatusConflict, "Run has not been assigned to a Runtime Pod")
-		return
-	}
-	stream, err := logReader.ReadPodLogs(request.Context(), request, run.Namespace, run.Status.AssignedPod, corev1.PodLogOptions{
-		Container:  "runtimed",
-		Follow:     follow,
-		TailLines:  pointerTo(maxLogTailLines),
-		LimitBytes: pointerTo(maxLogBytes),
-	})
+	token, err := bearerToken(request)
 	if err != nil {
-		if apierrors.IsForbidden(err) {
-			s.writeError(writer, http.StatusForbidden, "Kubernetes authorization denied: logs require get permission on pods/log")
-			return
-		}
 		s.writeKubernetesError(writer, err)
 		return
 	}
-	defer stream.Close()
-	if follow {
-		s.streamRunLogs(writer, stream, string(run.UID))
-		return
-	}
-	entries, err := readRunLogs(stream, string(run.UID), tailLines)
+	response, err := s.Gateway.RunLogs(request.Context(), token, run.Namespace, run.Spec.Runtime, string(run.UID), tailLines, follow)
 	if err != nil {
-		s.writeError(writer, http.StatusInternalServerError, "dashboard log request failed")
+		s.writeError(writer, http.StatusServiceUnavailable, "Runtime Gateway log API is unavailable")
 		return
 	}
-	s.writeJSON(writer, http.StatusOK, runLogResponse{Items: entries})
+	defer response.Body.Close()
+	if contentType := response.Header.Get("Content-Type"); contentType != "" {
+		writer.Header().Set("Content-Type", contentType)
+	}
+	writer.WriteHeader(response.StatusCode)
+	if follow && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		flush := http.NewResponseController(writer).Flush
+		buffer := make([]byte, 32*1024)
+		for {
+			count, readErr := response.Body.Read(buffer)
+			if count > 0 {
+				if _, writeErr := writer.Write(buffer[:count]); writeErr != nil {
+					return
+				}
+				if flush() != nil {
+					return
+				}
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}
+	_, _ = io.Copy(writer, response.Body)
 }
 
 func parseLogOptions(request *http.Request) (int64, bool, error) {
@@ -598,55 +535,6 @@ func parseLogOptions(request *http.Request) (int64, bool, error) {
 		follow = parsed
 	}
 	return tailLines, follow, nil
-}
-
-func readRunLogs(reader io.Reader, runUID string, tailLines int64) ([]runLogEntry, error) {
-	entries := make([]runLogEntry, 0, tailLines)
-	if err := scanRunLogs(reader, runUID, func(entry runLogEntry) error {
-		entries = append(entries, entry)
-		if int64(len(entries)) > tailLines {
-			copy(entries, entries[len(entries)-int(tailLines):])
-			entries = entries[:tailLines]
-		}
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return entries, nil
-}
-
-func (s *Server) streamRunLogs(writer http.ResponseWriter, reader io.Reader, runUID string) {
-	writer.Header().Set("Content-Type", "application/x-ndjson")
-	writer.WriteHeader(http.StatusOK)
-	flusher, _ := writer.(http.Flusher)
-	_ = scanRunLogs(reader, runUID, func(entry runLogEntry) error {
-		if err := json.NewEncoder(writer).Encode(entry); err != nil {
-			return err
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
-	})
-}
-
-func scanRunLogs(reader io.Reader, runUID string, handle func(runLogEntry) error) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), int(maxLogBytes))
-	for scanner.Scan() {
-		var record runtimedLogRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil || record.RunUID != runUID {
-			continue
-		}
-		if err := handle(record.entry()); err != nil {
-			return err
-		}
-	}
-	return scanner.Err()
-}
-
-func pointerTo[T any](value T) *T {
-	return &value
 }
 
 func summaryForRun(run *v1alpha1.Run) runSummary {

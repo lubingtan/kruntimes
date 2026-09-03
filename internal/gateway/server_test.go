@@ -19,8 +19,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -76,7 +78,7 @@ func TestGatewayReturnsUIDFilteredRunLogs(t *testing.T) {
 		if namespace != run.Namespace || pod != run.Status.AssignedPod {
 			t.Fatalf("log target = %s/%s, want %s/%s", namespace, pod, run.Namespace, run.Status.AssignedPod)
 		}
-		if options.Container != "runtimed" || options.Follow || options.TailLines == nil || *options.TailLines != defaultLogTailLines || options.LimitBytes == nil || *options.LimitBytes != defaultLogBytes || !options.Timestamps {
+		if options.Container != "runtimed" || options.Follow || options.TailLines != nil || options.SinceTime == nil || !options.SinceTime.Time.Equal(run.Status.StartTime.Time) || options.LimitBytes == nil || *options.LimitBytes != defaultLogBytes || !options.Timestamps {
 			t.Fatalf("PodLogOptions = %#v", options)
 		}
 		return io.NopCloser(strings.NewReader(strings.Join([]string{
@@ -109,7 +111,7 @@ func TestGatewayReturnsUIDFilteredRunLogs(t *testing.T) {
 func TestGatewayStreamsRunLogs(t *testing.T) {
 	run := completedTaskRun()
 	reader := &fakePodLogReader{read: func(_ context.Context, _ string, _ string, options corev1.PodLogOptions) (io.ReadCloser, error) {
-		if !options.Follow || options.LimitBytes != nil || options.TailLines == nil || *options.TailLines != 2 || !options.Timestamps {
+		if !options.Follow || options.LimitBytes != nil || options.TailLines != nil || options.SinceTime == nil || !options.SinceTime.Time.Equal(run.Status.StartTime.Time) || !options.Timestamps {
 			t.Fatalf("PodLogOptions = %#v", options)
 		}
 		return io.NopCloser(strings.NewReader(strings.Join([]string{
@@ -167,6 +169,23 @@ func TestGatewayRejectsInvalidRunLogQueryBeforeReadingPodLogs(t *testing.T) {
 	}
 	if reader.calls != 0 {
 		t.Fatalf("Pod log reads = %d, want 0", reader.calls)
+	}
+}
+
+func TestGatewayExplainsWhenAssignedRuntimePodLogsAreGone(t *testing.T) {
+	server := testServer(t, completedTaskRun(), allowAuthorizer{}, &fakeDialer{client: &fakeSessionRuntimeClient{}})
+	server.PodLogs = &fakePodLogReader{read: func(context.Context, string, string, corev1.PodLogOptions) (io.ReadCloser, error) {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "runtime-pod")
+	}}
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/runs/task-uid/logs", nil))
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Body.String(); !strings.Contains(got, "assigned Runtime Pod is no longer available") || strings.Contains(got, "runtime-pod") {
+		t.Fatalf("error body = %q", got)
 	}
 }
 
@@ -497,7 +516,12 @@ func completedTaskRun() *v1alpha1.Run {
 	return &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: types.UID("task-uid")},
 		Spec:       v1alpha1.RunSpec{Runtime: "bash", Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}}},
-		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunSucceeded, AssignedPod: "runtime-pod", AssignedPodUID: "pod-uid"},
+		Status: v1alpha1.RunStatus{
+			Phase:          v1alpha1.RunSucceeded,
+			AssignedPod:    "runtime-pod",
+			AssignedPodUID: "pod-uid",
+			StartTime:      &metav1.Time{Time: time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)},
+		},
 	}
 }
 

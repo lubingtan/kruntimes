@@ -477,8 +477,7 @@ wiring from accumulating avoidable conflicts.
   - [x] implement bookmarkable Run list/detail APIs with namespace-aware RBAC;
   - [x] proxy Run log tail/follow through a backend-controlled path;
   - [x] add session-cookie login, default narrow public namespace/Run/Runtime/WorkflowRun-list access,
-    logs authorized solely by `pods/log`, and
-    light/dark/system theme selection;
+    and light/dark/system theme selection;
   - [x] add read-only frontend views for namespace selection, bookmarkable Run
     lists/details/logs, Runtime pool and Pod views, and WorkflowRun DAG/job/step
     views;
@@ -488,11 +487,11 @@ wiring from accumulating avoidable conflicts.
     API](design/runtime-gateway-log-api.md):
     - [x] add the Gateway route, UID-filtered bounded structured records, and
       least-privilege Gateway ServiceAccount `get pods/log` permission;
-    - [ ] migrate Dashboard logs to the Gateway and remove its caller-scoped
+    - [x] migrate Dashboard logs to the Gateway and remove its caller-scoped
       `pods/log` path;
     - [ ] migrate `krt logs` to the Gateway and remove Runtime-Pod
       `pods/portforward` and direct `pods/log` paths;
-    - [ ] prove in E2E that `get runs` is sufficient for logs and is required.
+    - [x] prove in E2E that `get runs` is sufficient for logs and is required.
     This remains an ordinary Gateway HTTP API, not a Kubernetes aggregation
     API server.
 - [ ] Continue supply-chain, security, compatibility, and operational

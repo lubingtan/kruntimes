@@ -1,6 +1,6 @@
 # Runtime Gateway Run Log API
 
-状态：**Proposed**
+状态：**进行中**
 
 ## 问题
 
@@ -32,9 +32,11 @@ GET /v1/namespaces/{namespace}/runtimes/{runtime}/runs/{runUID}/logs?tailLines={
 
 query shape 刻意遵循 Kubernetes `pods/log` 的相关语义。`tailLines` 可选，默认 100，必须是
 1 到 500 的整数。对 non-following request，`limitBytes` 可选，默认 1 MiB，必须是正整数且不超过
-1 MiB。Gateway 将两者用于读取现有的 `runtimed` container log，然后只输出匹配所请求 Run UID 的
-structured records。这限制了 Gateway memory 和 snapshot response size；它并不承诺繁忙的共享
-Runtime Pod 仍保留某个 Run 的完整历史记录。持久化或完整的日志保留仍由 cluster log collector 负责。
+1 MiB。Gateway 从 Run 的 `status.startTime`（缺失时使用 creation time）开始读取 `runtimed`
+container log，按请求的 Run UID 过滤后，再将 `tailLines` 应用于选中的 records。它将 `limitBytes`
+应用于 non-following Kubernetes source read。这样，同一共享 Runtime Pod 上后续 Run 的活动不会把
+仍保留的目标 Run 挤出全局 Pod-log tail。它仍不承诺持久或完整日志保留：繁忙 Pod 可能超过 source
+bound，持久保留仍由 cluster log collector 负责。
 
 `follow=true` 时不接受 `limitBytes`。Kubernetes 将 `PodLogOptions.LimitBytes` 作用于整个
 followed source stream；若在此使用 1 MiB snapshot bound，会让本来健康的 follow connection 静默
@@ -63,14 +65,15 @@ marker 与 duration。绝不返回 raw Kubernetes log metadata 或其它 Runs �
 
 `follow=true` 是一等的 streaming operation，类似 Kubernetes `pods/log?follow=true`，而不是
 polling convention。response 为 `application/x-ndjson`；在发送 headers 后，Gateway 会在每条
-matching record 到达时立即 flush，不会等待构建完整 response。存在 `tailLines` 时，stream 先输出
-该有界 tail，再持续输出新的 records。其它 Runs 的 records 会被丢弃，不能写出空行。caller 断开
-连接、Pod log stream 关闭或 Gateway shutdown 时 stream 结束。`follow` 不会让 Gateway 成为无界
-persistence service；request-concurrency limit 在整个 stream 生命周期内仍然生效。
+matching record 到达时立即 flush，不会等待构建完整 response。stream 从 Run start 而不是全局
+Pod tail 开始读取，因此目标 Run 仍保留的 matching records 不会被后续 Run 隐藏。其它 Runs 的
+records 会被丢弃，不能写出空行。caller 断开连接、Pod log stream 关闭或 Gateway shutdown 时 stream
+结束。`follow` 不会让 Gateway 成为无界 persistence service；request-concurrency limit 在整个
+stream 生命周期内仍然生效。
 
 endpoint 是只读的。它支持具有 assigned Runtime Pod 的 task、function 和 session Runs。没有
-assigned Pod 的 Run 返回 `409 Conflict`；不存在的 Run 或不再属于指定 Runtime 的 Run 返回
-`404 Not Found`。
+assigned Pod 的 Run，或其记录的 assigned Runtime Pod 此后已删除，均返回 `409 Conflict`；
+不存在的 Run 或不再属于指定 Runtime 的 Run 返回 `404 Not Found`。
 
 ## Streaming 实现
 
@@ -86,7 +89,7 @@ Pod-log URL。
    coreClient.Pods(run.Namespace).GetLogs(run.Status.AssignedPod, &corev1.PodLogOptions{
        Container:  "runtimed",
        Follow:     follow,
-       TailLines:  &tailLines,
+       SinceTime:  run.Status.StartTime, // unset 时使用 creation time
        // LimitBytes 只在 Follow 为 false 时设置。
    }).Stream(ctx)
    ```
@@ -157,6 +160,11 @@ client 必须获得 operator-managed、可达的 Gateway URL 及其 TLS trust ma
 Pod port-forward，否则会重新引入 caller `pods/portforward` requirement。chart 默认仍将 Gateway
 保持为 ClusterIP；是否暴露给集群外是另一个 operator deployment decision。
 
+当 HTTP 已启用（包括两种协议都启用）时，Dashboard chart 优先使用 Gateway 的 in-cluster
+HTTP Service port。仅 HTTPS 的部署中，它只读挂载已配置的 Gateway CA-bundle key，并用该
+bundle 验证 Gateway Service certificate。Dashboard 不挂载 Gateway private key，也不向其
+ServiceAccount 授予 `pods/log`。
+
 ### HTTP Protocol 和 Server 要求
 
 `ReadableStream` 是 Fetch response-body feature，不是 HTTP upgrade protocol。它可用于 HTTP/1.1
@@ -214,7 +222,7 @@ Run 之外的 UID。Gateway ServiceAccount 除现有 Run cache、TokenReview 和
 | 已认证 caller 没有已解析 Run 的 `get` 权限 | 403 |
 | route 中的 `tailLines`、`limitBytes` 或 `follow` 无效 | 400 |
 | 没有匹配的 Run / runtime | 404 |
-| 匹配的 Run 没有 assigned Pod | 409 |
+| 匹配的 Run 没有 assigned Pod，或其 assigned Runtime Pod 已不存在 | 409 |
 | Gateway log reader 未配置，或 Kubernetes log service 不可用 | 503 |
 | 达到 Gateway request concurrency limit | 429 |
 

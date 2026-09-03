@@ -398,9 +398,8 @@ controller wiring 累积不必要的冲突。
   - [x] 增加 dashboard backend，提供只读 Kubernetes API access；
   - [x] 实现可 bookmark 的 Run list/detail APIs，并遵守 namespace-aware RBAC；
   - [x] 通过 backend-controlled 路径代理 Run log tail/follow；
-  - [x] 增加 session-cookie login、默认的窄范围 public namespace/Run/Runtime/WorkflowRun-list access、仅由
-    `pods/log` 授权的 logs，以及
-    light/dark/system theme selection；
+  - [x] 增加 session-cookie login、默认的窄范围 public namespace/Run/Runtime/WorkflowRun-list access，
+    以及 light/dark/system theme selection；
   - [x] 增加只读 frontend views，覆盖 namespace selection、可 bookmark 的 Run
     lists/details/logs、Runtime pool/Pod views 以及 WorkflowRun DAG/job/step views；
   - [x] 在 `kruntimes` chart 中增加可选 Helm installation support；
@@ -409,10 +408,10 @@ controller wiring 累积不必要的冲突。
     Dashboard 和 `krt logs`：
     - [x] 增加 Gateway route、按 UID 过滤的有界 structured records，以及最小权限的
       Gateway ServiceAccount `get pods/log`；
-    - [ ] 将 Dashboard logs 迁移到 Gateway，并移除其 caller-scoped `pods/log` 路径；
+    - [x] 将 Dashboard logs 迁移到 Gateway，并移除其 caller-scoped `pods/log` 路径；
     - [ ] 将 `krt logs` 迁移到 Gateway，并移除 Runtime-Pod `pods/portforward` 与 direct
       `pods/log` 路径；
-    - [ ] 通过 E2E 证明 `get runs` 对 logs 已足够且仍然必需。
+    - [x] 通过 E2E 证明 `get runs` 对 logs 已足够且仍然必需。
     该 API 是普通 Gateway HTTP API，不是 Kubernetes aggregation API server。
 - [ ] 随着安装面逐步稳定，继续推进供应链、安全、兼容性和运维加固。
 

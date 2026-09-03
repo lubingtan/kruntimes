@@ -26,29 +26,40 @@ import (
 )
 
 type staticRequestClients struct {
-	client     client.Client
-	err        error
-	logs       string
-	logsErr    error
-	logRequest struct {
-		namespace string
-		pod       string
-		options   corev1.PodLogOptions
-	}
+	client client.Client
+	err    error
 }
 
 func (s staticRequestClients) ClientForRequest(*http.Request) (client.Client, error) {
 	return s.client, s.err
 }
 
-func (s *staticRequestClients) ReadPodLogs(_ context.Context, _ *http.Request, namespace, pod string, options corev1.PodLogOptions) (io.ReadCloser, error) {
-	s.logRequest.namespace = namespace
-	s.logRequest.pod = pod
-	s.logRequest.options = options
-	if s.logsErr != nil {
-		return nil, s.logsErr
+type staticGateway struct {
+	statusCode int
+	body       string
+	err        error
+	request    struct {
+		token, namespace, runtime, runUID string
+		tailLines                         int64
+		follow                            bool
 	}
-	return io.NopCloser(strings.NewReader(s.logs)), nil
+}
+
+func (g *staticGateway) RunLogs(_ context.Context, token, namespace, runtimeName, runUID string, tailLines int64, follow bool) (*http.Response, error) {
+	g.request.token, g.request.namespace, g.request.runtime, g.request.runUID = token, namespace, runtimeName, runUID
+	g.request.tailLines, g.request.follow = tailLines, follow
+	if g.err != nil {
+		return nil, g.err
+	}
+	statusCode := g.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	contentType := "application/json"
+	if follow {
+		contentType = "application/x-ndjson"
+	}
+	return &http.Response{StatusCode: statusCode, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(g.body))}, nil
 }
 
 func TestServerListsNamespacesAndRuns(t *testing.T) {
@@ -159,26 +170,23 @@ func TestServerPublicReadOnlyPermitsLists(t *testing.T) {
 	}
 }
 
-func TestServerUsesPublicRunLookupForCallerAuthorizedLogs(t *testing.T) {
+func TestServerRequiresRunReadAndRelaysLogsThroughGateway(t *testing.T) {
 	scheme := dashboardScheme(t)
 	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, metav1.Now())
-	publicClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()
-	callerClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	clients := &staticRequestClients{client: callerClient, logs: `{"run_uid":"logs-uid","stream":"stdout","message":"visible"}`}
+	clients := &staticRequestClients{client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(run).Build()}
 	server := dashboardTestServerWithClients(t, clients)
-	server.PublicReadClient = publicClient
+	gateway := &staticGateway{body: `{"items":[{"stream":"stdout","message":"visible"}]}`}
+	server.Gateway = gateway
 
-	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs", nil)
-	if response.Code != http.StatusOK {
-		t.Fatalf("get logs with no Run access status = %d, body = %s", response.Code, response.Body.String())
+	request := httptest.NewRequest(http.MethodGet, "/api/namespaces/team-a/runs/logs/logs", nil)
+	request.Header.Set("Authorization", "Bearer caller-token")
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "visible") {
+		t.Fatalf("get logs status = %d, body = %s", response.Code, response.Body.String())
 	}
-	var body runLogResponse
-	decodeDashboardResponse(t, response, &body)
-	if len(body.Items) != 1 || body.Items[0].Message != "visible" {
-		t.Fatalf("log entries = %#v", body.Items)
-	}
-	if clients.logRequest.pod != "runtime-pod" {
-		t.Fatalf("Pod log request = %#v", clients.logRequest)
+	if gateway.request.token != "caller-token" || gateway.request.namespace != "team-a" || gateway.request.runtime != "python" || gateway.request.runUID != "logs-uid" {
+		t.Fatalf("Gateway log request = %#v", gateway.request)
 	}
 }
 
@@ -318,68 +326,52 @@ func TestServerServesFilesystemFrontend(t *testing.T) {
 	}
 }
 
-func TestServerGetsFilteredRunLogs(t *testing.T) {
+func TestServerRelaysGatewayRunLogs(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
 	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, now)
-	clients := &staticRequestClients{logs: strings.Join([]string{
-		`{"run_uid":"other","stream":"stdout","message":"ignore"}`,
-		`{"run_uid":"logs-uid","stream":"stdout","message":"first"}`,
-		`{"run_uid":"logs-uid","stream":"stderr","message":"second"}`,
-		`{"run_uid":"logs-uid","stream":"audit","message":"finished","invocation_id":"invoke-1","duration_milliseconds":12}`,
-	}, "\n")}
-	server := dashboardTestServerWithClients(t, clients, run)
+	server := dashboardTestServer(t, run)
+	gateway := &staticGateway{body: `{"items":[{"stream":"stderr","message":"second"},{"stream":"audit","message":"finished","invocationId":"invoke-1","durationMilliseconds":12}]}`}
+	server.Gateway = gateway
 
-	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs?tail=2", nil)
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs?tail=2", http.Header{"Authorization": {"Bearer caller-token"}})
 	if response.Code != http.StatusOK {
 		t.Fatalf("get logs status = %d, body = %s", response.Code, response.Body.String())
 	}
-	var body runLogResponse
-	decodeDashboardResponse(t, response, &body)
-	if len(body.Items) != 2 || body.Items[0].Message != "second" || body.Items[1].InvocationID != "invoke-1" || body.Items[1].DurationMilliseconds != 12 {
-		t.Fatalf("log entries = %#v", body.Items)
-	}
-	if clients.logRequest.namespace != "team-a" || clients.logRequest.pod != "runtime-pod" || clients.logRequest.options.Container != "runtimed" || clients.logRequest.options.Follow || clients.logRequest.options.TailLines == nil || *clients.logRequest.options.TailLines != maxLogTailLines {
-		t.Fatalf("Pod log request = %#v", clients.logRequest)
+	if !strings.Contains(response.Body.String(), `"durationMilliseconds":12`) || gateway.request.tailLines != 2 || gateway.request.follow {
+		t.Fatalf("response/Gateway request = %s/%#v", response.Body.String(), gateway.request)
 	}
 }
 
-func TestServerExplainsPodLogAuthorizationFailure(t *testing.T) {
+func TestServerRelaysGatewayAuthorizationFailure(t *testing.T) {
 	run := dashboardRun("logs", "team-a", "python", v1alpha1.RunRunning, metav1.Now())
-	clients := &staticRequestClients{logsErr: apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "runtime-pod", errors.New("cannot get pod logs"))}
-	server := dashboardTestServerWithClients(t, clients, run)
+	server := dashboardTestServer(t, run)
+	server.Gateway = &staticGateway{statusCode: http.StatusForbidden, body: `{"error":"Kubernetes authorization denied"}`}
 
-	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs", nil)
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "get permission on pods/log") {
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/logs/logs", http.Header{"Authorization": {"Bearer caller-token"}})
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "Kubernetes authorization denied") {
 		t.Fatalf("log authorization response = %d/%s", response.Code, response.Body.String())
 	}
 }
 
-func TestServerStreamsFilteredRunLogs(t *testing.T) {
+func TestServerStreamsGatewayRunLogs(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
 	run := dashboardRun("follow", "team-a", "python", v1alpha1.RunRunning, now)
-	clients := &staticRequestClients{logs: strings.Join([]string{
-		`{"run_uid":"other","stream":"stdout","message":"ignore"}`,
-		`{"run_uid":"follow-uid","stream":"stdout","message":"followed"}`,
-	}, "\n")}
-	server := dashboardTestServerWithClients(t, clients, run)
+	server := dashboardTestServer(t, run)
+	gateway := &staticGateway{body: `{"stream":"stdout","message":"followed"}` + "\n"}
+	server.Gateway = gateway
 
-	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/follow/logs?follow=true", nil)
+	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/follow/logs?follow=true", http.Header{"Authorization": {"Bearer caller-token"}})
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/x-ndjson" {
 		t.Fatalf("follow status/content type = %d/%q", response.Code, response.Header().Get("Content-Type"))
 	}
-	var entry runLogEntry
-	if err := json.Unmarshal(response.Body.Bytes(), &entry); err != nil || entry.Message != "followed" {
-		t.Fatalf("follow entry = %q, %v", response.Body.String(), err)
-	}
-	if !clients.logRequest.options.Follow {
-		t.Fatal("follow Pod log request must set Follow")
+	if !strings.Contains(response.Body.String(), "followed") || !gateway.request.follow {
+		t.Fatalf("follow response/Gateway request = %q/%#v", response.Body.String(), gateway.request)
 	}
 }
 
 func TestServerRejectsInvalidLogRequests(t *testing.T) {
 	now := metav1.NewTime(time.Date(2026, time.August, 31, 0, 0, 0, 0, time.UTC))
 	unassigned := dashboardRun("unassigned", "team-a", "python", v1alpha1.RunPending, now)
-	unassigned.Status.AssignedPod = ""
 	server := dashboardTestServer(t, unassigned)
 	for _, path := range []string{
 		"/api/namespaces/team-a/runs/unassigned/logs?tail=0",
@@ -391,9 +383,10 @@ func TestServerRejectsInvalidLogRequests(t *testing.T) {
 			t.Fatalf("%s status = %d, want %d", path, response.Code, http.StatusBadRequest)
 		}
 	}
+	server.Gateway = nil
 	response := requestDashboard(t, server, http.MethodGet, "/api/namespaces/team-a/runs/unassigned/logs", nil)
-	if response.Code != http.StatusConflict {
-		t.Fatalf("unassigned logs status = %d, want %d", response.Code, http.StatusConflict)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "Gateway") {
+		t.Fatalf("unconfigured Gateway logs status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -409,7 +402,7 @@ func dashboardTestServerWithClients(t *testing.T, clients *staticRequestClients,
 		scheme := dashboardScheme(t)
 		clients.client = fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	}
-	return &Server{Clients: clients, Assets: fstest.MapFS{
+	return &Server{Clients: clients, Gateway: &staticGateway{body: `{"items":[]}`}, Assets: fstest.MapFS{
 		"index.html":    &fstest.MapFile{Data: []byte("<div id=\"root\"></div>")},
 		"dashboard.js":  &fstest.MapFile{Data: []byte("createRoot(document.getElementById('root'))")},
 		"dashboard.css": &fstest.MapFile{Data: []byte("body { margin: 0; }")},

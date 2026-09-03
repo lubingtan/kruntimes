@@ -1,6 +1,6 @@
 # Runtime Gateway Run Log API
 
-Status: **Proposed**
+Status: **In progress**
 
 ## Problem
 
@@ -40,11 +40,14 @@ The query shape deliberately follows the relevant Kubernetes `pods/log`
 semantics. `tailLines` is optional, defaults to 100, and must be an integer
 from 1 through 500. For a non-following request, `limitBytes` is optional,
 defaults to 1 MiB, and must be a positive integer no greater than 1 MiB. The
-Gateway applies both values to its read of the existing `runtimed` container
-log, then emits only structured records that match the requested Run UID. This
-bounds Gateway memory and the snapshot response size; it does not promise that
-a busy shared Runtime Pod retains every historical record for a Run. Durable or
-complete log retention remains the responsibility of the cluster log collector.
+Gateway starts the `runtimed` container-log read at the Run's `status.startTime`
+(falling back to its creation time), filters by the requested Run UID, and then
+applies `tailLines` to the selected records. It applies `limitBytes` to the
+non-following Kubernetes source read. This prevents later activity on a shared
+Runtime Pod from pushing a still-retained selected Run out of a global Pod-log
+tail. It still does not promise durable or complete log retention: a busy Pod
+can exceed the source bound, and durable retention remains the responsibility
+of the cluster log collector.
 
 `limitBytes` is not accepted with `follow=true`. Kubernetes applies
 `PodLogOptions.LimitBytes` to the entire followed source stream; applying the
@@ -79,17 +82,19 @@ other Runs are never returned.
 `pods/log?follow=true`, rather than a polling convention. The response is
 `application/x-ndjson`; after headers are sent, the Gateway flushes each
 matching record as it arrives and does not wait to build a complete response.
-When `tailLines` is present, the stream first emits that bounded tail and then
-continues with new records. Records for other Runs are discarded without
-writing an empty line. The stream ends when the caller disconnects, the Pod log
-stream closes, or the Gateway shuts down. `follow` does not turn the Gateway
+The stream reads from the Run start rather than a global Pod tail, so matching
+records still retained for the selected Run are not hidden by later Runs.
+Records for other Runs are discarded without writing an empty line. The stream
+ends when the caller disconnects, the Pod log stream closes, or the Gateway
+shuts down. `follow` does not turn the Gateway
 into an unbounded persistence service; request-concurrency limits continue to
 apply for the lifetime of the stream.
 
 The endpoint is read-only. It supports task, function, and session Runs when
-they have an assigned Runtime Pod. A Run without an assigned Pod returns
-`409 Conflict`; a missing Run or a Run which no longer belongs to the specified
-Runtime returns `404 Not Found`.
+they have an assigned Runtime Pod. A Run without an assigned Pod, or one whose
+recorded assigned Runtime Pod has since been deleted, returns `409 Conflict`.
+A missing Run or a Run which no longer belongs to the specified Runtime returns
+`404 Not Found`.
 
 ## Streaming Implementation
 
@@ -106,7 +111,7 @@ the Kubernetes API or proxy an arbitrary Pod-log URL.
    coreClient.Pods(run.Namespace).GetLogs(run.Status.AssignedPod, &corev1.PodLogOptions{
        Container:  "runtimed",
        Follow:     follow,
-       TailLines:  &tailLines,
+       SinceTime:  run.Status.StartTime, // or creation time if it is unset
        // LimitBytes is set only when Follow is false.
    }).Stream(ctx)
    ```
@@ -191,6 +196,12 @@ reintroduce a caller `pods/portforward` requirement. The chart continues to
 keep the Gateway ClusterIP by default; choosing an external exposure is a
 separate operator deployment decision.
 
+The Dashboard chart prefers the Gateway's in-cluster HTTP Service port when
+HTTP is enabled (including when both protocols are enabled). In HTTPS-only
+deployments it mounts the configured Gateway CA-bundle key read-only and uses
+that bundle to verify the Gateway Service certificate. The Dashboard does not
+mount a Gateway private key or grant its ServiceAccount `pods/log`.
+
 ### HTTP Protocol and Server Requirements
 
 `ReadableStream` is a Fetch response-body feature, not an HTTP upgrade
@@ -258,7 +269,7 @@ documented authorization policy.
 | Authenticated caller lacks `get` on the resolved Run | 403 |
 | Route has invalid `tailLines`, `limitBytes`, or `follow` | 400 |
 | No matching Run / runtime | 404 |
-| Matching Run has no assigned Pod | 409 |
+| Matching Run has no assigned Pod, or its assigned Runtime Pod no longer exists | 409 |
 | Gateway log reader is not configured or Kubernetes log service is unavailable | 503 |
 | Gateway request concurrency limit reached | 429 |
 

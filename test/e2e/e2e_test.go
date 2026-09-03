@@ -809,6 +809,28 @@ func TestGatewayServesAuthorizedRunLogs(t *testing.T) {
 	_ = waitForGatewayResponse(t, http.MethodPost, baseURL+"/operations:execute", token,
 		[]byte(`{"command":{"argv":["sh","-c","printf gateway-run-log-e2e"]}}`), http.StatusOK)
 	waitForSessionCommandLogs(t, run, marker)
+	requestRunCancel(t, run)
+	waitForRunPhase(t, run, 20*time.Second, v1alpha1.RunCancelled)
+
+	// A Runtime Pod's logs are shared. Emit more than the former global source
+	// tail through a later Run on the same Pod; the first Run's retained logs
+	// must remain discoverable after it has released the Runtime slot.
+	noisyRun := &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-run-log-noise-", Namespace: testNamespace},
+		Spec:       v1alpha1.RunSpec{Runtime: runtimeName, Mode: v1alpha1.RunMode{Session: &v1alpha1.RunSessionMode{}}},
+	}
+	if err := k8sClient.Create(t.Context(), noisyRun); err != nil {
+		t.Fatalf("create noisy Session Run: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), noisyRun) })
+	waitForRunPhase(t, noisyRun, 30*time.Second, v1alpha1.RunReady)
+	noisyBaseURL := gatewayEndpointURL(t, waitForGatewayPod(t), noisyRun.Status.Endpoint.URL)
+	noisyToken := sessionGatewayToken(t, noisyRun)
+	for range 55 {
+		_ = waitForGatewayResponse(t, http.MethodPost, noisyBaseURL+"/operations:execute", noisyToken,
+			[]byte(`{"command":{"argv":["sh","-c","printf gateway-run-log-noise"]}}`), http.StatusOK)
+	}
+	waitForSessionCommandLogs(t, noisyRun, "gateway-run-log-noise")
 
 	logURL := gatewayRunLogsURL(t, baseURL, run)
 	_ = waitForGatewayResponse(t, http.MethodGet, logURL, sessionGatewayTokenWithoutRunAccess(t), nil, http.StatusForbidden)

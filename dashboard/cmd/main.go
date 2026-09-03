@@ -27,12 +27,16 @@ func main() {
 		assetsDirectory string
 		certificateFile string
 		privateKeyFile  string
+		gatewayURL      string
+		gatewayCAFile   string
 		publicRead      bool
 	)
 	flag.StringVar(&address, "bind-address", ":8443", "The HTTPS address the Dashboard binds to.")
 	flag.StringVar(&assetsDirectory, "assets-dir", "/dashboard/assets", "Directory containing the Dashboard frontend assets.")
 	flag.StringVar(&certificateFile, "tls-certificate-file", "", "PEM TLS certificate file for the Dashboard. Required.")
 	flag.StringVar(&privateKeyFile, "tls-private-key-file", "", "PEM TLS private key file for the Dashboard. Required.")
+	flag.StringVar(&gatewayURL, "gateway-url", "", "In-cluster Runtime Gateway base URL for caller-authorized Run logs.")
+	flag.StringVar(&gatewayCAFile, "gateway-ca-file", "", "Optional PEM CA bundle used to verify an HTTPS Runtime Gateway.")
 	flag.BoolVar(&publicRead, "public-read", true, "Allow unauthenticated namespace and Run list requests using the Dashboard ServiceAccount.")
 	flag.Parse()
 	if certificateFile == "" || privateKeyFile == "" {
@@ -50,6 +54,14 @@ func main() {
 	}
 
 	dashboardServer := &dashboard.Server{Clients: factory, Assets: os.DirFS(assetsDirectory)}
+	if gatewayURL != "" {
+		gateway, err := dashboard.NewHTTPRunLogGateway(gatewayURL, gatewayCAFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "configure Dashboard Runtime Gateway client: %v\n", err)
+			os.Exit(1)
+		}
+		dashboardServer.Gateway = gateway
+	}
 	if publicRead {
 		publicClient, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
 		if err != nil {

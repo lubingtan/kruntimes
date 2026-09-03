@@ -139,7 +139,9 @@ dashboard:
   publicRead:
     # When enabled, the Dashboard ServiceAccount may list namespaces, Runs,
     # Runtimes, and WorkflowRuns without a user token. Details require a caller
-    # Kubernetes bearer token; logs require only pods/log permission.
+    # Kubernetes bearer token. Log access requires get permission on the Run;
+    # the Dashboard relays it through the Runtime Gateway, so callers do not
+    # need pods/log permission.
     enabled: true
   tls:
     # Certificate sources are mutually exclusive. With selfSigned enabled, the

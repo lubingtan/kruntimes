@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -171,13 +172,21 @@ func (s *Server) serveRunLogs(w http.ResponseWriter, r *http.Request, namespace,
 		return
 	}
 
-	podLogOptions := corev1.PodLogOptions{Container: "runtimed", Follow: options.follow, TailLines: &options.tailLines, Timestamps: true}
+	// The Pod log source is shared by many Runs. Asking Kubernetes for its
+	// global tail first can exclude an older selected Run even while its records
+	// are still retained. Start at this Run instead, then apply tailLines after
+	// UID filtering below.
+	logStartTime := run.CreationTimestamp
+	if run.Status.StartTime != nil {
+		logStartTime = *run.Status.StartTime
+	}
+	podLogOptions := corev1.PodLogOptions{Container: "runtimed", Follow: options.follow, SinceTime: &logStartTime, Timestamps: true}
 	if !options.follow {
 		podLogOptions.LimitBytes = &options.limitBytes
 	}
 	stream, err := s.PodLogs.ReadPodLogs(r.Context(), run.Namespace, run.Status.AssignedPod, podLogOptions)
 	if err != nil {
-		s.writeError(w, http.StatusServiceUnavailable, "read Runtime Pod logs")
+		s.writeRunLogReadError(w, err)
 		return
 	}
 	defer stream.Close()
@@ -194,6 +203,17 @@ func (s *Server) serveRunLogs(w http.ResponseWriter, r *http.Request, namespace,
 	s.writeJSON(w, http.StatusOK, struct {
 		Items []runLogEntry `json:"items"`
 	}{Items: entries})
+}
+
+// writeRunLogReadError keeps the Pod identity private while distinguishing a
+// permanently unavailable source from a transient Kubernetes log-service
+// failure. A Run can retain an assignedPod after that Runtime Pod is gone.
+func (s *Server) writeRunLogReadError(w http.ResponseWriter, err error) {
+	if apierrors.IsNotFound(err) {
+		s.writeError(w, http.StatusConflict, "assigned Runtime Pod is no longer available; Run logs cannot be read")
+		return
+	}
+	s.writeError(w, http.StatusServiceUnavailable, "read Runtime Pod logs")
 }
 
 func (s *Server) runForLogs(ctx context.Context, namespace, runtimeName, runUID string) (*v1alpha1.Run, error) {
