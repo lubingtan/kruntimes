@@ -138,6 +138,7 @@ E2E_TEST ?=
 E2E_CERT_MANAGER ?= false
 E2E_GATEWAY_BOUNDS ?= false
 E2E_GATEWAY_HELM_ARGS ?=
+E2E_TEST_TIMEOUT ?= 20m
 CERT_MANAGER_VERSION ?= v1.21.1
 E2E_CERT_MANAGER_GATEWAY_TLS_SECRET ?= kruntimes-gateway-cert-manager-tls
 .PHONY: e2e-setup
@@ -180,7 +181,7 @@ e2e-test: generate ## Run E2E tests against the kind cluster.
 	KRUNTIMES_RUNTIMED_IMAGE=$(E2E_IMG_RUNTIMED) \
 	KRUNTIMES_E2E_CERT_MANAGER=$(E2E_CERT_MANAGER) \
 	KRUNTIMES_E2E_GATEWAY_BOUNDS=$(E2E_GATEWAY_BOUNDS) \
-	go test ./test/e2e/... -v -count=1 -failfast $(if $(E2E_TEST),-run '$(E2E_TEST)')
+	go test ./test/e2e/... -v -count=1 -failfast -timeout $(E2E_TEST_TIMEOUT) $(if $(E2E_TEST),-run '$(E2E_TEST)')
 
 .PHONY: e2e
 e2e: E2E_IMAGE_TAG := $(E2E_RUN_IMAGE_TAG)

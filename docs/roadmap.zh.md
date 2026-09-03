@@ -407,7 +407,7 @@ controller wiring 累积不必要的冲突。
   - [x] 在标准 E2E environment 中部署 Dashboard。
   - [ ] 通过 [Runtime Gateway Run-log API](design/runtime-gateway-log-api.zh.md) 统一
     Dashboard 和 `krt logs`：
-    - [ ] 增加 Gateway route、按 UID 过滤的有界 structured records，以及最小权限的
+    - [x] 增加 Gateway route、按 UID 过滤的有界 structured records，以及最小权限的
       Gateway ServiceAccount `get pods/log`；
     - [ ] 将 Dashboard logs 迁移到 Gateway，并移除其 caller-scoped `pods/log` 路径；
     - [ ] 将 `krt logs` 迁移到 Gateway，并移除 Runtime-Pod `pods/portforward` 与 direct

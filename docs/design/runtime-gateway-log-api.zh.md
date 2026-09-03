@@ -31,10 +31,14 @@ GET /v1/namespaces/{namespace}/runtimes/{runtime}/runs/{runUID}/logs?tailLines={
 ## Request 和 Response Contract
 
 query shape 刻意遵循 Kubernetes `pods/log` 的相关语义。`tailLines` 可选，默认 100，必须是
-1 到 500 的整数。`limitBytes` 可选，默认 1 MiB，必须是正整数且不超过 1 MiB。Gateway 将两者
-用于读取现有的 `runtimed` container stream，然后只输出匹配所请求 Run UID 的 structured records。
-这限制了 Gateway memory 和 response size；它并不承诺繁忙的共享 Runtime Pod 仍保留某个 Run 的
-完整历史记录。持久化或完整的日志保留仍由 cluster log collector 负责。
+1 到 500 的整数。对 non-following request，`limitBytes` 可选，默认 1 MiB，必须是正整数且不超过
+1 MiB。Gateway 将两者用于读取现有的 `runtimed` container log，然后只输出匹配所请求 Run UID 的
+structured records。这限制了 Gateway memory 和 snapshot response size；它并不承诺繁忙的共享
+Runtime Pod 仍保留某个 Run 的完整历史记录。持久化或完整的日志保留仍由 cluster log collector 负责。
+
+`follow=true` 时不接受 `limitBytes`。Kubernetes 将 `PodLogOptions.LimitBytes` 作用于整个
+followed source stream；若在此使用 1 MiB snapshot bound，会让本来健康的 follow connection 静默
+结束。follow stream 改由 Gateway concurrency、client cancellation 和 2 MiB per-record limit 限制。
 
 `follow` 缺省或为 `false` 时，response 为 `application/json`：
 
@@ -45,7 +49,7 @@ query shape 刻意遵循 Kubernetes `pods/log` 的相关语义。`tailLines` 可
       "timestamp": "2026-09-02T10:00:00Z",
       "stream": "stdout",
       "message": "hello",
-      "invocationID": "optional-invocation-id",
+      "invocationId": "optional-invocation-id",
       "operation": "execute",
       "outcome": "succeeded"
     }
@@ -83,16 +87,15 @@ Pod-log URL。
        Container:  "runtimed",
        Follow:     follow,
        TailLines:  &tailLines,
-       LimitBytes: &limitBytes,
+       // LimitBytes 只在 Follow 为 false 时设置。
    }).Stream(ctx)
    ```
 
    stream 必须在 Gateway 写 HTTP headers 前成功打开；这样 Pod-log service 不可用时仍能返回普通的
    有界 JSON error。
 4. 以有界 reader 每次 decode 一条 newline-delimited record。structured record 上限为 2 MiB
-   （1 MiB raw-log request limit 加 JSON framing headroom）。更大的 line 会被丢弃，并在 Gateway
-   metrics/logs 中报告，不能分配无界 memory。无效 JSON 或 `run_uid` 不同于 selected UID 的
-   record 也会丢弃。
+   （1 MiB raw-log request limit 加 JSON framing headroom）。更大的 line 会被丢弃，且不能分配
+   无界 memory。无效 JSON 或 `run_uid` 不同于 selected UID 的 record 也会丢弃。
 5. 对 matching record，只 encode 文档定义的 safe fields 为一行 JSON，写入 response 后调用
    `http.NewResponseController(w).Flush()`。response 使用
    `Content-Type: application/x-ndjson`，不设置 content length；HTTP/1.1 使用 chunked transfer，

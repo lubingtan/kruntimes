@@ -486,7 +486,7 @@ wiring from accumulating avoidable conflicts.
   - [x] deploy the Dashboard in the standard E2E environment.
   - [ ] unify Dashboard and `krt logs` behind the [Runtime Gateway Run-log
     API](design/runtime-gateway-log-api.md):
-    - [ ] add the Gateway route, UID-filtered bounded structured records, and
+    - [x] add the Gateway route, UID-filtered bounded structured records, and
       least-privilege Gateway ServiceAccount `get pods/log` permission;
     - [ ] migrate Dashboard logs to the Gateway and remove its caller-scoped
       `pods/log` path;

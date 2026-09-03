@@ -38,13 +38,19 @@ predecessor.
 
 The query shape deliberately follows the relevant Kubernetes `pods/log`
 semantics. `tailLines` is optional, defaults to 100, and must be an integer
-from 1 through 500. `limitBytes` is optional, defaults to 1 MiB, and must be a
-positive integer no greater than 1 MiB. The Gateway applies both values to its
-read of the existing `runtimed` container stream, then emits only structured
-records that match the requested Run UID. This bounds Gateway memory and
-response size; it does not promise that a busy shared Runtime Pod retains every
-historical record for a Run. Durable or complete log retention remains the
-responsibility of the cluster log collector.
+from 1 through 500. For a non-following request, `limitBytes` is optional,
+defaults to 1 MiB, and must be a positive integer no greater than 1 MiB. The
+Gateway applies both values to its read of the existing `runtimed` container
+log, then emits only structured records that match the requested Run UID. This
+bounds Gateway memory and the snapshot response size; it does not promise that
+a busy shared Runtime Pod retains every historical record for a Run. Durable or
+complete log retention remains the responsibility of the cluster log collector.
+
+`limitBytes` is not accepted with `follow=true`. Kubernetes applies
+`PodLogOptions.LimitBytes` to the entire followed source stream; applying the
+1 MiB snapshot bound there would silently end an otherwise healthy follow
+connection. A follow stream is bounded by Gateway concurrency, client
+cancellation, and the 2 MiB per-record limit instead.
 
 With `follow` omitted or `false`, the response is `application/json`:
 
@@ -55,7 +61,7 @@ With `follow` omitted or `false`, the response is `application/json`:
       "timestamp": "2026-09-02T10:00:00Z",
       "stream": "stdout",
       "message": "hello",
-      "invocationID": "optional-invocation-id",
+      "invocationId": "optional-invocation-id",
       "operation": "execute",
       "outcome": "succeeded"
     }
@@ -101,7 +107,7 @@ the Kubernetes API or proxy an arbitrary Pod-log URL.
        Container:  "runtimed",
        Follow:     follow,
        TailLines:  &tailLines,
-       LimitBytes: &limitBytes,
+       // LimitBytes is set only when Follow is false.
    }).Stream(ctx)
    ```
 
@@ -109,10 +115,9 @@ the Kubernetes API or proxy an arbitrary Pod-log URL.
    this permits a normal bounded JSON error for an unavailable Pod-log service.
 4. Decode the Kubernetes stream one newline-delimited record at a time with a
    bounded reader. A structured record is limited to 2 MiB (the 1 MiB raw-log
-   request limit plus JSON framing headroom). A larger line is discarded and
-   reported in Gateway metrics/logs without allocating unbounded memory.
-   Invalid JSON and records whose `run_uid` differs from the selected UID are
-   discarded.
+   request limit plus JSON framing headroom). A larger line is discarded
+   without allocating unbounded memory. Invalid JSON and records whose
+   `run_uid` differs from the selected UID are discarded.
 5. For a matching record, encode only the documented safe fields as one JSON
    line, write it to the response, and call `http.NewResponseController(w).Flush()`.
    The response has `Content-Type: application/x-ndjson` and no content length;

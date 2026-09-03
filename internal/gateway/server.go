@@ -1,4 +1,4 @@
-// Package gateway implements the HTTP entrypoint for Session Runs.
+// Package gateway implements the Runtime Gateway HTTP entrypoint.
 package gateway
 
 import (
@@ -61,6 +61,7 @@ type FunctionRuntimeDialer interface {
 type Server struct {
 	Runs           client.Reader
 	Authorizer     Authorizer
+	PodLogs        PodLogReader
 	Dialer         SessionRuntimeDialer
 	FunctionDialer FunctionRuntimeDialer
 	RuntimePort    int
@@ -103,36 +104,49 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.HTTPSAddress != "" && tlsConfig == nil {
 		return errors.New("Runtime gateway HTTPS address requires TLS certificate and private key files")
 	}
-	listeners := make([]net.Listener, 0, 2)
+	type listenerConfig struct {
+		listener net.Listener
+		tls      bool
+	}
+	listeners := make([]listenerConfig, 0, 2)
 	if httpAddress != "" {
 		listener, err := net.Listen("tcp", httpAddress)
 		if err != nil {
 			return fmt.Errorf("listen for Runtime gateway HTTP: %w", err)
 		}
-		listeners = append(listeners, listener)
+		listeners = append(listeners, listenerConfig{listener: listener})
 	}
 	if s.HTTPSAddress != "" {
 		listener, err := net.Listen("tcp", s.HTTPSAddress)
 		if err != nil {
 			for _, open := range listeners {
-				_ = open.Close()
+				_ = open.listener.Close()
 			}
 			return fmt.Errorf("listen for Runtime gateway HTTPS: %w", err)
 		}
-		listeners = append(listeners, tls.NewListener(listener, tlsConfig))
+		listeners = append(listeners, listenerConfig{listener: listener, tls: true})
 	}
 	servers := make([]*http.Server, 0, len(listeners))
 	results := make(chan error, len(listeners))
-	for _, listener := range listeners {
+	for _, configuredListener := range listeners {
 		server := s.httpServer()
 		servers = append(servers, server)
-		go func(server *http.Server, listener net.Listener) {
-			err := server.Serve(listener)
+		go func(server *http.Server, configuredListener listenerConfig) {
+			var err error
+			if configuredListener.tls {
+				// ServeTLS configures ALPN and Go's HTTP/2 support. tlsConfig
+				// already holds the loaded certificate, so empty file paths do
+				// not cause it to reload certificate material.
+				server.TLSConfig = tlsConfig
+				err = server.ServeTLS(configuredListener.listener, "", "")
+			} else {
+				err = server.Serve(configuredListener.listener)
+			}
 			if errors.Is(err, http.ErrServerClosed) {
 				err = nil
 			}
 			results <- err
-		}(server, listener)
+		}(server, configuredListener)
 	}
 	select {
 	case <-ctx.Done():
@@ -196,6 +210,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if namespace, runtimeName, runUID, ok := functionRoute(r.URL.Path); ok {
 		s.serveFunctionInvoke(w, r, namespace, runtimeName, runUID)
+		return
+	}
+	if namespace, runtimeName, runUID, ok := runLogRoute(r.URL.Path); ok {
+		s.serveRunLogs(w, r, namespace, runtimeName, runUID)
 		return
 	}
 	namespace, runtimeName, runUID, suffix, ok := sessionRoute(r.URL.Path)

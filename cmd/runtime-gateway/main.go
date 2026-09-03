@@ -93,12 +93,14 @@ func main() {
 		ctrl.Log.WithName("setup").Error(err, "unable to register readiness check")
 		os.Exit(1)
 	}
+	kubernetesClient := kubernetes.NewForConfigOrDie(config)
 	if err := manager.Add(&gateway.Server{
 		Runs: manager.GetCache(),
 		Authorizer: gateway.NewCachingAuthorizer(
-			gateway.KubernetesAuthorizer{Client: kubernetes.NewForConfigOrDie(config)},
+			gateway.KubernetesAuthorizer{Client: kubernetesClient},
 			gateway.AuthorizationCacheOptions{Capacity: authorizationCacheCapacity, TTL: authorizationCacheTTL},
 		),
+		PodLogs:               gateway.KubernetesPodLogReader{Client: kubernetesClient.CoreV1()},
 		Dialer:                gateway.GRPCDialer{},
 		FunctionDialer:        gateway.GRPCDialer{},
 		HTTPAddress:           httpAddr,

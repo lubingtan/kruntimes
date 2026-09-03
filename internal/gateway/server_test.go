@@ -2,7 +2,12 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -61,6 +67,106 @@ func TestGatewayRejectsUnauthorizedRequestBeforeDialingRuntime(t *testing.T) {
 	}
 	if dialer.address != "" {
 		t.Fatalf("dialed Runtime Service %q for denied request", dialer.address)
+	}
+}
+
+func TestGatewayReturnsUIDFilteredRunLogs(t *testing.T) {
+	run := completedTaskRun()
+	reader := &fakePodLogReader{read: func(_ context.Context, namespace, pod string, options corev1.PodLogOptions) (io.ReadCloser, error) {
+		if namespace != run.Namespace || pod != run.Status.AssignedPod {
+			t.Fatalf("log target = %s/%s, want %s/%s", namespace, pod, run.Namespace, run.Status.AssignedPod)
+		}
+		if options.Container != "runtimed" || options.Follow || options.TailLines == nil || *options.TailLines != defaultLogTailLines || options.LimitBytes == nil || *options.LimitBytes != defaultLogBytes || !options.Timestamps {
+			t.Fatalf("PodLogOptions = %#v", options)
+		}
+		return io.NopCloser(strings.NewReader(strings.Join([]string{
+			`2026-09-02T10:00:00Z {"run_uid":"other-run","stream":"stdout","message":"other"}`,
+			`2026-09-02T10:00:01Z {"run_uid":"task-uid","stream":"stdout","message":"hello","operation":"execute"}`,
+			`not structured`,
+			`2026-09-02T10:00:02Z {"run_uid":"task-uid","stream":"stderr","message":"warning","exit_code":2}`,
+		}, "\n"))), nil
+	}}
+	server := testServer(t, run, allowAuthorizer{}, &fakeDialer{client: &fakeSessionRuntimeClient{}})
+	server.PodLogs = reader
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/runs/task-uid/logs", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("Content-Type = %q", response.Header().Get("Content-Type"))
+	}
+	if got := response.Body.String(); !strings.Contains(got, `"timestamp":"2026-09-02T10:00:01Z"`) || !strings.Contains(got, `"message":"hello"`) || !strings.Contains(got, `"exitCode":2`) || strings.Contains(got, "other-run") || strings.Contains(got, "not structured") {
+		t.Fatalf("response = %s", got)
+	}
+	if reader.calls != 1 {
+		t.Fatalf("Pod log reads = %d, want 1", reader.calls)
+	}
+}
+
+func TestGatewayStreamsRunLogs(t *testing.T) {
+	run := completedTaskRun()
+	reader := &fakePodLogReader{read: func(_ context.Context, _ string, _ string, options corev1.PodLogOptions) (io.ReadCloser, error) {
+		if !options.Follow || options.LimitBytes != nil || options.TailLines == nil || *options.TailLines != 2 || !options.Timestamps {
+			t.Fatalf("PodLogOptions = %#v", options)
+		}
+		return io.NopCloser(strings.NewReader(strings.Join([]string{
+			`2026-09-02T10:00:00Z {"run_uid":"task-uid","stream":"stdout","message":"first"}`,
+			`2026-09-02T10:00:01Z {"run_uid":"other-run","stream":"stdout","message":"other"}`,
+			`2026-09-02T10:00:02Z {"run_uid":"task-uid","stream":"stderr","message":"second"}`,
+		}, "\n"))), nil
+	}}
+	server := testServer(t, run, allowAuthorizer{}, &fakeDialer{client: &fakeSessionRuntimeClient{}})
+	server.PodLogs = reader
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/runs/task-uid/logs?tailLines=2&follow=true", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "application/x-ndjson" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if !response.Flushed {
+		t.Fatal("streaming response was not flushed")
+	}
+	if got, want := response.Body.String(), "{\"timestamp\":\"2026-09-02T10:00:00Z\",\"stream\":\"stdout\",\"message\":\"first\"}\n{\"timestamp\":\"2026-09-02T10:00:02Z\",\"stream\":\"stderr\",\"message\":\"second\"}\n"; got != want {
+		t.Fatalf("stream = %q, want %q", got, want)
+	}
+}
+
+func TestGatewayRejectsUnauthorizedRunLogRequestBeforeReadingPodLogs(t *testing.T) {
+	reader := &fakePodLogReader{}
+	server := testServer(t, completedTaskRun(), denyAuthorizer{}, &fakeDialer{client: &fakeSessionRuntimeClient{}})
+	server.PodLogs = reader
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/runs/task-uid/logs", nil))
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if reader.calls != 0 {
+		t.Fatalf("Pod log reads = %d, want 0", reader.calls)
+	}
+}
+
+func TestGatewayRejectsInvalidRunLogQueryBeforeReadingPodLogs(t *testing.T) {
+	reader := &fakePodLogReader{}
+	server := testServer(t, completedTaskRun(), allowAuthorizer{}, &fakeDialer{client: &fakeSessionRuntimeClient{}})
+	server.PodLogs = reader
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/namespaces/default/runtimes/bash/runs/task-uid/logs?follow=true&limitBytes=1024", nil))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if reader.calls != 0 {
+		t.Fatalf("Pod log reads = %d, want 0", reader.calls)
 	}
 }
 
@@ -293,6 +399,76 @@ func TestGatewayTLSConfigRejectsInvalidCertificate(t *testing.T) {
 	}
 }
 
+func TestGatewayHTTPSNegotiatesHTTP2(t *testing.T) {
+	certificateFile, privateKeyFile := testTLSFiles(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	server := &Server{HTTPSAddress: address, TLSCertificateFile: certificateFile, TLSPrivateKeyFile: privateKeyFile}
+	result := make(chan error, 1)
+	go func() { result <- server.Start(ctx) }()
+
+	client := &http.Client{Transport: &http.Transport{ForceAttemptHTTP2: true, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}} //nolint:gosec // Test-only self-signed certificate.
+	var response *http.Response
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		response, err = client.Get("https://" + address + "/healthz")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("get Gateway health endpoint: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if response.ProtoMajor != 2 {
+		_ = response.Body.Close()
+		cancel()
+		t.Fatalf("HTTP protocol = %s, want HTTP/2", response.Proto)
+	}
+	if err := response.Body.Close(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Gateway server: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Gateway server did not stop")
+	}
+}
+
+func testTLSFiles(t *testing.T) (string, string) {
+	t.Helper()
+	seed := httptest.NewTLSServer(http.NotFoundHandler())
+	certificate := seed.TLS.Certificates[0]
+	seed.Close()
+	privateKey, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	certificateFile := directory + "/tls.crt"
+	privateKeyFile := directory + "/tls.key"
+	if err := os.WriteFile(certificateFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privateKeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKey}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certificateFile, privateKeyFile
+}
+
 func testServer(t *testing.T, run *v1alpha1.Run, authorizer Authorizer, dialer SessionRuntimeDialer) *Server {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -317,6 +493,14 @@ func readySessionRun() *v1alpha1.Run {
 	}
 }
 
+func completedTaskRun() *v1alpha1.Run {
+	return &v1alpha1.Run{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: types.UID("task-uid")},
+		Spec:       v1alpha1.RunSpec{Runtime: "bash", Mode: v1alpha1.RunMode{Task: &v1alpha1.RunTaskMode{}}},
+		Status:     v1alpha1.RunStatus{Phase: v1alpha1.RunSucceeded, AssignedPod: "runtime-pod", AssignedPodUID: "pod-uid"},
+	}
+}
+
 type allowAuthorizer struct{}
 
 func (allowAuthorizer) Authorize(context.Context, *http.Request, *v1alpha1.Run) error { return nil }
@@ -331,6 +515,19 @@ type fakeDialer struct {
 	client         pb.SessionRuntimeClient
 	functionClient pb.FunctionRuntimeClient
 	address        string
+}
+
+type fakePodLogReader struct {
+	read  func(context.Context, string, string, corev1.PodLogOptions) (io.ReadCloser, error)
+	calls int
+}
+
+func (r *fakePodLogReader) ReadPodLogs(ctx context.Context, namespace, pod string, options corev1.PodLogOptions) (io.ReadCloser, error) {
+	r.calls++
+	if r.read == nil {
+		return nil, errors.New("unexpected Pod log read")
+	}
+	return r.read(ctx, namespace, pod, options)
 }
 
 func (d *fakeDialer) DialFunction(_ context.Context, address string) (pb.FunctionRuntimeClient, io.Closer, error) {
