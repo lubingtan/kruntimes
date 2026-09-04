@@ -464,7 +464,7 @@ wiring from accumulating avoidable conflicts.
   - [x] add E2E coverage for inline `WorkflowRun`, reusable Workflow calls, Action
     calls, validation failures, output propagation, and controller restart
     recovery.
-- [ ] Dashboard: design and build a read-only web dashboard, similar in spirit
+- [x] Dashboard: design and build a read-only web dashboard, similar in spirit
   to Tekton Dashboard, that can browse Runs by namespace and inspect status and
   logs.
   Initial implementation TODO:
@@ -483,7 +483,7 @@ wiring from accumulating avoidable conflicts.
     views;
   - [x] add optional Helm installation support in the `kruntimes` chart;
   - [x] deploy the Dashboard in the standard E2E environment.
-  - [ ] unify Dashboard and `krt logs` behind the [Runtime Gateway Run-log
+  - [x] unify Dashboard and `krt logs` behind the [Runtime Gateway Run-log
     API](design/runtime-gateway-log-api.md):
     - [x] add the Gateway route, UID-filtered bounded structured records, and
       least-privilege Gateway ServiceAccount `get pods/log` permission;

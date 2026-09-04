@@ -388,7 +388,7 @@ controller wiring 累积不必要的冲突。
       invalid input bindings 和 invalid Action output expressions；
   - [x] 增加 E2E 覆盖 inline `WorkflowRun`、reusable Workflow calls、Action calls、
     validation failures、output propagation 和 controller restart recovery。
-- [ ] Dashboard：设计并实现只读 web dashboard，类似 Tekton Dashboard，可以按
+- [x] Dashboard：设计并实现只读 web dashboard，类似 Tekton Dashboard，可以按
   namespace 查看 Runs，并检查状态和日志。
   初始实现 TODO：
   - [x] 增加只读 [Dashboard 设计文档](design/dashboard/)，覆盖 scope、architecture、
@@ -404,7 +404,7 @@ controller wiring 累积不必要的冲突。
     lists/details/logs、Runtime pool/Pod views 以及 WorkflowRun DAG/job/step views；
   - [x] 在 `kruntimes` chart 中增加可选 Helm installation support；
   - [x] 在标准 E2E environment 中部署 Dashboard。
-  - [ ] 通过 [Runtime Gateway Run-log API](design/runtime-gateway-log-api.zh.md) 统一
+  - [x] 通过 [Runtime Gateway Run-log API](design/runtime-gateway-log-api.zh.md) 统一
     Dashboard 和 `krt logs`：
     - [x] 增加 Gateway route、按 UID 过滤的有界 structured records，以及最小权限的
       Gateway ServiceAccount `get pods/log`；
