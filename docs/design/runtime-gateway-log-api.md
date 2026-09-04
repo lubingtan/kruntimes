@@ -1,16 +1,16 @@
 # Runtime Gateway Run Log API
 
-Status: **In progress**
+Status: **Implemented**
 
 ## Problem
 
 Run output is written as structured records to the owner Runtime Pod's
-`runtimed` container log. The current Dashboard implementation reads that Pod
-log with the caller's Kubernetes credential, while `krt logs` normally
-port-forwards to the Runtime Pod and falls back to the same Pod-log
-subresource. Consequently, a user who may read a Run cannot necessarily read
-its logs: the Dashboard additionally requires `get pods/log`, and `krt logs`
-also needs Pod discovery and `create pods/portforward` on its primary path.
+`runtimed` container log. Before this API, Dashboard read that Pod log with
+the caller's Kubernetes credential, while `krt logs` port-forwarded to the
+Runtime Pod and could fall back to the Pod-log subresource. Consequently, a
+user who could read a Run could not necessarily read its logs: Dashboard
+required `get pods/log`, while `krt logs` also needed Pod discovery and
+`create pods/portforward`.
 
 Those are Kubernetes implementation permissions, not the user-facing
 capability that kruntimes intends to offer: *read the logs of this Run*.
@@ -190,11 +190,32 @@ The Gateway base URL is deployment configuration, not a Pod address. The
 Dashboard backend uses the in-cluster Gateway Service. An in-cluster `krt`
 client may use that Service DNS name. An external `krt` client must be given an
 operator-managed reachable Gateway URL and its TLS trust material (for example
-`--gateway-url` plus the normal system trust store or a CA file). It must not
-silently create a Runtime-Pod or Gateway Pod port-forward, since that would
-reintroduce a caller `pods/portforward` requirement. The chart continues to
-keep the Gateway ClusterIP by default; choosing an external exposure is a
+`--gateway-url` plus the normal system trust store or `--gateway-ca-file`). It
+does not silently create a Runtime-Pod or Gateway Pod port-forward, since that
+would reintroduce a caller `pods/portforward` requirement. The chart continues
+to keep the Gateway ClusterIP by default; choosing an external exposure is a
 separate operator deployment decision.
+
+`krt logs` uses the kubeconfig-selected bearer token or exec-token credential
+for both its initial `get runs` request and the Gateway request:
+
+```sh
+krt logs my-run -n team-a --gateway-url https://gateway.example \
+  --gateway-ca-file ./gateway-ca.crt --tail 100 --follow
+```
+
+It uses an independent Gateway TLS transport. It trusts the normal system
+store or `--gateway-ca-file`; `--gateway-insecure-skip-tls-verify` is an
+explicit development-only escape hatch. The transport preserves a kubeconfig
+client certificate when present. To authorize that certificate, an operator
+sets `gateway.tls.clientCASecretName` to the CA Secret that signs Kubernetes
+user certificates. The HTTPS Gateway verifies mTLS and submits the verified
+certificate CN as the Kubernetes username and O values as groups in its
+SubjectAccessReview. Without that Gateway client-CA configuration, bearer and
+exec tokens remain the supported authentication methods. `--tail` defaults
+to 100 and accepts 1 through 500. The CLI decodes the documented JSON/NDJSON
+records and writes only `stdout` and `stderr` records to their corresponding
+terminal streams.
 
 The Dashboard chart prefers the Gateway's in-cluster HTTP Service port when
 HTTP is enabled (including when both protocols are enabled). In HTTPS-only
@@ -278,19 +299,18 @@ unselected Pod name, container name, token, or Kubernetes authorization detail.
 
 ## Client Migration and Delivery
 
-The existing Dashboard endpoint remains an internal Dashboard API. Its backend
-will call this Gateway endpoint with the login token after the Gateway endpoint
-and chart RBAC are available. `krt logs` will call the same endpoint instead of
-port-forwarding Runtime Pods or falling back to direct `pods/log`. Neither
-client may silently retain the old privileged path after migration.
+The Dashboard endpoint remains an internal Dashboard API. Its backend calls
+this Gateway endpoint with the login token. `krt logs` calls the same endpoint
+instead of port-forwarding Runtime Pods or falling back to direct `pods/log`.
+Neither client retains the old privileged path.
 
-Because the Gateway chart component is opt-in, Dashboard and `krt logs` must
-return a clear configuration error when this API is unavailable; they must not
+Because the Gateway chart component is opt-in, Dashboard and `krt logs`
+return a clear configuration error when this API is unavailable; they do not
 fall back to direct Pod access. Operators enabling Dashboard log access under
-the new model must also enable and make the Gateway reachable. The standard
-E2E installation enables both components.
+this model must also enable and make the Gateway reachable. The standard E2E
+installation enables both components.
 
-Delivery is split into independently reviewable commits:
+The implementation was split into independently reviewable commits:
 
 1. Gateway route, structured-record filtering and bounds, ServiceAccount
    `pods/log` permission, HTTP/1.1 plus HTTPS/HTTP/2 streaming setup,

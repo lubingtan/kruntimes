@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/x509"
 	"net/http"
 	"strings"
 	"time"
@@ -18,8 +19,9 @@ import (
 
 const defaultAuthorizationTimeout = 2 * time.Second
 
-// KubernetesAuthorizer authenticates a bearer token and authorizes get access
-// to the target Run with the authenticated Kubernetes user identity.
+// KubernetesAuthorizer authenticates a bearer token or a TLS client
+// certificate verified by the Gateway, then authorizes get access to the
+// target Run with the authenticated Kubernetes user identity.
 type KubernetesAuthorizer struct {
 	Client  kubernetes.Interface
 	Timeout time.Duration
@@ -29,22 +31,12 @@ func (a KubernetesAuthorizer) Authorize(ctx context.Context, request *http.Reque
 	if a.Client == nil {
 		return status.Error(codes.FailedPrecondition, "Kubernetes authorization client is not configured")
 	}
-	token, ok := bearerToken(request.Header.Get("Authorization"))
-	if !ok {
-		return status.Error(codes.Unauthenticated, "bearer token is required")
-	}
 	ctx, cancel := context.WithTimeout(ctx, a.timeout())
 	defer cancel()
-	tokenReview, err := a.Client.AuthenticationV1().TokenReviews().Create(ctx, &authenticationv1.TokenReview{
-		Spec: authenticationv1.TokenReviewSpec{Token: token},
-	}, metav1CreateOptions)
+	user, err := authenticatedGatewayUser(ctx, a.Client, request)
 	if err != nil {
-		return status.Errorf(codes.Unavailable, "authenticate bearer token: %v", err)
+		return err
 	}
-	if !tokenReview.Status.Authenticated {
-		return status.Error(codes.Unauthenticated, "bearer token is not authenticated")
-	}
-	user := tokenReview.Status.User
 	subjectAccessReview, err := a.Client.AuthorizationV1().SubjectAccessReviews().Create(ctx, &authorizationv1.SubjectAccessReview{
 		Spec: authorizationv1.SubjectAccessReviewSpec{
 			User:   user.Username,
@@ -67,6 +59,35 @@ func (a KubernetesAuthorizer) Authorize(ctx context.Context, request *http.Reque
 		return status.Error(codes.PermissionDenied, "not authorized to access Session Run")
 	}
 	return nil
+}
+
+func authenticatedGatewayUser(ctx context.Context, kubernetesClient kubernetes.Interface, request *http.Request) (authenticationv1.UserInfo, error) {
+	if token, ok := bearerToken(request.Header.Get("Authorization")); ok {
+		tokenReview, err := kubernetesClient.AuthenticationV1().TokenReviews().Create(ctx, &authenticationv1.TokenReview{
+			Spec: authenticationv1.TokenReviewSpec{Token: token},
+		}, metav1CreateOptions)
+		if err != nil {
+			return authenticationv1.UserInfo{}, status.Errorf(codes.Unavailable, "authenticate bearer token: %v", err)
+		}
+		if !tokenReview.Status.Authenticated {
+			return authenticationv1.UserInfo{}, status.Error(codes.Unauthenticated, "bearer token is not authenticated")
+		}
+		return tokenReview.Status.User, nil
+	}
+	if certificate := verifiedClientCertificate(request); certificate != nil {
+		if certificate.Subject.CommonName == "" {
+			return authenticationv1.UserInfo{}, status.Error(codes.Unauthenticated, "verified client certificate has no Kubernetes username")
+		}
+		return authenticationv1.UserInfo{Username: certificate.Subject.CommonName, Groups: certificate.Subject.Organization}, nil
+	}
+	return authenticationv1.UserInfo{}, status.Error(codes.Unauthenticated, "bearer token is required unless a verified client certificate is presented")
+}
+
+func verifiedClientCertificate(request *http.Request) *x509.Certificate {
+	if request == nil || request.TLS == nil || len(request.TLS.PeerCertificates) == 0 || len(request.TLS.VerifiedChains) == 0 {
+		return nil
+	}
+	return request.TLS.PeerCertificates[0]
 }
 
 func authorizationExtra(extra map[string]authenticationv1.ExtraValue) map[string]authorizationv1.ExtraValue {

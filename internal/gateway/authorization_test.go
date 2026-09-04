@@ -1,6 +1,9 @@
 package gateway
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -60,5 +63,29 @@ func TestKubernetesAuthorizerRejectsMissingBearerToken(t *testing.T) {
 	)
 	if err == nil || status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("error = %v, want Unauthenticated", err)
+	}
+}
+
+func TestKubernetesAuthorizerAuthorizesVerifiedClientCertificate(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	clientset.PrependReactor("create", "tokenreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		t.Fatal("client-certificate request must not create a TokenReview")
+		return true, nil, nil
+	})
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		if review.Spec.User != "alice" || len(review.Spec.Groups) != 1 || review.Spec.Groups[0] != "team-a" {
+			t.Fatalf("SubjectAccessReview identity = %#v", review.Spec)
+		}
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+	certificate := &x509.Certificate{Raw: []byte("verified-client-certificate"), Subject: pkix.Name{CommonName: "alice", Organization: []string{"team-a"}}}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{certificate}, VerifiedChains: [][]*x509.Certificate{{certificate}}}
+	run := &v1alpha1.Run{ObjectMeta: metav1.ObjectMeta{Name: "diagnose", Namespace: "workloads"}}
+
+	if err := (KubernetesAuthorizer{Client: clientset}).Authorize(t.Context(), request, run); err != nil {
+		t.Fatalf("authorize verified client certificate: %v", err)
 	}
 }

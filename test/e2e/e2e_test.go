@@ -839,6 +839,27 @@ func TestGatewayServesAuthorizedRunLogs(t *testing.T) {
 	if !hasGatewayRunLogEntry(entries, "stdout", marker) || !hasGatewayRunLogEntry(entries, "audit", "session operation completed") {
 		t.Fatalf("snapshot Run logs = %#v, want stdout and audit records", entries)
 	}
+	// The CLI uses the same external Gateway contract. Its token has get only on
+	// this Run: it deliberately has neither Pod discovery, pods/log, nor
+	// pods/portforward permission.
+	cliGatewayURL, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse Gateway URL for krt logs: %v", err)
+	}
+	cliGatewayURL.Path = ""
+	cliGatewayURL.RawPath = ""
+	cliGatewayURL.RawQuery = ""
+	cmd := krt.NewRootCmd()
+	var cliStdout, cliStderr bytes.Buffer
+	cmd.SetOut(&cliStdout)
+	cmd.SetErr(&cliStderr)
+	cmd.SetArgs([]string{"logs", run.Name, "--namespace", testNamespace, "--token", token, "--gateway-url", cliGatewayURL.String(), "--tail", "100"})
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("krt logs through Gateway: %v\\nstderr: %s", err, cliStderr.String())
+	}
+	if !strings.Contains(cliStdout.String(), marker) {
+		t.Fatalf("krt logs stdout = %q, want %q", cliStdout.String(), marker)
+	}
 
 	followEntries := followGatewayRunLogs(t, logURL+"?tailLines=100&follow=true", token, marker)
 	if !hasGatewayRunLogEntry(followEntries, "stdout", marker) {

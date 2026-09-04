@@ -86,9 +86,14 @@ Cleanup is designed to be idempotent and resume after transient failures.
 
 ## krt Cannot Read Logs or Artifacts
 
-Check RBAC for `pods/portforward` in the Runtime namespace. Logs and artifact
-access may require port-forward permission to the assigned Runtime Pod or
-runtime maintainer service.
+For logs, verify that `krt logs` has a reachable `--gateway-url`, the
+correct `--gateway-ca-file` when needed, and a credential with `get` on the
+target Run. A client-certificate kubeconfig additionally requires the operator
+to configure the Gateway client CA. It does not need `pods/log` or
+`pods/portforward`.
+
+Artifact downloads still use a Runtime Pod port-forward. Check `get pods` and
+`create pods/portforward` in the Runtime namespace for those requests.
 
 ## Helm Install Fails
 

@@ -67,6 +67,29 @@ dashboard:
 exclusive choices. The Service is always `ClusterIP`; configure ingress or
 other external exposure separately.
 
+## Gateway client-certificate authentication
+
+The Runtime Gateway always accepts Kubernetes bearer tokens. To additionally
+allow `krt logs` to use a kubeconfig client certificate, enable Gateway HTTPS
+and provide the Secret key containing the CA that signs Kubernetes user
+certificates:
+
+```yaml
+gateway:
+  enabled: true
+  protocols:
+    - https
+  tls:
+    clientCASecretName: kubernetes-user-client-ca
+    clientCAKey: ca.crt
+```
+
+The Gateway requests a client certificate but does not require one, so bearer
+tokens continue to work. A presented certificate must verify against this CA;
+its X.509 CN becomes the Kubernetes username and its O values become groups
+for the exact-Run SubjectAccessReview. This is distinct from the Gateway server
+certificate and should normally be a separately managed Secret.
+
 ### Public resource lists
 
 When the Dashboard is enabled, namespace, Run, Runtime, and WorkflowRun
@@ -82,9 +105,9 @@ dashboard:
 
 The chart grants the Dashboard ServiceAccount only `get`/`list` on
 `namespaces`, `runs`, `runtimes`, and `workflowruns`. Their details require the
-caller's bearer token. Log requests use the public-read client only to resolve
-the Run's assigned Pod; the caller token needs `get` on `pods/log`, but does
-not need `runs` permission merely to read logs.
+caller's bearer token. Log requests are authorized by the Runtime Gateway
+against the exact Run, so the caller needs `get` on that `runs` resource,
+not `pods/log`.
 
 ## Runtime Capacity
 

@@ -172,11 +172,23 @@ finalizer 清理，直到依赖项恢复。
 
 ### krt 无法读取日志或 artifacts
 
-`krt logs` 和 artifact 下载使用 Kubernetes port-forwarding 到 Runtime Pod。
-用户需要权限来获取 Runs 和 Pods，并在 namespace 中创建 `pods/portforward`。
+`krt logs` 调用 operator-managed Runtime Gateway。为它提供可达的 Gateway URL；对于私有
+HTTPS certificate，还需要相应的 CA bundle：
 
 ```bash
-kubectl auth can-i get runs -n <namespace>
-kubectl auth can-i get pods -n <namespace>
-kubectl auth can-i create pods/portforward -n <namespace>
+krt logs <run> -n <namespace> --gateway-url https://gateway.example \
+  --gateway-ca-file ./gateway-ca.crt
 ```
+
+kubeconfig 选择的 credential 必须对目标 Run 有 `get` 权限。仅读取日志时不需要
+`pods/log`、`pods` 或 `pods/portforward`。bearer-token 和 exec-token credential 通过
+TokenReview 工作。client-certificate kubeconfig 在 operator 将签发 Kubernetes user certificate 的
+CA 配置为 `gateway.tls.clientCASecretName` 时也可使用；Gateway 验证 mTLS，并用 certificate
+CN/O 创建 SubjectAccessReview。
+
+对于明确受信任、但 HTTPS certificate 不可验证的开发 endpoint，可增加
+`--gateway-insecure-skip-tls-verify`。它会关闭 server identity verification，不应用于常规
+production access。
+
+artifact 下载仍使用 Runtime Pod port-forward，需要独立的 `get pods` 与
+`create pods/portforward` 权限。

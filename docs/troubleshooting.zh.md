@@ -88,8 +88,13 @@ kubectl logs deploy/<runtime-maintainer-deploy>
 
 ## krt 无法读取日志或 Artifacts
 
-检查 Runtime namespace 中 `pods/portforward` 的 RBAC 权限。日志和 artifact 访问可能
-需要对分配的 Runtime Pod 或 runtime maintainer service 的 port-forward 权限。
+对于 logs，确认 `krt logs` 具有可达的 `--gateway-url`、必要时正确的
+`--gateway-ca-file`，以及对目标 Run 有 `get` 权限的 credential。client-certificate
+kubeconfig 还要求 operator 配置 Gateway client CA。它不需要 `pods/log` 或
+`pods/portforward`。
+
+artifact 下载仍使用 Runtime Pod port-forward。对此类请求检查 Runtime namespace 中的
+`get pods` 与 `create pods/portforward`。
 
 ## Helm 安装失败
 

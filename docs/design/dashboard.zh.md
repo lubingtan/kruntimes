@@ -102,35 +102,23 @@ Dashboard ServiceAccount 只能 get/list Namespaces、Runs、Runtimes 和 Workfl
 
 Dashboard backend 不能把 Runtime Pods 直接暴露给浏览器。
 
-v0.x 预期路径是：
+v0.x 已实现的路径是：
 
 1. 用户打开某个 Run 的 logs。
-2. 极窄的 public-read client 只读取 Run 来定位其 assigned Runtime Pod。
-3. 用户 token 授权 Pod `log` subresource 请求。
-4. Backend stream 或返回请求的 log tail。
-
-具体 transport 可以演进。它可以使用 Kubernetes port-forwarding、internal service 或
-专用 log proxy，但边界应该保持不变：用户需要有访问 runtime logs 的权限，而极窄的
-ServiceAccount 只负责 Run 到 Pod 的定位。
+2. Dashboard backend 使用 caller token 读取并授权这个 exact Run。
+3. backend 只将该 token 转发给 Runtime Gateway Run-log API。
+4. Gateway 定位 assigned Runtime Pod，并用自身极窄的 `pods/log` permission 读取其
+   `runtimed` log。
+5. backend stream 或返回过滤后的 log records。
 
 结构化 runtimed logs 应继续以 Run UID 作为 key，这样即使 Runtime Pods 同时处理多个 Runs，
 dashboard 也能展示正确的 logs。
 
-v0.x 中，backend 用 public-read client 定位 assigned Pod，再通过 request-scoped caller client
-读取该 Pod 的 runtimed container log subresource，并只返回 run_uid 与请求 immutable Run UID
-匹配的 structured records。它不创建 browser-visible port-forward，也不把 Runtime Pods 直接暴露给
-browser。因此 caller 需要 Pod `log` subresource 的 `get`，但仅读取日志时不需要 Run 或 Pod 的
-读取权限。artifact references 作为 Run metadata 展示；artifact download 不属于第一阶段 Dashboard。
-
-### 计划项：统一的 Run Log Authorization
-
-当前的 `pods/log` authorization 是 Kubernetes 实现层权限，而不是期望暴露给用户的 Run-log
-capability；它也和 `krt logs` 不一致，后者当前的主路径需要 Run access 与 Pod port-forward
-access。后续工作将把共享 Runtime Gateway 作为 Dashboard 和 `krt` 唯一的 Run-log API。完整的
-endpoint、authorization、bounds、error 和 migration contract 见 [Runtime Gateway Run Log API
-设计](runtime-gateway-log-api.zh.md)。
-
-在完成该迁移前，Dashboard log access 仍要求 caller 具有 `get pods/log` permission。
+Dashboard 使用 in-cluster Gateway Service，不创建 browser-visible port-forward，也不把 Runtime
+Pods 直接暴露给 browser。caller 需要这个 exact Run 的 `get`，而不是 `get pods/log`；
+Gateway ServiceAccount 执行极窄的 Pod-log read。artifact references 作为 Run metadata 展示；
+artifact download 不属于第一阶段 Dashboard。完整的 endpoint、authorization、bounds、error 和
+migration contract 见 [Runtime Gateway Run Log API 设计](runtime-gateway-log-api.zh.md)。
 
 ## 安全模型
 
@@ -142,11 +130,11 @@ dashboard 默认必须是只读的。
   `HttpOnly`、`Secure`、`SameSite=Strict` session cookie 返回 token，时限八小时。JavaScript
   永远不读取或写入 token，且 token 不会写入 localStorage、sessionStorage 或 logs；
 - backend 使用该 bearer token、in-cluster API server 地址和 cluster CA 创建 request-scoped
-  Kubernetes client，并用它访问受保护页面和 Pod logs；
+  Kubernetes client，并用它访问受保护页面和 Gateway logs；
 - chart 默认以权限极窄的 Dashboard ServiceAccount 提供免 token 的 namespace、Run、Runtime 和
   WorkflowRun summary。它只有这些资源的 `get`/`list` 权限，并可以显式禁用；
-- Kubernetes API authorization 决定受保护页面的访问。没有 Run 权限的 token 只要具有
-  `pods/log` 的 `get`，仍可读取 logs：ServiceAccount 会在不暴露 Run detail 的前提下定位 Pod；
+- Kubernetes API authorization 决定受保护页面的访问。token 需要这个 exact Run 的 `get`，
+  才能通过 Gateway 读取其 logs；
 - v0.x 只将 artifact references 作为 Run metadata 展示，不下载或代理 artifact content。
   将来的 artifact-download 设计必须单独定义 authorization 与 external-store 边界；
 - 默认隐藏 secrets、service account tokens、environment variables 和 raw pod specs，

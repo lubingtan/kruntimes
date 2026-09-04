@@ -79,6 +79,9 @@ spec:
             {{- if has "https" .Values.gateway.protocols }}
             - --tls-certificate-file=/var/run/kruntimes/gateway-tls/{{ .Values.gateway.tls.certificateKey }}
             - --tls-private-key-file=/var/run/kruntimes/gateway-tls/{{ .Values.gateway.tls.privateKeyKey }}
+            {{- if .Values.gateway.tls.clientCASecretName }}
+            - --tls-client-ca-file=/var/run/kruntimes/gateway-client-ca/{{ .Values.gateway.tls.clientCAKey }}
+            {{- end }}
             {{- end }}
           ports:
             {{- if has "http" .Values.gateway.protocols }}
@@ -116,9 +119,19 @@ spec:
             - name: gateway-tls
               mountPath: /var/run/kruntimes/gateway-tls
               readOnly: true
+            {{- if .Values.gateway.tls.clientCASecretName }}
+            - name: gateway-client-ca
+              mountPath: /var/run/kruntimes/gateway-client-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: gateway-tls
           secret:
             secretName: {{ include "kruntimes.gateway.tlsSecretName" . }}
+        {{- if .Values.gateway.tls.clientCASecretName }}
+        - name: gateway-client-ca
+          secret:
+            secretName: {{ .Values.gateway.tls.clientCASecretName }}
+        {{- end }}
           {{- end }}
 {{- end }}

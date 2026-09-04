@@ -87,7 +87,8 @@ runtimes 内提供 per-Run 沙箱隔离。
 | `delete` `runs` | 移除执行状态，并在存在 finalizer 时启动 artifact 清理。 |
 | `get`、`list` 或 `watch` `runs` | 读取 Run 对象上存储的源码引用、参数、环境变量值、执行状态、输出和 artifact 元数据。 |
 | `update` 或 `patch` `runs/status` | 控制调度和执行状态。保留给 kruntimes 控制平面 service accounts。 |
-| `create` `pods/portforward` 加上 `get` `pods` 和 `runs` | 通过 Kubernetes API 访问 Runtime Pod 的 runtimed 状态和 artifact endpoint，如 `krt logs` 和 artifact 下载所用。 |
+| `get` `runs` | 通过 Runtime Gateway 读取某个 Run 的日志。持有 `get pods/log` 的是 Gateway 自己的 ServiceAccount，而不是 caller。 |
+| `create` `pods/portforward` 加上 `get` `pods` 和 `runs` | 通过 Kubernetes API 访问 Runtime Pod artifact endpoint，如 artifact 下载所用。 |
 
 Kubernetes 不会将 Run 与引用的 Runtime 作为单独操作授权。如果主体可以在 namespace
 中创建 Run，它就可以请求该 namespace 中调度器可用的任何 Runtime 名称。
@@ -101,8 +102,8 @@ Kubernetes 不会将 Run 与引用的 Runtime 作为单独操作授权。如果�
   `spec.daemonImage` 和 artifact 凭据会影响生成的 Runtime Pods。
 - **Run 提交者** 可以创建和读取 `runs`。仅当他们也需取消时才授予 `update` 或 `patch`；
   这些 verbs 目前允许更广泛的 Run 变更。
-- **Run 观察者** 可以接收 `runs` 的只读访问。仅当允许他们读取 runtime 日志或 artifacts
-  时才添加 `pods/portforward`。
+- **Run 观察者** 可以接收 `runs` 的只读访问，其中包括经 Runtime Gateway 查看单个 Run
+  的日志。仅当允许他们直接从 Runtime Pods 下载 artifacts 时才添加 `pods/portforward`。
 - **控制平面 service accounts** 拥有状态变更权限。不要授予用户对 `runs/status` 或
   `runtimes/status` 的写入访问。
 

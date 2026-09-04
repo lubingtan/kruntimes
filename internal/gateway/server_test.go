@@ -418,6 +418,27 @@ func TestGatewayTLSConfigRejectsInvalidCertificate(t *testing.T) {
 	}
 }
 
+func TestGatewayTLSConfigEnablesOptionalClientCertificateVerification(t *testing.T) {
+	certificateFile, privateKeyFile := testTLSFiles(t)
+	config, err := (&Server{
+		TLSCertificateFile: certificateFile,
+		TLSPrivateKeyFile:  privateKeyFile,
+		TLSClientCAFile:    certificateFile,
+	}).tlsConfig()
+	if err != nil {
+		t.Fatalf("tlsConfig() error = %v", err)
+	}
+	if config.ClientAuth != tls.VerifyClientCertIfGiven || config.ClientCAs == nil {
+		t.Fatalf("client TLS configuration = %#v, want optional verified client certificates", config)
+	}
+}
+
+func TestGatewayTLSConfigRejectsClientCAWithoutHTTPS(t *testing.T) {
+	if _, err := (&Server{TLSClientCAFile: "client-ca.pem"}).tlsConfig(); err == nil || !strings.Contains(err.Error(), "TLS client CA requires") {
+		t.Fatalf("tlsConfig() error = %v, want client CA HTTPS error", err)
+	}
+}
+
 func TestGatewayHTTPSNegotiatesHTTP2(t *testing.T) {
 	certificateFile, privateKeyFile := testTLSFiles(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

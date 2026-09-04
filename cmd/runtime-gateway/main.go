@@ -38,6 +38,7 @@ func main() {
 		httpsAddr                  string
 		tlsCertificateFile         string
 		tlsPrivateKeyFile          string
+		tlsClientCAFile            string
 		authorizationCacheTTL      time.Duration
 		authorizationCacheCapacity int
 		maxConcurrentRequests      int
@@ -51,6 +52,7 @@ func main() {
 	flag.StringVar(&httpsAddr, "https-bind-address", "", "The address the Runtime gateway HTTPS API binds to. Empty disables HTTPS.")
 	flag.StringVar(&tlsCertificateFile, "tls-certificate-file", "", "PEM TLS certificate file for the Runtime gateway HTTP API. Both TLS file flags are required to enable HTTPS.")
 	flag.StringVar(&tlsPrivateKeyFile, "tls-private-key-file", "", "PEM TLS private key file for the Runtime gateway HTTP API. Both TLS file flags are required to enable HTTPS.")
+	flag.StringVar(&tlsClientCAFile, "tls-client-ca-file", "", "PEM client CA bundle for optional mTLS Kubernetes client-certificate authentication. Requires HTTPS.")
 	defaultAuthorizationCache := gateway.DefaultAuthorizationCacheOptions()
 	flag.DurationVar(&authorizationCacheTTL, "authorization-cache-ttl", defaultAuthorizationCache.TTL, "How long successful bearer-token authorization decisions remain cached; zero disables caching.")
 	flag.IntVar(&authorizationCacheCapacity, "authorization-cache-capacity", defaultAuthorizationCache.Capacity, "Maximum successful bearer-token authorization decisions retained; zero disables caching.")
@@ -107,6 +109,7 @@ func main() {
 		HTTPSAddress:          httpsAddr,
 		TLSCertificateFile:    tlsCertificateFile,
 		TLSPrivateKeyFile:     tlsPrivateKeyFile,
+		TLSClientCAFile:       tlsClientCAFile,
 		MaxConcurrentRequests: maxConcurrentRequests,
 		MaxRequestBodyBytes:   maxRequestBodyBytes,
 		MaxResponseBodyBytes:  maxResponseBodyBytes,

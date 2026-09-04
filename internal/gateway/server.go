@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,6 +77,9 @@ type Server struct {
 	// silently falls back to plain HTTP.
 	TLSCertificateFile string
 	TLSPrivateKeyFile  string
+	// TLSClientCAFile optionally enables mTLS. Client certificates signed by
+	// this CA are verified and authorized with their Kubernetes CN/O identity.
+	TLSClientCAFile string
 
 	// MaxConcurrentRequests bounds requests handled by one gateway Pod. Values
 	// less than one use the default. Health checks do not consume this limit.
@@ -181,6 +186,9 @@ func (s *Server) httpServer() *http.Server {
 
 func (s *Server) tlsConfig() (*tls.Config, error) {
 	if s.TLSCertificateFile == "" && s.TLSPrivateKeyFile == "" {
+		if s.TLSClientCAFile != "" {
+			return nil, errors.New("Runtime gateway TLS client CA requires TLS certificate and private key files")
+		}
 		return nil, nil
 	}
 	if s.TLSCertificateFile == "" || s.TLSPrivateKeyFile == "" {
@@ -190,7 +198,21 @@ func (s *Server) tlsConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load Runtime gateway TLS certificate: %w", err)
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}, nil
+	config := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}
+	if s.TLSClientCAFile == "" {
+		return config, nil
+	}
+	clientCA, err := os.ReadFile(s.TLSClientCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read Runtime gateway TLS client CA: %w", err)
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(clientCA) {
+		return nil, errors.New("Runtime gateway TLS client CA contains no certificates")
+	}
+	config.ClientAuth = tls.VerifyClientCertIfGiven
+	config.ClientCAs = clientCAs
+	return config, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

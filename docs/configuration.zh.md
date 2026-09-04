@@ -66,6 +66,27 @@ dashboard:
 `selfSigned`、已有 Secret 和 `certManager.enabled` 是互斥选择。Service 始终为 `ClusterIP`；
 ingress 或其它对外暴露需要单独配置。
 
+## Gateway client-certificate authentication
+
+Runtime Gateway 始终接受 Kubernetes bearer tokens。要让 `krt logs` 也能使用 kubeconfig
+client certificate，启用 Gateway HTTPS，并提供包含签发 Kubernetes user certificate 的 CA 的
+Secret key：
+
+```yaml
+gateway:
+  enabled: true
+  protocols:
+    - https
+  tls:
+    clientCASecretName: kubernetes-user-client-ca
+    clientCAKey: ca.crt
+```
+
+Gateway 请求 client certificate，但不强制要求它，因此 bearer tokens 仍可工作。提供的
+certificate 必须由该 CA 验证；其 X.509 CN 会成为 Kubernetes username，O values 会成为用于
+exact-Run SubjectAccessReview 的 groups。这与 Gateway server certificate 不同，通常应由单独管理
+的 Secret 提供。
+
 ### 公开资源列表
 
 启用 Dashboard 时，namespace、Run、Runtime 和 WorkflowRun **列表**默认无需 token 即可查看。
@@ -78,9 +99,8 @@ dashboard:
 ```
 
 chart 只给 Dashboard ServiceAccount 授予 `namespaces`、`runs`、`runtimes` 和 `workflowruns` 的
-`get`/`list` 权限。它们的详情仍必须使用 caller 的 bearer token。日志请求只会用 public-read
-client 定位 Run 对应的 assigned Pod；caller token 需要 `pods/log` 的 `get`，但仅读取日志时不需要
-`runs` 权限。
+`get`/`list` 权限。它们的详情仍必须使用 caller 的 bearer token。日志请求由 Runtime Gateway
+针对 exact Run 授权，因此 caller 需要该 `runs` resource 的 `get`，而不需要 `pods/log`。
 
 ## Runtime Capacity
 

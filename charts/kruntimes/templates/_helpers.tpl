@@ -114,6 +114,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- fail "gateway.tls.certManager.issuerRef.name is required when gateway.tls.certManager.enabled is true" -}}
 {{- end -}}
 {{- end -}}
+{{- if and .Values.gateway.tls.clientCASecretName (not .Values.gateway.tls.clientCAKey) -}}
+{{- fail "gateway.tls.clientCAKey is required when gateway.tls.clientCASecretName is set" -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 

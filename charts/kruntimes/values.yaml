@@ -98,6 +98,11 @@ gateway:
     certificateKey: tls.crt
     privateKeyKey: tls.key
     caBundleKey: ca.crt
+    # Optional Secret holding the CA that signs Kubernetes user client
+    # certificates. When set, the HTTPS Gateway accepts a verified client
+    # certificate and authorizes its CN/O with a SubjectAccessReview.
+    clientCASecretName: ""
+    clientCAKey: ca.crt
     certManager:
       enabled: false
       issuerRef:

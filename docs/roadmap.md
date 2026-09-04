@@ -489,8 +489,10 @@ wiring from accumulating avoidable conflicts.
       least-privilege Gateway ServiceAccount `get pods/log` permission;
     - [x] migrate Dashboard logs to the Gateway and remove its caller-scoped
       `pods/log` path;
-    - [ ] migrate `krt logs` to the Gateway and remove Runtime-Pod
+    - [x] migrate `krt logs` to the Gateway and remove Runtime-Pod
       `pods/portforward` and direct `pods/log` paths;
+    - [x] support opt-in Gateway mTLS authorization for kubeconfig client
+      certificates and an explicit development TLS-verification escape hatch;
     - [x] prove in E2E that `get runs` is sufficient for logs and is required.
     This remains an ordinary Gateway HTTP API, not a Kubernetes aggregation
     API server.

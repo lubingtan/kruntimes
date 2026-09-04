@@ -95,7 +95,8 @@ the Kubernetes resource name.
 | `delete` `runs` | Remove execution state and initiate artifact cleanup when finalizers are present. |
 | `get`, `list`, or `watch` `runs` | Read source references, arguments, environment values, execution status, outputs, and artifact metadata stored on the Run object. |
 | `update` or `patch` `runs/status` | Control scheduling and execution state. Reserve this for kruntimes control-plane service accounts. |
-| `create` `pods/portforward` plus `get` `pods` and `runs` | Reach a Runtime Pod's runtimed status and artifact endpoint through the Kubernetes API, as used by `krt logs` and artifact downloads. |
+| `get` `runs` | Read a specific Run's logs through the Runtime Gateway. The Gateway's own service account, not the caller, holds `get pods/log`. |
+| `create` `pods/portforward` plus `get` `pods` and `runs` | Reach a Runtime Pod artifact endpoint through the Kubernetes API, as used by artifact downloads. |
 
 Kubernetes does not authorize a Run against the referenced Runtime as a
 separate operation. If a subject can create a Run in a namespace, it can request
@@ -112,9 +113,9 @@ Use namespaced `Role` and `RoleBinding` objects for application users:
 - **Run submitters** may create and read `runs`. Grant `update` or `patch` only
   when they also need cancellation; those verbs currently permit broader Run
   mutation.
-- **Run observers** may receive read-only access to `runs`. Add
-  `pods/portforward` only when they are allowed to read runtime logs or
-  artifacts.
+- **Run observers** may receive read-only access to `runs`, which includes
+  per-Run logs through the Runtime Gateway. Add `pods/portforward` only when
+  they are allowed to download artifacts directly from Runtime Pods.
 - **Control-plane service accounts** own status mutation. Do not grant users
   write access to `runs/status` or `runtimes/status`.
 

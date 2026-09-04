@@ -1,14 +1,14 @@
 # Runtime Gateway Run Log API
 
-状态：**进行中**
+状态：**已实现**
 
 ## 问题
 
 Run output 会作为 structured records 写入 owner Runtime Pod 的 `runtimed` container log。
-当前 Dashboard 使用 caller 的 Kubernetes credential 读取该 Pod log；`krt logs` 则通常
-port-forward 到 Runtime Pod，并在主路径不可用时回退到相同的 Pod-log subresource。因此，一个
-可以读取 Run 的用户未必可以读取其日志：Dashboard 额外要求 `get pods/log`，而 `krt logs`
-的主路径还要求 Pod discovery 以及 `create pods/portforward`。
+在这个 API 之前，Dashboard 使用 caller 的 Kubernetes credential 读取该 Pod log；`krt logs`
+则 port-forward 到 Runtime Pod，并可能回退到相同的 Pod-log subresource。因此，可以读取 Run 的
+用户未必可以读取其日志：Dashboard 要求 `get pods/log`，而 `krt logs` 还需要 Pod discovery
+以及 `create pods/portforward`。
 
 这些是 Kubernetes 实现层权限，并不是 kruntimes 希望向用户提供的 capability：*读取这个 Run
 的日志*。
@@ -156,9 +156,26 @@ body。React frontend 消费该 response 的 `ReadableStream`，incrementally sp
 Gateway base URL 是 deployment configuration，而不是 Pod address。Dashboard backend 使用
 in-cluster Gateway Service；in-cluster `krt` client 可以使用该 Service DNS name。external `krt`
 client 必须获得 operator-managed、可达的 Gateway URL 及其 TLS trust material（例如
-`--gateway-url` 加 normal system trust store 或 CA file）。它不能静默创建 Runtime-Pod 或 Gateway
-Pod port-forward，否则会重新引入 caller `pods/portforward` requirement。chart 默认仍将 Gateway
-保持为 ClusterIP；是否暴露给集群外是另一个 operator deployment decision。
+`--gateway-url` 加 normal system trust store 或 `--gateway-ca-file`）。它不静默创建
+Runtime-Pod 或 Gateway Pod port-forward，否则会重新引入 caller `pods/portforward` requirement。
+chart 默认仍将 Gateway 保持为 ClusterIP；是否暴露给集群外是另一个 operator deployment decision。
+
+`krt logs` 同时为初始 `get runs` request 和 Gateway request 使用 kubeconfig 所选的 bearer token
+或 exec-token credential：
+
+```sh
+krt logs my-run -n team-a --gateway-url https://gateway.example \
+  --gateway-ca-file ./gateway-ca.crt --tail 100 --follow
+```
+
+它使用独立的 Gateway TLS transport，信任 normal system store 或 `--gateway-ca-file`；
+`--gateway-insecure-skip-tls-verify` 是明确的 development-only escape hatch。transport 会在
+kubeconfig 包含 client certificate 时保留它。要授权该 certificate，operator 将签发 Kubernetes
+user certificate 的 CA Secret 配置为 `gateway.tls.clientCASecretName`。HTTPS Gateway 验证 mTLS，
+并将已验证 certificate 的 CN 作为 Kubernetes username、O values 作为 groups 创建
+SubjectAccessReview。未配置 Gateway client CA 时，bearer 和 exec tokens 仍是支持的认证方式。
+`--tail` 默认为 100，范围为 1 至 500。CLI 解码文档定义的 JSON/NDJSON records，只将
+`stdout` 和 `stderr` records 分别写到对应的 terminal streams。
 
 当 HTTP 已启用（包括两种协议都启用）时，Dashboard chart 优先使用 Gateway 的 in-cluster
 HTTP Service port。仅 HTTPS 的部署中，它只读挂载已配置的 Gateway CA-bundle key，并用该
@@ -231,16 +248,15 @@ Kubernetes authorization detail。
 
 ## Client Migration 和交付
 
-现有 Dashboard endpoint 仍是内部 Dashboard API。在 Gateway endpoint 与 chart RBAC 就绪后，
-其 backend 将使用 login token 调用这个 Gateway endpoint。`krt logs` 将调用同一 endpoint，
-不再 port-forward Runtime Pods 或回退到直接 `pods/log`。迁移完成后，两个 client 都不能静默
-保留旧的特权路径。
+现有 Dashboard endpoint 仍是内部 Dashboard API。其 backend 使用 login token 调用这个 Gateway
+endpoint。`krt logs` 调用同一 endpoint，不再 port-forward Runtime Pods 或回退到直接
+`pods/log`。两个 client 都不保留旧的特权路径。
 
-Gateway chart component 是 opt-in；当此 API 不可用时，Dashboard 和 `krt logs` 必须返回明确的
-configuration error，不能回退到直接 Pod access。operator 在新模型下启用 Dashboard log access
+Gateway chart component 是 opt-in；当此 API 不可用时，Dashboard 和 `krt logs` 返回明确的
+configuration error，不能回退到直接 Pod access。operator 在该模型下启用 Dashboard log access
 时，也必须启用并使 Gateway 可达。标准 E2E installation 同时启用两个组件。
 
-交付拆分为可以独立 review 的 commits：
+实现拆分为可以独立 review 的 commits：
 
 1. Gateway route、structured-record filtering/bounds、ServiceAccount `pods/log` permission、
    HTTP/1.1 与 HTTPS/HTTP/2 streaming setup、follow-stream flush/disconnect tests，以及 Helm

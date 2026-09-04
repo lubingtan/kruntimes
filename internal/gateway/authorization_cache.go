@@ -17,7 +17,8 @@ const (
 	defaultAuthorizationCacheTTL      = 30 * time.Second
 )
 
-// AuthorizationCacheOptions bounds cached successful bearer-token decisions.
+// AuthorizationCacheOptions bounds cached successful bearer-token or verified
+// client-certificate decisions.
 // A zero or negative TTL or capacity disables caching.
 type AuthorizationCacheOptions struct {
 	Capacity int
@@ -33,7 +34,8 @@ func DefaultAuthorizationCacheOptions() AuthorizationCacheOptions {
 }
 
 // CachingAuthorizer caches only successful authorization decisions. It stores
-// a token digest, never the bearer token or Kubernetes user identity.
+// a credential digest, never the bearer token, client certificate, or
+// Kubernetes user identity.
 type CachingAuthorizer struct {
 	authorizer Authorizer
 	cache      *authorizationDecisionCache
@@ -69,25 +71,29 @@ func (a *CachingAuthorizer) Authorize(ctx context.Context, request *http.Request
 }
 
 type authorizationCacheKey struct {
-	tokenDigest [sha256.Size]byte
-	namespace   string
-	name        string
-	uid         string
+	credentialDigest [sha256.Size]byte
+	namespace        string
+	name             string
+	uid              string
 }
 
 func authorizationCacheKeyForRequest(request *http.Request, run *v1alpha1.Run) (authorizationCacheKey, bool) {
 	if request == nil || run == nil || run.UID == "" {
 		return authorizationCacheKey{}, false
 	}
-	token, ok := bearerToken(request.Header.Get("Authorization"))
-	if !ok {
+	var credential []byte
+	if token, ok := bearerToken(request.Header.Get("Authorization")); ok {
+		credential = []byte(token)
+	} else if certificate := verifiedClientCertificate(request); certificate != nil {
+		credential = certificate.Raw
+	} else {
 		return authorizationCacheKey{}, false
 	}
 	return authorizationCacheKey{
-		tokenDigest: sha256.Sum256([]byte(token)),
-		namespace:   run.Namespace,
-		name:        run.Name,
-		uid:         string(run.UID),
+		credentialDigest: sha256.Sum256(credential),
+		namespace:        run.Namespace,
+		name:             run.Name,
+		uid:              string(run.UID),
 	}, true
 }
 

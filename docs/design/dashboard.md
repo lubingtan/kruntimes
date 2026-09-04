@@ -118,43 +118,26 @@ Future versions can add PersistentWorkspace detail pages and metrics panels.
 
 The dashboard backend must not expose Runtime Pods directly to browsers.
 
-For v0.x, the expected path is:
+For v0.x, the implemented path is:
 
 1. The user opens logs for a Run.
-2. The narrow public-read client reads the Run only to locate its assigned
-   Runtime Pod.
-3. The user token authorizes the Pod `log` subresource request.
-4. The backend streams or returns the requested log tail.
-
-The exact transport can evolve. It may use Kubernetes port-forwarding, an
-internal service, or a dedicated log proxy, but the boundary should stay the
-same: the user needs access to runtime logs, while the narrow service account
-performs only the Run-to-Pod lookup.
+2. The Dashboard backend uses the caller token to read and authorize that
+   exact Run.
+3. The backend forwards the token only to the Runtime Gateway Run-log API.
+4. The Gateway resolves the assigned Runtime Pod and reads its `runtimed`
+   log with its own narrow `pods/log` permission.
+5. The backend streams or returns the requested filtered log records.
 
 Structured runtimed logs should remain keyed by Run UID so the dashboard can
 show the correct logs even when Runtime Pods handle multiple Runs.
 
-For v0.x, the backend uses the public-read client to resolve the assigned Pod,
-then reads that Pod's runtimed container log subresource through the
-request-scoped caller client. It returns only structured records whose
-run_uid matches the requested immutable Run UID. It does not create a
-browser-visible port-forward or expose Runtime Pods directly. The caller
-therefore needs `get` on the Pod `log` subresource, but does not need Run or
-Pod read permission merely to retrieve logs. Artifact references are shown as
-Run metadata; artifact downloads are outside the first Dashboard slice.
-
-### Planned: Unified Run Log Authorization
-
-The current `pods/log` authorization is an implementation-level Kubernetes
-permission, not the desired user-facing Run-log capability. It is also not
-consistent with `krt logs`, whose current primary path requires Run access and
-Pod port-forward access. A follow-up will make the shared Runtime Gateway the
-single Run-log API for Dashboard and `krt`. The complete proposed endpoint,
-authorization, bounds, error, and migration contract is in the [Runtime
-Gateway Run Log API design](runtime-gateway-log-api.md).
-
-Until that migration is implemented, Dashboard log access continues to require
-the caller's `get pods/log` permission.
+The Dashboard uses the in-cluster Gateway Service and does not create a
+browser-visible port-forward or expose Runtime Pods directly. The caller needs
+`get` on the exact Run, not `get pods/log`; the Gateway ServiceAccount
+performs the narrow Pod-log read. Artifact references are shown as Run metadata;
+artifact downloads are outside the first Dashboard slice. The complete endpoint,
+authorization, bounds, error, and migration contract is in the [Runtime Gateway
+Run Log API design](runtime-gateway-log-api.md).
 
 ## Security Model
 
@@ -172,9 +155,8 @@ The proposed v0.x production model is Kubernetes bearer-token login:
 - the chart's narrowly privileged Dashboard ServiceAccount supplies tokenless
   namespace, Run, Runtime, and WorkflowRun summaries by default. It has only
   `get`/`list` on those resources and can be disabled explicitly;
-- Kubernetes API authorization decides protected-page access. A token with no
-  Run permission can still read logs if it has `get` on `pods/log`: the
-  service account resolves the Run-to-Pod mapping without exposing Run detail;
+- Kubernetes API authorization decides protected-page access. A token needs
+  `get` on the exact Run to read its logs through the Gateway;
 - v0.x shows artifact references as Run metadata but does not download or proxy
   artifact content. A future artifact-download design must define its
   authorization and external-store boundary separately;
