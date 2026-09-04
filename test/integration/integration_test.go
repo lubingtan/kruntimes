@@ -99,7 +99,7 @@ func TestMain(m *testing.M) {
 	functionRuntimeServer := grpc.NewServer()
 	pb.RegisterRuntimeServer(functionRuntimeServer, integrationUnavailableRuntime{})
 	pb.RegisterFunctionRuntimeServer(functionRuntimeServer, functionRuntime)
-	functionRuntimeListener, err := net.Listen("tcp", "localhost:19091")
+	functionRuntimeListener, err := net.Listen("tcp", "127.0.0.1:19091")
 	if err != nil {
 		panic("failed to listen for Function Runtime: " + err.Error())
 	}
@@ -120,7 +120,7 @@ func TestMain(m *testing.M) {
 		Client:          testMgr.GetClient(),
 		Log:             ctrl.Log.WithName("runtimed"),
 		PodName:         "test-runtimed-pod",
-		RuntimeEndpoint: "localhost:19091",
+		RuntimeEndpoint: "127.0.0.1:19091",
 		WorkspacePath:   integrationWorkspacePath,
 		Workers:         1,
 	}).SetupWithManager(testMgr); err != nil {
@@ -161,6 +161,10 @@ type integrationFunctionRuntime struct {
 // registered on the same test server for the Function lifecycle test below.
 type integrationUnavailableRuntime struct {
 	pb.UnimplementedRuntimeServer
+}
+
+func (integrationUnavailableRuntime) Health(context.Context, *pb.HealthRequest) (*pb.HealthResponse, error) {
+	return &pb.HealthResponse{Healthy: true}, nil
 }
 
 func (integrationUnavailableRuntime) Execute(context.Context, *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
