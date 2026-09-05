@@ -291,8 +291,34 @@ The first version should keep the UI narrow and operational:
 - logs panel with tail and follow controls;
 - links to related Runtime Pod metadata when the user has permission.
 
+The WorkflowRun detail page renders `spec.jobs[*].needs` as a read-only,
+GitHub Actions-style staged DAG: root jobs appear in the leftmost stage, each
+dependency advances a job to a later stage, and SVG edges visibly connect the
+dependency to its consumer. A stage groups its parallel job rows in one card;
+a node with multiple dependencies visibly joins its incoming edges. Each row
+shows its observed phase and bounded `status.jobs[*].outputs.result` when
+present.
+
+Selecting a job navigates to the bookmarkable frontend route
+`/namespaces/{namespace}/workflowruns/{workflowrun}/jobs/{job}`. That detail
+page provides an all-jobs navigation rail and an expandable step list. Opening
+a step with a child Run automatically requests the existing Run-log endpoint;
+the browser never receives a Pod endpoint or a Kubernetes credential. The
+graph and detail pages are views of the declared execution DAG, and must not
+offer mutation or graph-editing controls. On narrow viewports the graph may
+scroll horizontally instead of dropping dependency information.
+
 It should not include mutation buttons until the read-only authorization model
 is proven.
+
+The visual language is neumorphism: a shared material color, upper-left highlights
+and lower-right shadows give panels, DAG groups, and buttons a subtle raised
+surface. Inputs, selected navigation/tabs, pressed buttons, and expanded Steps
+use inset shadows. Light, Dark, and System themes share semantic color and depth
+tokens; System follows the browser's color-scheme preference. Dense table rows,
+status indicators, and log lines stay flat and readable, with visible keyboard
+focus and reduced-motion support. The styling does not change Job routes,
+dependency edges, or automatic log loading when expanding a Step.
 
 The frontend is React and TypeScript, built into static assets packaged beside
 the Dashboard backend in its image and served from the same HTTPS origin as its internal API.

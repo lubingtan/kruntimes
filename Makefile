@@ -173,6 +173,15 @@ e2e-setup: manifests docker-build docker-build-diagnosis-runtime ## Create kind 
 		--set dashboard.image=$(E2E_IMG_DASHBOARD) \
 		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s $(E2E_GATEWAY_HELM_ARGS)
 
+KIND_CLUSTER_NAME ?= kruntimes-e2e
+e2e-setup-runtimes:
+	kind load docker-image $(E2E_IMG_BASH_RUNTIME) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(E2E_IMG_PYTHON_RUNTIME) --name $(KIND_CLUSTER_NAME)
+	$(HELM) upgrade --install kruntimes-runtimes ./charts/kruntimes-runtimes \
+		--set bash.image=$(E2E_IMG_BASH_RUNTIME) \
+		--set python.image=$(E2E_IMG_PYTHON_RUNTIME) \
+		--namespace $(NAMESPACE) --create-namespace --wait --timeout 120s
+
 .PHONY: e2e-test
 e2e-test: generate ## Run E2E tests against the kind cluster.
 	KRUNTIMES_BASH_RUNTIME_IMAGE=$(E2E_IMG_BASH_RUNTIME) \

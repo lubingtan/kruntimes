@@ -481,6 +481,10 @@ wiring from accumulating avoidable conflicts.
   - [x] add read-only frontend views for namespace selection, bookmarkable Run
     lists/details/logs, Runtime pool and Pod views, and WorkflowRun DAG/job/step
     views;
+  - [ ] render WorkflowRun job dependencies as a GitHub Actions-style staged
+    DAG with visible edges, parallel branches, joins, and status/result
+    summaries; move each job to a bookmarkable detail page with expandable,
+    automatically loaded step logs;
   - [x] add optional Helm installation support in the `kruntimes` chart;
   - [x] deploy the Dashboard in the standard E2E environment.
   - [x] unify Dashboard and `krt logs` behind the [Runtime Gateway Run-log

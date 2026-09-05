@@ -256,7 +256,27 @@ Run list endpoint 应尽量支持 server-side pagination 和过滤：
 - logs panel，包含 tail 和 follow controls；
 - 当用户有权限时，链接到相关 Runtime Pod metadata。
 
+WorkflowRun detail page 会将 `spec.jobs[*].needs` 渲染为只读的 GitHub Actions-style staged DAG：
+root jobs 位于最左 stage，每条 dependency 都会把 consumer 放到更靠后的 stage，SVG edges 会清晰连接
+dependency 与 consumer。一个 stage 会在同一个 card 中聚合 parallel job rows；有多个 dependencies 的
+node 会可见地汇合 incoming edges。每个 row 展示 observed phase，并在存在时展示有界的
+`status.jobs[*].outputs.result`。
+
+选择 job 会进入可 bookmark 的 frontend route：
+`/namespaces/{namespace}/workflowruns/{workflowrun}/jobs/{job}`。该 detail page 提供 all-jobs
+navigation rail 和可展开的 step list。打开具有 child Run 的 step 时，会自动请求已有的 Run-log endpoint；
+browser 永远不会得到 Pod endpoint 或 Kubernetes credential。graph 和 detail pages 都只是 declared
+execution DAG 的视图，不能提供 mutation 或 graph-editing controls；在窄屏幕上 graph 可以水平滚动，不能
+丢失 dependency information。
+
 在只读授权模型被验证之前，不应加入 mutation buttons。
+
+视觉风格采用 neumorphism（新拟态）：以统一材质底色、左上高光和右下暗影，
+让面板、DAG 分组和按钮呈现轻微凸起。输入框、选中的导航／Tab、按下的按钮和
+展开的 Step 使用凹陷阴影。Light、Dark、System 主题共用语义颜色及深度变量；
+System 跟随浏览器的颜色偏好。密集表格行、状态标记和日志行保持平面和清晰可读，
+保留可见的键盘焦点，并支持减少动态效果。样式调整不改变 Job 路由、依赖连线，
+也不改变展开 Step 自动加载日志的行为。
 
 frontend 使用 React 和 TypeScript，构建为与 Dashboard backend 一同打包到镜像中的静态 assets，并与内部 API 从
 同一 HTTPS origin 提供。source、backend、process entrypoint 和 image definition 都位于顶层

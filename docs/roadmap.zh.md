@@ -402,6 +402,9 @@ controller wiring 累积不必要的冲突。
     以及 light/dark/system theme selection；
   - [x] 增加只读 frontend views，覆盖 namespace selection、可 bookmark 的 Run
     lists/details/logs、Runtime pool/Pod views 以及 WorkflowRun DAG/job/step views；
+  - [ ] 将 WorkflowRun job dependencies 渲染为 GitHub Actions-style staged DAG，展示可见
+    edges、parallel branches、joins 和 status/result summaries；每个 job 使用可 bookmark 的
+    detail page，并提供可展开且自动加载 step logs 的视图；
   - [x] 在 `kruntimes` chart 中增加可选 Helm installation support；
   - [x] 在标准 E2E environment 中部署 Dashboard。
   - [x] 通过 [Runtime Gateway Run-log API](design/runtime-gateway-log-api.zh.md) 统一

@@ -17,6 +17,7 @@ spec:
       containers:
         - name: runtime
           image: {{ include "kruntimes-runtimes.image" (list . .Values.bash.image) }}
+          imagePullPolicy: IfNotPresent
           args:
             - --port={{ .Values.bash.port }}
             - --work-dir=/workspace
