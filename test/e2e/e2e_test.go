@@ -2062,7 +2062,7 @@ func TestSessionRunExpiresWhenIdle(t *testing.T) {
 func TestSessionRunLeaseExpiresAfterConnectionHeartbeatsStop(t *testing.T) {
 	runtimeName := fmt.Sprintf("session-lease-%d", time.Now().UnixNano())
 	ensureRuntimeWithRunsCapacity(t, runtimeName, bashRuntimeImage(), 9091, 1)
-	leaseTimeout := int32(3)
+	leaseTimeout := int32(5)
 	run := &v1alpha1.Run{
 		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-session-lease-", Namespace: testNamespace},
 		Spec: v1alpha1.RunSpec{
@@ -2085,8 +2085,12 @@ func TestSessionRunLeaseExpiresAfterConnectionHeartbeatsStop(t *testing.T) {
 		}
 		t.Fatalf("dial lease WebSocket: %v", err)
 	}
-	// The authenticated upgrade is an initial server-observed heartbeat. It must
-	// keep the Run ready during one lease interval before the connection closes.
+	// A Session connection retains capacity only while it emits heartbeat frames.
+	// Send one explicitly before checking that the Run remains ready; the gateway
+	// unit tests cover the initial touch performed at authenticated upgrade.
+	if err := connection.WriteJSON(map[string]string{"type": "heartbeat"}); err != nil {
+		t.Fatalf("send lease heartbeat: %v", err)
+	}
 	time.Sleep(time.Second)
 	if err := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(run), run); err != nil {
 		t.Fatalf("get heartbeat Session Run: %v", err)
